@@ -36,6 +36,12 @@ def summarize(compact_table: Path, budget_cube: Path, output_dir: Path) -> dict:
     ]
     frame = pd.read_parquet(compact_table, columns=columns)
     frame["split"] = frame["split"].replace({"validation": "val"})
+    budget_values = np.asarray(BUDGET_BUCKETS)
+    raw_budget = frame["oracle_min_keep_ratio"].to_numpy()
+    nearest_budget = np.argmin(
+        np.abs(raw_budget[:, None] - budget_values[None, :]), axis=1
+    )
+    frame["oracle_budget_bucket"] = budget_values[nearest_budget]
     frame["timestep_bucket"] = pd.cut(
         frame["dit_index"],
         bins=(-1, 2, 4, 7),
@@ -116,13 +122,14 @@ def summarize(compact_table: Path, budget_cube: Path, output_dir: Path) -> dict:
     split = (
         frame.groupby("split", observed=True)
         .agg(
-            requests=("source_episode_index", "nunique"),
+            episodes=("source_episode_index", "nunique"),
+            requests=("request_key", "nunique"),
             oracle_mean=("oracle_min_keep_ratio", "mean"),
             dense_rate=("oracle_min_keep_ratio", lambda value: (value == 1.0).mean()),
         )
         .reset_index()
     )
-    label_counts = frame["oracle_min_keep_ratio"].value_counts().sort_index()
+    label_counts = frame["oracle_budget_bucket"].value_counts().sort_index()
 
     cube = np.load(budget_cube)
     mean_budget = cube["mean_budget"]

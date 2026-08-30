@@ -21,7 +21,7 @@ def test_oracle_feature_summary_preserves_u_shaped_layer_evidence(tmp_path):
                             "dit_index": dit_index,
                             "layer_index": layer_index,
                             "head_index": head_index,
-                            "oracle_min_keep_ratio": budget,
+                            "oracle_min_keep_ratio": np.float32(budget),
                             "video_oracle_min_keep_ratio": budget,
                             "action_oracle_min_keep_ratio": budget,
                             "support_turnover_max": 0.1,
@@ -48,5 +48,9 @@ def test_oracle_feature_summary_preserves_u_shaped_layer_evidence(tmp_path):
     assert layers[1]["oracle_mean"] < layers[0]["oracle_mean"] < layers[2]["oracle_mean"]
     assert summary["overall"]["fixed_20pct_worst_mass_p05_pass_rate"] == 1 / 3
     assert {row["split"] for row in summary["split"]} == {"train", "val", "test"}
+    assert sum(
+        bucket["count"] for bucket in summary["budget_distribution"].values()
+    ) == len(rows)
+    assert all(row["requests"] == 1 for row in summary["split"])
     saved = json.loads((tmp_path / "output" / "oracle_feature_summary.json").read_text())
     assert saved["row_count"] == len(rows)
