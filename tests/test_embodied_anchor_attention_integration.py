@@ -5,7 +5,13 @@ import types
 import torch
 import torch.nn as nn
 
-from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import AnchorSparseConfig
+from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
+    AnchorRoute,
+    AnchorSparseConfig,
+)
+from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicPackedBudgetTable,
+)
 
 
 def _load_attention_module():
@@ -658,6 +664,46 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert not any(block.sparse_current_compute for block in model.blocks)
     assert not any(block.sparse_current_attention for block in model.blocks)
 
+    dynamic_table = DynamicPackedBudgetTable.constant(
+        num_dit_steps=8,
+        num_layers=2,
+        history_keep_ratio=0.20,
+        current_keep_ratio=0.25,
+    )
+    model.configure_dynamic_packed_budget_table(dynamic_table)
+    model.set_dynamic_attention_oracle_step(
+        scheduler_index=0,
+        dit_index=0,
+        scheduler_steps=16,
+        timestep=999,
+    )
+    assert model._packed_budget_ratios_for_layer(1) == (0.20, 0.25)
+    route = AnchorRoute(
+        video_indices=torch.arange(3 * 880).reshape(1, -1),
+        scores=torch.randn(1, 3, 880),
+        num_video_frames=3,
+        num_dense_frames=2,
+        anchor_tokens_per_sparse_frame=176,
+    )
+    _, _, history_indices, history_token_count = model._prepare_packed_anchor_profiles(
+        route=route,
+        current_frames=2,
+        cache_key=("test",),
+        history_keep_ratios=(0.20, 0.50),
+    )
+    _, _, reused_indices, _ = model._prepare_packed_anchor_profiles(
+        route=route,
+        current_frames=2,
+        cache_key=("test",),
+        history_keep_ratios=(0.20, 0.50),
+    )
+    assert history_token_count == 880
+    assert torch.equal(
+        history_indices[0.20],
+        history_indices[0.50][:, : history_indices[0.20].shape[1]],
+    )
+    assert reused_indices[0.20] is history_indices[0.20]
+
     model.configure_anchor_sparse_attention(
         enabled=True,
         keep_ratio=1.0,
@@ -665,6 +711,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         packed_middle=True,
     )
     assert not model.anchor_sparse_packed_middle
+    assert model._dynamic_packed_budget_table is None
     assert not any(block.self_attn.record_anchor_diagnostics for block in model.blocks)
 
     model.configure_anchor_sparse_attention(enabled=False)

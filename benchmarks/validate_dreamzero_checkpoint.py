@@ -20,6 +20,9 @@ import torch
 import torch.distributed as dist
 
 from groot.vla.model.dreamzero.base_vla import VLA
+from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicPackedBudgetTable,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +71,8 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument("--dynamic-budget-table", type=Path)
+    parser.add_argument("--dynamic-budget-dit-index", type=int, default=0)
     parser.add_argument(
         "--update-kv-cache",
         action=argparse.BooleanOptionalAction,
@@ -300,6 +305,10 @@ def main() -> None:
         raise ValueError("Packed Middle Stack timing requires --no-update-kv-cache")
     if args.packed_middle and args.propagate_radius > 0:
         raise ValueError("Packed Middle Stack does not support per-layer propagation")
+    if args.dynamic_budget_table is not None and not args.packed_middle:
+        raise ValueError("Dynamic budget tables require --packed-middle")
+    if not 0 <= args.dynamic_budget_dit_index < 8:
+        raise ValueError("dynamic-budget-dit-index must lie in [0, 7]")
     if args.packed_middle and (
         args.attention_query_keep_ratios != args.current_keep_ratios
     ):
@@ -355,6 +364,11 @@ def main() -> None:
         args.dense_suffix_layer_candidates[candidate_index]
         if args.dense_suffix_layer_candidates is not None
         else args.dense_suffix_layers
+    )
+    dynamic_budget_table = (
+        DynamicPackedBudgetTable.from_json(args.dynamic_budget_table)
+        if args.dynamic_budget_table is not None
+        else None
     )
 
     with torch.inference_mode():
@@ -432,6 +446,16 @@ def main() -> None:
             packed_middle=args.packed_middle,
             record_diagnostics=True,
         )
+        if dynamic_budget_table is not None:
+            diffusion_model.configure_dynamic_packed_budget_table(dynamic_budget_table)
+            diffusion_model.set_dynamic_attention_oracle_step(
+                scheduler_index=(0, 1, 2, 6, 10, 13, 14, 15)[
+                    args.dynamic_budget_dit_index
+                ],
+                dit_index=args.dynamic_budget_dit_index,
+                scheduler_steps=16,
+                timestep=0,
+            )
         sparse_samples, sparse_output = timed_forwards(
             diffusion_model,
             timing_inputs,
@@ -515,6 +539,16 @@ def main() -> None:
         "reuse_denoise": args.reuse_denoise,
         "current_attention": args.current_attention,
         "packed_middle": args.packed_middle,
+        "dynamic_budget_table": (
+            str(args.dynamic_budget_table)
+            if args.dynamic_budget_table is not None
+            else None
+        ),
+        "dynamic_budget_dit_index": (
+            args.dynamic_budget_dit_index
+            if args.dynamic_budget_table is not None
+            else None
+        ),
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,
