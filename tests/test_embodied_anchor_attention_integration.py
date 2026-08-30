@@ -173,6 +173,7 @@ def test_packed_attention_full_current_budget_matches_dense_path() -> None:
         action_register_length=3,
         kv_cache=cache,
         history_indices=torch.arange(cache.shape[2]).reshape(1, -1),
+        history_token_count=cache.shape[2],
     )
 
     assert torch.allclose(packed_output, dense_output, atol=1e-6, rtol=1e-6)
@@ -203,6 +204,7 @@ def test_packed_attention_projects_only_effective_tokens():
             action_register_length=3,
             kv_cache=cache,
             history_indices=torch.tensor([[1, 3, 5, 7]]),
+            history_token_count=cache.shape[2],
         )
     finally:
         for hook in hooks:
@@ -210,6 +212,85 @@ def test_packed_attention_projects_only_effective_tokens():
 
     assert output.shape == packed_x.shape
     assert projected_lengths == [5, 5, 5]
+
+
+def test_packed_attention_does_not_expand_dense_history_window() -> None:
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    cache = torch.arange(2 * 1 * 12 * 2 * 4, dtype=torch.float32).reshape(
+        2, 1, 12, 2, 4
+    )
+    history_indices = torch.tensor([[0, 7]])
+
+    attention.forward_packed(
+        torch.randn(1, 5, 8),
+        torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=8,
+    )
+
+    expected = cache[0, :, -8:][:, [0, 7]]
+    assert torch.equal(attention._anchor_sparse_history_k, expected)
+
+
+def test_complete_packed_block_matches_dense_at_full_budget() -> None:
+    module = _load_attention_module()
+    dense = module.CausalWanAttentionBlock(
+        cross_attn_type="t2v_cross_attn",
+        dim=8,
+        ffn_dim=16,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    packed = module.CausalWanAttentionBlock(
+        cross_attn_type="t2v_cross_attn",
+        dim=8,
+        ffn_dim=16,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    packed.load_state_dict(dense.state_dict())
+    x, cache, freqs = _inputs()
+    e0 = torch.randn(1, x.shape[1], 6, 8)
+    context = torch.randn(1, 5, 8)
+
+    dense_output, dense_cache, _ = dense(
+        x,
+        e0,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        context=context,
+        kv_cache=cache,
+        current_start_frame=1,
+        update_kv_cache=False,
+    )
+    packed_output = packed.forward_packed(
+        x,
+        e0,
+        torch.ones((1, x.shape[1], 1, 2), dtype=torch.complex128),
+        action_register_length=3,
+        context=context,
+        kv_cache=cache,
+        history_indices=torch.arange(cache.shape[2]).reshape(1, -1),
+        history_token_count=cache.shape[2],
+    )
+
+    assert dense_cache is None
+    assert torch.allclose(packed_output, dense_output, atol=1e-6, rtol=1e-6)
 
 
 def test_oracle_observes_dense_video_action_layout_without_changing_output() -> None:
@@ -544,8 +625,44 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model.blocks[0].current_propagate_radius == 0
     assert model.blocks[1].current_propagate_radius == 1
 
+    model.configure_anchor_sparse_attention(
+        enabled=True,
+        keep_ratio=0.2,
+        current_keep_ratio=0.25,
+        attention_query_keep_ratio=0.25,
+        dense_prefix_layers=1,
+        dense_suffix_layers=0,
+        propagate_radius=0,
+        current_attention=True,
+        packed_middle=True,
+        probe_dim=2,
+        num_router_heads=1,
+        smooth_radius=0,
+    )
+    assert model.anchor_sparse_packed_middle
+    assert model.anchor_sparse_config is not None
+    assert model.anchor_sparse_config.keep_ratio == 0.2
+    assert all(
+        block.self_attn.anchor_sparse_config is not None
+        and block.self_attn.anchor_sparse_config.keep_ratio == 1.0
+        for block in model.blocks
+    )
+    assert model.blocks[0].self_attn.record_anchor_diagnostics
+    assert not any(block.sparse_current_compute for block in model.blocks)
+    assert not any(block.sparse_current_attention for block in model.blocks)
+
+    model.configure_anchor_sparse_attention(
+        enabled=True,
+        keep_ratio=1.0,
+        current_keep_ratio=1.0,
+        packed_middle=True,
+    )
+    assert not model.anchor_sparse_packed_middle
+    assert not any(block.self_attn.record_anchor_diagnostics for block in model.blocks)
+
     model.configure_anchor_sparse_attention(enabled=False)
     assert model.anchor_sparse_config is None
+    assert not model.anchor_sparse_packed_middle
     assert all(block.self_attn.anchor_sparse_config is None for block in model.blocks)
     assert not any(block.sparse_current_compute for block in model.blocks)
     assert not any(block.sparse_current_attention for block in model.blocks)

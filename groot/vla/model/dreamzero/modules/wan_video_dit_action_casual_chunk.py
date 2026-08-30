@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any, TypeAlias
 
 from groot.vla.model.dreamzero.modules.wan2_1_attention import AttentionModule
@@ -11,7 +12,15 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     route_action_conditioned_video_keys,
     scatter_sequence_by_index,
 )
-from groot.vla.model.dreamzero.modules.dynamic_packed_sparse import apply_packed_rope
+from groot.vla.model.dreamzero.modules.dynamic_packed_sparse import (
+    NestedAnchorProfile,
+    PackedMiddleState,
+    apply_packed_rope,
+    build_nested_current_profile,
+    build_nested_history_profile,
+    gather_packed_rope_frequencies,
+    pack_middle_state,
+)
 from groot.vla.model.n1_5.modules.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
@@ -392,6 +401,7 @@ class CausalWanSelfAttention(nn.Module):
         action_register_length: int,
         kv_cache: torch.Tensor,
         history_indices: torch.Tensor,
+        history_token_count: int,
     ) -> torch.Tensor:
         """Run Q/K/V/O only on packed current tokens plus Dense registers.
 
@@ -410,6 +420,8 @@ class CausalWanSelfAttention(nn.Module):
             raise ValueError("kv_cache must have shape [2, B, L, H, D]")
         if history_indices.ndim != 2 or history_indices.shape[0] != x.shape[0]:
             raise ValueError("history_indices must have shape [B, K]")
+        if not 0 <= history_token_count <= kv_cache.shape[2]:
+            raise ValueError("history_token_count exceeds the immutable KV cache")
         batch, sequence, _ = x.shape
         query = self.norm_q(self.q(x)).view(
             batch, sequence, self.num_heads, self.head_dim
@@ -421,16 +433,14 @@ class CausalWanSelfAttention(nn.Module):
         query = apply_packed_rope(query, packed_freqs).type_as(value)
         key = apply_packed_rope(key, packed_freqs).type_as(value)
 
-        current_video_tokens = sequence - action_register_length
-        history_capacity = max(0, self.max_attention_size - current_video_tokens)
         history_key = (
-            kv_cache[0, :, -history_capacity:]
-            if history_capacity > 0
+            kv_cache[0, :, -history_token_count:]
+            if history_token_count > 0
             else kv_cache[0, :, :0]
         )
         history_value = (
-            kv_cache[1, :, -history_capacity:]
-            if history_capacity > 0
+            kv_cache[1, :, -history_token_count:]
+            if history_token_count > 0
             else kv_cache[1, :, :0]
         )
         if history_indices.numel():
@@ -1661,6 +1671,7 @@ class CausalWanAttentionBlock(nn.Module):
         context: torch.Tensor,
         kv_cache: torch.Tensor,
         history_indices: torch.Tensor,
+        history_token_count: int,
     ) -> torch.Tensor:
         """Keep a packed current-token state through one complete DiT block."""
 
@@ -1674,6 +1685,7 @@ class CausalWanAttentionBlock(nn.Module):
             action_register_length=action_register_length,
             kv_cache=kv_cache,
             history_indices=history_indices,
+            history_token_count=history_token_count,
         )
         x = x + y * modulation[2].squeeze(2)
         x = x + self.cross_attn(self.norm3(x), context)
@@ -1779,6 +1791,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  anchor_sparse_propagate_every=1,
                  anchor_sparse_reuse_denoise=True,
                  anchor_sparse_current_attention=False,
+                 anchor_sparse_packed_middle=False,
                  anchor_sparse_record_diagnostics=False):
         r"""
         Initialize the diffusion model backbone.
@@ -1854,6 +1867,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_current_keep_ratio = anchor_sparse_current_keep_ratio
         if anchor_sparse_attention_query_keep_ratio is None:
             anchor_sparse_attention_query_keep_ratio = anchor_sparse_current_keep_ratio
+        packed_middle_active = (
+            anchor_sparse_enabled
+            and anchor_sparse_packed_middle
+            and (
+                anchor_sparse_keep_ratio < 1.0
+                or anchor_sparse_current_keep_ratio < 1.0
+            )
+        )
         self.anchor_sparse_attention_query_keep_ratio = (
             anchor_sparse_attention_query_keep_ratio
         )
@@ -1863,6 +1884,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_propagate_every = anchor_sparse_propagate_every
         self.anchor_sparse_reuse_denoise = anchor_sparse_reuse_denoise
         self.anchor_sparse_current_attention = anchor_sparse_current_attention
+        self.anchor_sparse_packed_middle = packed_middle_active
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
 
         if not 0.0 < anchor_sparse_current_keep_ratio <= 1.0:
@@ -1871,11 +1893,23 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError(
                 "anchor_sparse_attention_query_keep_ratio must lie in (0, 1]"
             )
+        if (
+            packed_middle_active
+            and anchor_sparse_attention_query_keep_ratio
+            != anchor_sparse_current_keep_ratio
+        ):
+            raise ValueError(
+                "Packed Middle Stack uses one shared current-token shape; "
+                "attention_query_keep_ratio must equal current_keep_ratio"
+            )
         if anchor_sparse_dense_prefix_layers < 0 or anchor_sparse_dense_suffix_layers < 0:
             raise ValueError("Dense prefix/suffix layer counts must be non-negative")
         needs_current_route = anchor_sparse_current_keep_ratio < 1.0 or (
             anchor_sparse_current_attention
             and anchor_sparse_attention_query_keep_ratio < 1.0
+        ) or (
+            packed_middle_active
+            and anchor_sparse_keep_ratio < 1.0
         )
         if needs_current_route and anchor_sparse_dense_prefix_layers < 1:
             raise ValueError("Current-token routing requires at least one dense prefix layer")
@@ -1885,6 +1919,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("anchor_sparse_propagate_radius must be non-negative")
         if anchor_sparse_propagate_radius > 0 and anchor_sparse_propagate_every <= 0:
             raise ValueError("anchor_sparse_propagate_every must be positive when propagation is enabled")
+        if packed_middle_active and anchor_sparse_propagate_radius > 0:
+            raise ValueError(
+                "Packed Middle Stack scatters only at a Dense boundary and does not "
+                "support per-layer spatial propagation"
+            )
 
         if anchor_sparse_enabled and frame_seqlen != 880:
             raise ValueError(
@@ -1913,6 +1952,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._anchor_sparse_current_route_cache: torch.Tensor | None = None
         self._anchor_sparse_current_attention_route_cache: torch.Tensor | None = None
         self._anchor_sparse_route_cache_key: tuple[Any, ...] | None = None
+        self._anchor_sparse_packed_profile_cache_key: tuple[Any, ...] | None = None
+        self._anchor_sparse_packed_current_profile: NestedAnchorProfile | None = None
+        self._anchor_sparse_packed_history_profile: NestedAnchorProfile | None = None
+        self._anchor_sparse_packed_history_indices: torch.Tensor | None = None
         self._anchor_sparse_last_start_frame: int | None = None
         self._dynamic_attention_oracle_collector: Any | None = None
 
@@ -1950,6 +1993,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
+        block_anchor_sparse_config = self.anchor_sparse_config
+        if packed_middle_active and block_anchor_sparse_config is not None:
+            # Prefix/suffix blocks stay genuinely Dense.  Layer zero still
+            # records action-conditioned scores, but its all-token route avoids
+            # historical KV gathering before the packed boundary.
+            block_anchor_sparse_config = replace(
+                block_anchor_sparse_config,
+                keep_ratio=1.0,
+            )
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlock(
                 cross_attn_type,
@@ -1965,9 +2017,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 eps,
                 num_action_per_block,
                 num_state_per_block,
-                self.anchor_sparse_config,
+                block_anchor_sparse_config,
                 (
                     anchor_sparse_record_diagnostics
+                    or packed_middle_active
                     or anchor_sparse_current_keep_ratio < 1.0
                     or (
                         anchor_sparse_current_attention
@@ -1982,11 +2035,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             block.self_attn.layer_index = block_index
             block.sparse_current_compute = (
                 anchor_sparse_enabled
+                and not packed_middle_active
                 and anchor_sparse_current_keep_ratio < 1.0
                 and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
             )
             block.sparse_current_attention = (
                 anchor_sparse_enabled
+                and not packed_middle_active
                 and anchor_sparse_current_attention
                 and anchor_sparse_attention_query_keep_ratio < 1.0
                 and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
@@ -2035,6 +2090,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._anchor_sparse_current_route_cache = None
         self._anchor_sparse_current_attention_route_cache = None
         self._anchor_sparse_route_cache_key = None
+        self._anchor_sparse_packed_profile_cache_key = None
+        self._anchor_sparse_packed_current_profile = None
+        self._anchor_sparse_packed_history_profile = None
+        self._anchor_sparse_packed_history_indices = None
         self._anchor_sparse_last_start_frame = None
         for block in self.blocks:
             block.self_attn.last_anchor_route = None
@@ -2168,6 +2227,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         propagate_every: int = 1,
         reuse_denoise: bool = True,
         current_attention: bool = False,
+        packed_middle: bool = False,
         record_diagnostics: bool = False,
     ) -> None:
         """Configure sparse routing after loading an upstream checkpoint.
@@ -2187,12 +2247,24 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("current_keep_ratio must lie in (0, 1]")
         if attention_query_keep_ratio is None:
             attention_query_keep_ratio = current_keep_ratio
+        packed_middle_active = (
+            enabled
+            and packed_middle
+            and (keep_ratio < 1.0 or current_keep_ratio < 1.0)
+        )
         if not 0.0 < attention_query_keep_ratio <= 1.0:
             raise ValueError("attention_query_keep_ratio must lie in (0, 1]")
+        if packed_middle_active and attention_query_keep_ratio != current_keep_ratio:
+            raise ValueError(
+                "Packed Middle Stack uses one shared current-token shape; "
+                "attention_query_keep_ratio must equal current_keep_ratio"
+            )
         if dense_prefix_layers < 0 or dense_suffix_layers < 0:
             raise ValueError("Dense prefix/suffix layer counts must be non-negative")
         needs_current_route = current_keep_ratio < 1.0 or (
             current_attention and attention_query_keep_ratio < 1.0
+        ) or (
+            packed_middle_active and keep_ratio < 1.0
         )
         if needs_current_route and dense_prefix_layers < 1:
             raise ValueError("Current-token routing requires at least one dense prefix layer")
@@ -2202,6 +2274,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("propagate_radius must be non-negative")
         if propagate_radius > 0 and propagate_every <= 0:
             raise ValueError("propagate_every must be positive when propagation is enabled")
+        if packed_middle_active and propagate_radius > 0:
+            raise ValueError(
+                "Packed Middle Stack scatters only at a Dense boundary and does not "
+                "support per-layer spatial propagation"
+            )
         config = None
         if enabled:
             config = AnchorSparseConfig(
@@ -2226,14 +2303,19 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_propagate_every = propagate_every
         self.anchor_sparse_reuse_denoise = reuse_denoise
         self.anchor_sparse_current_attention = current_attention
+        self.anchor_sparse_packed_middle = packed_middle_active
         self.anchor_sparse_record_diagnostics = record_diagnostics
         sparse_end = len(self.blocks) - dense_suffix_layers
+        block_config = config
+        if packed_middle_active and block_config is not None:
+            block_config = replace(block_config, keep_ratio=1.0)
         for block_index, block in enumerate(self.blocks):
-            block.self_attn.anchor_sparse_config = config
+            block.self_attn.anchor_sparse_config = block_config
             block.self_attn.record_anchor_diagnostics = (
                 enabled
                 and (
                     record_diagnostics
+                    or packed_middle_active
                     or current_keep_ratio < 1.0
                     or (current_attention and attention_query_keep_ratio < 1.0)
                 )
@@ -2241,11 +2323,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             )
             block.sparse_current_compute = (
                 enabled
+                and not packed_middle_active
                 and current_keep_ratio < 1.0
                 and dense_prefix_layers <= block_index < sparse_end
             )
             block.sparse_current_attention = (
                 enabled
+                and not packed_middle_active
                 and current_attention
                 and attention_query_keep_ratio < 1.0
                 and dense_prefix_layers <= block_index < sparse_end
@@ -2270,6 +2354,68 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if not self.blocks:
             return None
         return self.blocks[0].self_attn.last_anchor_route
+
+    def _prepare_packed_anchor_profiles(
+        self,
+        *,
+        route: AnchorRoute,
+        current_frames: int,
+        cache_key: tuple[Any, ...] | None,
+    ) -> tuple[NestedAnchorProfile, NestedAnchorProfile, torch.Tensor, int]:
+        """Create or reuse the nested current/history routes for one rollout."""
+
+        config = self.anchor_sparse_config
+        if config is None:
+            raise RuntimeError("Packed routing requires an anchor sparse config")
+        if not 0 < current_frames <= route.num_video_frames:
+            raise ValueError("Current frames do not fit the recorded anchor route")
+        history_frames = route.num_video_frames - current_frames
+        history_token_count = history_frames * config.frame_seqlen
+        if route.scores.shape[1:] != (route.num_video_frames, config.frame_seqlen):
+            raise ValueError("Recorded route scores do not match the video layout")
+
+        if (
+            self.anchor_sparse_reuse_denoise
+            and cache_key is not None
+            and self._anchor_sparse_packed_profile_cache_key == cache_key
+            and self._anchor_sparse_packed_current_profile is not None
+            and self._anchor_sparse_packed_history_profile is not None
+            and self._anchor_sparse_packed_history_indices is not None
+        ):
+            return (
+                self._anchor_sparse_packed_current_profile,
+                self._anchor_sparse_packed_history_profile,
+                self._anchor_sparse_packed_history_indices,
+                history_token_count,
+            )
+
+        current_profile = build_nested_current_profile(
+            route.scores[:, -current_frames:],
+            config,
+        )
+        # ``recent_dense_frames`` is defined over history+current.  Current
+        # frames are represented by the packed current state, so only the
+        # remaining recent-frame allowance is mandatory in historical KV.
+        history_config = replace(
+            config,
+            recent_dense_frames=max(0, config.recent_dense_frames - current_frames),
+        )
+        history_profile = build_nested_history_profile(
+            route.scores[:, :history_frames],
+            history_config,
+        )
+        history_indices = history_profile.indices_for_ratio(config.keep_ratio).detach()
+        if self.anchor_sparse_reuse_denoise and cache_key is not None:
+            self._anchor_sparse_packed_profile_cache_key = cache_key
+            self._anchor_sparse_packed_current_profile = current_profile
+            self._anchor_sparse_packed_history_profile = history_profile
+            self._anchor_sparse_packed_history_indices = history_indices
+        return (
+            current_profile,
+            history_profile,
+            history_indices,
+            history_token_count,
+        )
 
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -2686,7 +2832,115 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             context = torch.cat([clip_embedding, context], dim=1)
 
         updated_kv_caches: list[torch.Tensor] = []
+        sparse_end = len(self.blocks) - self.anchor_sparse_dense_suffix_layers
+        packed_middle_active = (
+            self.anchor_sparse_packed_middle
+            and self.anchor_sparse_config is not None
+            and action_conditioned_causal_routing_is_eligible(
+                current_start_frame,
+                action_register_length,
+            )
+            and not update_kv_cache
+            and self.anchor_sparse_dense_prefix_layers < sparse_end
+            and (
+                self.anchor_sparse_config.keep_ratio < 1.0
+                or self.anchor_sparse_current_keep_ratio < 1.0
+            )
+        )
+        packed_state: PackedMiddleState | None = None
+        packed_freqs: torch.Tensor | None = None
+        packed_history_indices: torch.Tensor | None = None
+        packed_history_token_count = 0
+        packed_current_video_tokens = 0
+
         for block_index, block in enumerate(self.blocks):
+            in_packed_middle = (
+                packed_middle_active
+                and self.anchor_sparse_dense_prefix_layers
+                <= block_index
+                < sparse_end
+            )
+            if in_packed_middle:
+                if action_register_length is None:
+                    raise RuntimeError("Packed middle execution requires action/state registers")
+                if packed_state is None:
+                    route = self.blocks[0].self_attn.last_anchor_route
+                    if route is None:
+                        raise RuntimeError(
+                            "The Dense prefix did not expose action-conditioned route scores"
+                        )
+                    if video_seq_len % self.frame_seqlen != 0:
+                        raise ValueError(
+                            "Packed current routing requires complete video frames, got "
+                            f"{video_seq_len} tokens for frame_seqlen={self.frame_seqlen}"
+                        )
+                    current_frames = video_seq_len // self.frame_seqlen
+                    (
+                        current_profile,
+                        _history_profile,
+                        packed_history_indices,
+                        packed_history_token_count,
+                    ) = self._prepare_packed_anchor_profiles(
+                        route=route,
+                        current_frames=current_frames,
+                        cache_key=anchor_route_cache_key,
+                    )
+                    packed_state = pack_middle_state(
+                        x,
+                        e0,
+                        current_profile,
+                        maximum_keep_ratio=self.anchor_sparse_current_keep_ratio,
+                        action_register_length=action_register_length,
+                    )
+                    packed_current_video_tokens = current_profile.video_tokens_for_ratio(
+                        self.anchor_sparse_current_keep_ratio
+                    )
+                    num_state_tokens = action_register_length - action_length
+                    if (
+                        action_length != self.num_action_per_block
+                        or num_state_tokens != self.num_state_per_block
+                    ):
+                        raise ValueError(
+                            "Packed RoPE requires one complete action/state register block"
+                        )
+                    packed_freqs = gather_packed_rope_frequencies(
+                        freqs,
+                        self.freqs_action,
+                        self.freqs_state,
+                        packed_state.original_indices,
+                        video_seq_len=video_seq_len,
+                        num_action_tokens=action_length,
+                        num_state_tokens=num_state_tokens,
+                        action_state_index=(
+                            (current_start_frame - 1) // self.num_frame_per_block
+                        ),
+                    )
+                assert packed_state is not None
+                assert packed_freqs is not None
+                assert packed_history_indices is not None
+                active_length = packed_state.active_length(packed_current_video_tokens)
+                updated_packed = block.forward_packed(
+                    packed_state.active_x(packed_current_video_tokens),
+                    packed_state.active_e0(packed_current_video_tokens),
+                    packed_freqs[:, :active_length],
+                    action_register_length=action_register_length,
+                    context=context,
+                    kv_cache=kv_cache[block_index],
+                    history_indices=packed_history_indices,
+                    history_token_count=packed_history_token_count,
+                )
+                packed_state.update_active(
+                    updated_packed,
+                    packed_current_video_tokens,
+                )
+                continue
+
+            if packed_state is not None:
+                # The only materialized full-sequence restoration is the Dense
+                # suffix/output boundary (or the end of an all-packed stack).
+                x = packed_state.recover_full()
+                packed_state = None
+
             x, updated_kv_cache, anchor_route_indices = block(
                 x=x,
                 e=e0,
@@ -2720,6 +2974,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 # not carry action/state registers. Their KV update stays dense;
                 # the following WAM call builds the action-conditioned route.
                 and self.anchor_sparse_config is not None
+                and not self.anchor_sparse_packed_middle
                 and (
                     (
                         self.anchor_sparse_current_keep_ratio < 1.0
@@ -2770,6 +3025,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                             self.anchor_sparse_config,
                             keep_ratio=self.anchor_sparse_attention_query_keep_ratio,
                         ).detach()
+
+        if packed_state is not None:
+            x = packed_state.recover_full()
 
         if (
             self.anchor_sparse_reuse_denoise

@@ -25,6 +25,20 @@ def test_droid_views_partition_released_grid() -> None:
     assert [view.area for view in views] == [440, 220, 220]
 
 
+def test_full_budget_video_route_preserves_dense_token_order() -> None:
+    config = AnchorSparseConfig(
+        frame_seqlen=8,
+        grid_height=2,
+        grid_width=4,
+        keep_ratio=1.0,
+        recent_dense_frames=1,
+        smooth_radius=0,
+    )
+    route = build_video_key_route(torch.randn(2, 3, 8), config)
+
+    assert torch.equal(route, torch.arange(24).expand(2, -1))
+
+
 def test_token_to_composite_pixel_correspondence() -> None:
     boxes = token_indices_to_pixel_boxes(
         torch.tensor([0, 39, 40, 879]),

@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument(
+        "--packed-middle",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
         "--update-kv-cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -269,6 +274,16 @@ def main() -> None:
         raise ValueError(
             "attention-query-keep-ratios must align one-to-one with keep-ratios"
         )
+    if args.packed_middle and args.update_kv_cache:
+        raise ValueError("Packed Middle Stack timing requires --no-update-kv-cache")
+    if args.packed_middle and args.propagate_radius > 0:
+        raise ValueError("Packed Middle Stack does not support per-layer propagation")
+    if args.packed_middle and (
+        args.attention_query_keep_ratios != args.current_keep_ratios
+    ):
+        raise ValueError(
+            "Packed Middle Stack requires attention-query and current keep ratios to match"
+        )
     physical_gpu = args.physical_gpus[local_rank]
 
     load_start = time.perf_counter()
@@ -344,6 +359,7 @@ def main() -> None:
             recent_dense_frames=2,
             current_keep_ratio=1.0,
             reuse_denoise=False,
+            packed_middle=args.packed_middle,
         )
         full_video, full_action, full_caches = invoke(diffusion_model, exact_inputs)
         full_budget_video_exact = torch.equal(full_video, dense_exact_video)
@@ -375,6 +391,7 @@ def main() -> None:
             propagate_every=args.propagate_every,
             reuse_denoise=args.reuse_denoise,
             current_attention=args.current_attention,
+            packed_middle=args.packed_middle,
             record_diagnostics=True,
         )
         sparse_samples, sparse_output = timed_forwards(
@@ -445,6 +462,7 @@ def main() -> None:
         "propagate_every": args.propagate_every,
         "reuse_denoise": args.reuse_denoise,
         "current_attention": args.current_attention,
+        "packed_middle": args.packed_middle,
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,

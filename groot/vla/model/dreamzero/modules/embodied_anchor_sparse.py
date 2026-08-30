@@ -405,6 +405,12 @@ def build_video_key_route(
     if frame_scores.ndim != 3 or frame_scores.shape[-1] != config.frame_seqlen:
         raise ValueError("frame_scores must have shape [B, F, frame_seqlen]")
     batch, num_frames, _ = frame_scores.shape
+    if config.anchor_tokens_per_frame == config.frame_seqlen:
+        return torch.arange(
+            num_frames * config.frame_seqlen,
+            device=frame_scores.device,
+            dtype=torch.long,
+        ).expand(batch, -1)
     num_dense = min(config.recent_dense_frames, num_frames)
     num_sparse = num_frames - num_dense
     chunks = []

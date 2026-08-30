@@ -273,9 +273,13 @@ def pack_middle_state(
     if e0.shape[:2] != x.shape[:2] or e0.ndim != 4 or e0.shape[2] != 6:
         raise ValueError("e0 must have shape [B, L, 6, C]")
     video_seq_len = x.shape[1] - action_register_length
+    if profile.batch_size != x.shape[0]:
+        raise ValueError("profile batch size differs from the current state")
+    if profile.mandatory_indices.shape[1] != 0:
+        raise ValueError("current-token profiles cannot contain mandatory history")
+    if profile.optional_frames * profile.frame_seqlen != video_seq_len:
+        raise ValueError("profile does not cover the complete current video layout")
     video_indices = profile.indices_for_ratio(maximum_keep_ratio)
-    if torch.any(video_indices >= video_seq_len):
-        raise ValueError("profile contains a non-current-video index")
     register_indices = torch.arange(
         video_seq_len,
         x.shape[1],

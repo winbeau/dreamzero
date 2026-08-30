@@ -54,6 +54,7 @@ class Args:
     anchor_sparse_propagate_every: int = 1
     anchor_sparse_reuse_denoise: bool = True
     anchor_sparse_current_attention: bool = False
+    anchor_sparse_packed_middle: bool = False
     anchor_sparse_record_diagnostics: bool = False
     dynamic_oracle_output_dir: str | None = None
     dynamic_oracle_max_video_queries: int | None = 32
@@ -864,12 +865,13 @@ def main(args: Args) -> None:
             propagate_every=args.anchor_sparse_propagate_every,
             reuse_denoise=args.anchor_sparse_reuse_denoise,
             current_attention=args.anchor_sparse_current_attention,
+            packed_middle=args.anchor_sparse_packed_middle,
             record_diagnostics=args.anchor_sparse_record_diagnostics,
         )
     logger.info(
         "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
         "current_keep=%.3f attention_query_keep=%s dense_prefix=%d dense_suffix=%d "
-        "propagate_radius=%d propagate_every=%d current_attention=%s "
+        "propagate_radius=%d propagate_every=%d current_attention=%s packed_middle=%s "
         "recent_dense_frames=%d "
         "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
@@ -881,6 +883,7 @@ def main(args: Args) -> None:
         args.anchor_sparse_propagate_radius,
         args.anchor_sparse_propagate_every,
         args.anchor_sparse_current_attention,
+        args.anchor_sparse_packed_middle,
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
