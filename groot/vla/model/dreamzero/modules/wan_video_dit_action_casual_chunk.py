@@ -24,6 +24,7 @@ from groot.vla.model.dreamzero.modules.dynamic_packed_sparse import (
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
+    stabilize_current_budgets_for_segments,
 )
 from groot.vla.model.n1_5.modules.action_encoder import (
     SinusoidalPositionalEncoding,
@@ -3043,6 +3044,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 layer_index: self._packed_budget_ratios_for_layer(layer_index)
                 for layer_index in middle_layer_indices
             }
+            if self.anchor_sparse_propagate_radius > 0:
+                stable_ratios = stabilize_current_budgets_for_segments(
+                    tuple(
+                        packed_layer_ratios[layer_index]
+                        for layer_index in middle_layer_indices
+                    ),
+                    segment_length=self.anchor_sparse_propagate_every,
+                )
+                packed_layer_ratios = dict(
+                    zip(middle_layer_indices, stable_ratios, strict=True)
+                )
             packed_layer_head_groups = {
                 layer_index: self._packed_head_groups_for_layer(layer_index)
                 for layer_index in middle_layer_indices

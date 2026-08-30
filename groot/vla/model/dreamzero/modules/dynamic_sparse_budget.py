@@ -39,6 +39,33 @@ def bucket_at_least(value: float) -> float:
     return BUDGET_BUCKETS[-1]
 
 
+def stabilize_current_budgets_for_segments(
+    layer_ratios: Sequence[tuple[float, float]],
+    *,
+    segment_length: int,
+) -> tuple[tuple[float, float], ...]:
+    """Hold mutable current-token budgets fixed inside packed segments.
+
+    Historical KV is an immutable per-layer input and may retain its original
+    layer budget. Current video hidden states cannot safely shrink and later
+    expand before a propagation/repack boundary because reactivated tokens
+    would have skipped intervening Transformer layers.
+    """
+
+    if segment_length <= 0:
+        raise ValueError("segment_length must be positive")
+    canonical = tuple(
+        (canonical_budget(history), canonical_budget(current))
+        for history, current in layer_ratios
+    )
+    stabilized: list[tuple[float, float]] = []
+    for start in range(0, len(canonical), segment_length):
+        segment = canonical[start : start + segment_length]
+        current = max(current for _, current in segment)
+        stabilized.extend((history, current) for history, _ in segment)
+    return tuple(stabilized)
+
+
 def _canonical_matrix(
     values: Sequence[Sequence[float]],
     *,

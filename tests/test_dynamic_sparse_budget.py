@@ -6,6 +6,7 @@ from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
     bucket_at_least,
+    stabilize_current_budgets_for_segments,
 )
 
 
@@ -48,6 +49,32 @@ def test_arbitrary_dynamic_shape_is_rejected() -> None:
             history_keep_ratios=((0.3,),),
             current_keep_ratios=((0.2,),),
         )
+
+
+def test_mutable_current_budgets_are_stable_inside_propagation_segments() -> None:
+    ratios = (
+        (0.20, 0.50),
+        (0.35, 0.20),
+        (0.75, 0.35),
+        (0.20, 0.75),
+        (0.50, 0.25),
+    )
+
+    assert stabilize_current_budgets_for_segments(
+        ratios,
+        segment_length=3,
+    ) == (
+        (0.20, 0.50),
+        (0.35, 0.50),
+        (0.75, 0.50),
+        (0.20, 0.75),
+        (0.50, 0.75),
+    )
+
+
+def test_segment_stabilization_rejects_nonpositive_length() -> None:
+    with pytest.raises(ValueError, match="segment_length"):
+        stabilize_current_budgets_for_segments(((0.20, 0.20),), segment_length=0)
 
 
 def test_dynamic_head_group_budget_roundtrip_and_partition_validation(tmp_path):

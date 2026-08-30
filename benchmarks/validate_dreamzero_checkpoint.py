@@ -23,6 +23,7 @@ from groot.vla.model.dreamzero.base_vla import VLA
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
+    stabilize_current_budgets_for_segments,
 )
 
 
@@ -638,11 +639,18 @@ def main() -> None:
                 dynamic_budget_table.num_layers - candidate_dense_suffix_layers,
             )
         )
-        for layer_index in dynamic_middle_layers:
-            history_ratio, current_ratio = dynamic_budget_table.ratios(
-                candidate_dynamic_budget_dit_index,
-                layer_index,
+        effective_ratios = tuple(
+            dynamic_budget_table.ratios(
+                candidate_dynamic_budget_dit_index, layer_index
             )
+            for layer_index in dynamic_middle_layers
+        )
+        if candidate_propagate_radius > 0:
+            effective_ratios = stabilize_current_budgets_for_segments(
+                effective_ratios,
+                segment_length=candidate_propagate_every,
+            )
+        for history_ratio, current_ratio in effective_ratios:
             dynamic_middle_history_ratios.append(history_ratio)
             dynamic_middle_current_ratios.append(current_ratio)
             dynamic_middle_history_tokens.append(
