@@ -311,6 +311,8 @@ def main() -> None:
 
         if args.update_kv_cache:
             dense_exact_video, dense_exact_action, dense_exact_caches = dense_output
+            no_update_dense_video_exact = None
+            no_update_dense_action_exact = None
         else:
             dense_output = None
             torch.cuda.empty_cache()
@@ -318,6 +320,8 @@ def main() -> None:
                 diffusion_model,
                 exact_inputs,
             )
+            no_update_dense_video_exact = torch.equal(dense_video, dense_exact_video)
+            no_update_dense_action_exact = torch.equal(dense_action, dense_exact_action)
 
         diffusion_model.configure_anchor_sparse_attention(
             enabled=True,
@@ -363,6 +367,25 @@ def main() -> None:
             warmup=args.warmup,
             repeats=args.repeats,
         )
+        sparse_video, sparse_action, _ = sparse_output
+        if args.update_kv_cache:
+            no_update_sparse_video_exact = None
+            no_update_sparse_action_exact = None
+        else:
+            sparse_exact_video, sparse_exact_action, sparse_exact_caches = invoke(
+                diffusion_model,
+                exact_inputs,
+            )
+            no_update_sparse_video_exact = torch.equal(
+                sparse_video,
+                sparse_exact_video,
+            )
+            no_update_sparse_action_exact = torch.equal(
+                sparse_action,
+                sparse_exact_action,
+            )
+            del sparse_exact_video, sparse_exact_action, sparse_exact_caches
+            torch.cuda.empty_cache()
         if args.profile_dir is not None:
             diffusion_model.clear_anchor_sparse_route_cache()
             profile_forward(
@@ -383,7 +406,6 @@ def main() -> None:
                 row_limit=args.profile_row_limit,
                 record_shapes=args.profile_record_shapes,
             )
-        sparse_video, sparse_action, _ = sparse_output
         route = diffusion_model.get_last_anchor_route()
 
     dense_p50 = statistics.median(dense_samples)
@@ -415,6 +437,10 @@ def main() -> None:
         "full_budget_video_exact": full_budget_video_exact,
         "full_budget_action_exact": full_budget_action_exact,
         "full_budget_cache_exact": full_budget_cache_exact,
+        "no_update_dense_video_exact": no_update_dense_video_exact,
+        "no_update_dense_action_exact": no_update_dense_action_exact,
+        "no_update_sparse_video_exact": no_update_sparse_video_exact,
+        "no_update_sparse_action_exact": no_update_sparse_action_exact,
         "sparse_video_relative_l2": relative_l2(dense_video, sparse_video),
         "sparse_action_relative_l2": relative_l2(dense_action, sparse_action),
         "selected_video_tokens": route.selected_video_tokens if route is not None else None,
