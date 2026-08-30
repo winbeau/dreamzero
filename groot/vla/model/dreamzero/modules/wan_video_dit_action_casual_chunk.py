@@ -67,13 +67,11 @@ def sparse_current_token_update(
     video_seq_len = x.shape[1] - action_register_length
     if current_video_indices.shape[0] != x.shape[0]:
         raise ValueError("current_video_indices batch size differs from x")
-    register_indices = torch.arange(
-        video_seq_len,
-        x.shape[1],
-        device=x.device,
-        dtype=torch.long,
-    ).expand(x.shape[0], -1)
-    compute_indices = torch.cat([current_video_indices, register_indices], dim=1)
+    compute_indices, register_indices = build_current_compute_indices(
+        current_video_indices,
+        video_seq_len=video_seq_len,
+        action_register_length=action_register_length,
+    )
     selected_x = gather_sequence_by_index(x, compute_indices, validate_indices=False)
     selected_e = tuple(
         gather_sequence_by_index(part, compute_indices, validate_indices=False)
@@ -105,6 +103,27 @@ def sparse_current_token_update(
         updated,
         validate_indices=False,
     )
+
+
+def build_current_compute_indices(
+    current_video_indices: torch.Tensor,
+    *,
+    video_seq_len: int,
+    action_register_length: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Append dense action/state register positions to current-video anchors."""
+
+    if current_video_indices.ndim != 2:
+        raise ValueError("current_video_indices must have shape [B, K]")
+    if video_seq_len <= 0 or action_register_length <= 0:
+        raise ValueError("video and register lengths must be positive")
+    register_indices = torch.arange(
+        video_seq_len,
+        video_seq_len + action_register_length,
+        device=current_video_indices.device,
+        dtype=torch.long,
+    ).expand(current_video_indices.shape[0], -1)
+    return torch.cat([current_video_indices, register_indices], dim=1), register_indices
 
 
 class CategorySpecificLinear(nn.Module):
@@ -878,6 +897,7 @@ class CausalWanSelfAttention(nn.Module):
         current_start_frame: int = 0,
         is_tf: bool = True,
         anchor_route_indices: torch.Tensor | None = None,
+        current_video_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
         Args:
@@ -898,6 +918,7 @@ class CausalWanSelfAttention(nn.Module):
 
         updated_kv_cache: torch.Tensor | None = None
         updated_anchor_route_indices = anchor_route_indices
+        sparse_query_output_indices: torch.Tensor | None = None
 
         if kv_cache is None:
             if is_tf:
@@ -1214,8 +1235,28 @@ class CausalWanSelfAttention(nn.Module):
                             updated_anchor_route_indices,
                             validate_indices=False,
                         )
+                if current_video_indices is not None:
+                    selected_video_query = gather_sequence_by_index(
+                        roped_query,
+                        current_video_indices,
+                        validate_indices=False,
+                    )
+                    attention_q = torch.cat(
+                        [selected_video_query, roped_action_query],
+                        dim=1,
+                    )
+                    sparse_query_output_indices, _ = build_current_compute_indices(
+                        current_video_indices,
+                        video_seq_len=num_new_tokens,
+                        action_register_length=action_register_length,
+                    )
+                else:
+                    attention_q = torch.cat(
+                        [roped_query, roped_action_query],
+                        dim=1,
+                    )
                 x = self.attn(
-                    torch.cat([roped_query, roped_action_query], dim=1),
+                    attention_q,
                     torch.cat([attention_k, roped_action_key], dim=1),
                     torch.cat([attention_v, action_v], dim=1),
                 )
@@ -1231,6 +1272,14 @@ class CausalWanSelfAttention(nn.Module):
         # output
         x = x.flatten(2)
         x = self.o(x)
+        if sparse_query_output_indices is not None:
+            full_x = x.new_zeros((b, s, self.dim))
+            x = scatter_sequence_by_index(
+                full_x,
+                sparse_query_output_indices,
+                x,
+                validate_indices=False,
+            )
         return x, updated_kv_cache, updated_anchor_route_indices
 
 
@@ -1261,6 +1310,7 @@ class CausalWanAttentionBlock(nn.Module):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.sparse_current_compute = False
+        self.sparse_current_attention = False
         self.current_propagate_radius = 0
 
         # layers
@@ -1334,6 +1384,14 @@ class CausalWanAttentionBlock(nn.Module):
         e = tuple(aligned)
 
         # self-attention
+        sparse_self_attention = (
+            self.sparse_current_attention
+            and current_video_indices is not None
+            and action_conditioned_causal_routing_is_eligible(
+                current_start_frame,
+                action_register_length,
+            )
+        )
         y, updated_kv_cache, updated_anchor_route_indices = self.self_attn(
             x=(self.norm1(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)),
             freqs=freqs,
@@ -1344,6 +1402,9 @@ class CausalWanAttentionBlock(nn.Module):
             is_tf=is_tf,
             current_start_frame=current_start_frame,
             anchor_route_indices=anchor_route_indices,
+            current_video_indices=(
+                current_video_indices if sparse_self_attention else None
+            ),
         )
         x = x + (y * e[2].squeeze(2))
 
@@ -1473,6 +1534,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  anchor_sparse_propagate_radius=0,
                  anchor_sparse_propagate_every=1,
                  anchor_sparse_reuse_denoise=True,
+                 anchor_sparse_current_attention=False,
                  anchor_sparse_record_diagnostics=False):
         r"""
         Initialize the diffusion model backbone.
@@ -1551,6 +1613,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_propagate_radius = anchor_sparse_propagate_radius
         self.anchor_sparse_propagate_every = anchor_sparse_propagate_every
         self.anchor_sparse_reuse_denoise = anchor_sparse_reuse_denoise
+        self.anchor_sparse_current_attention = anchor_sparse_current_attention
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
 
         if not 0.0 < anchor_sparse_current_keep_ratio <= 1.0:
@@ -1658,6 +1721,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and anchor_sparse_current_keep_ratio < 1.0
                 and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
             )
+            block.sparse_current_attention = (
+                block.sparse_current_compute and anchor_sparse_current_attention
+            )
             sparse_offset = block_index - anchor_sparse_dense_prefix_layers + 1
             should_propagate = (
                 block.sparse_current_compute
@@ -1720,6 +1786,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         propagate_radius: int = 0,
         propagate_every: int = 1,
         reuse_denoise: bool = True,
+        current_attention: bool = False,
         record_diagnostics: bool = False,
     ) -> None:
         """Configure sparse routing after loading an upstream checkpoint.
@@ -1769,6 +1836,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_propagate_radius = propagate_radius
         self.anchor_sparse_propagate_every = propagate_every
         self.anchor_sparse_reuse_denoise = reuse_denoise
+        self.anchor_sparse_current_attention = current_attention
         self.anchor_sparse_record_diagnostics = record_diagnostics
         sparse_end = len(self.blocks) - dense_suffix_layers
         for block_index, block in enumerate(self.blocks):
@@ -1782,6 +1850,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 enabled
                 and current_keep_ratio < 1.0
                 and dense_prefix_layers <= block_index < sparse_end
+            )
+            block.sparse_current_attention = (
+                block.sparse_current_compute and current_attention
             )
             sparse_offset = block_index - dense_prefix_layers + 1
             should_propagate = (

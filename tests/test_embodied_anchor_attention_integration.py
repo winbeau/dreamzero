@@ -206,6 +206,56 @@ def test_full_budget_uses_exact_original_dense_path() -> None:
     assert torch.equal(full_cache, dense_cache)
 
 
+def test_sparse_current_attention_keeps_full_cache_and_register_outputs() -> None:
+    module = _load_attention_module()
+    config = AnchorSparseConfig(
+        frame_seqlen=4,
+        grid_height=2,
+        grid_width=2,
+        keep_ratio=0.5,
+        recent_dense_frames=1,
+        probe_dim=2,
+        num_router_heads=1,
+        smooth_radius=0,
+    )
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+        anchor_sparse_config=config,
+    )
+    x, cache, freqs = _inputs()
+    dense_output, dense_cache, route = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+    )
+    current_video_indices = torch.tensor([[1, 3]])
+    sparse_output, sparse_cache, reused_route = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+        anchor_route_indices=route,
+        current_video_indices=current_video_indices,
+    )
+
+    assert sparse_output.shape == dense_output.shape
+    assert torch.equal(sparse_cache, dense_cache)
+    assert reused_route is route
+    assert torch.equal(sparse_output[:, [0, 2]], torch.zeros_like(sparse_output[:, [0, 2]]))
+    assert torch.allclose(sparse_output[:, [1, 3, 4, 5, 6]], dense_output[:, [1, 3, 4, 5, 6]])
+
+
 def test_post_checkpoint_configuration_updates_every_block() -> None:
     module = _load_attention_module()
     model = module.CausalWanModel(
@@ -236,6 +286,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         dense_suffix_layers=0,
         propagate_radius=1,
         propagate_every=1,
+        current_attention=True,
         probe_dim=2,
         num_router_heads=1,
         smooth_radius=0,
@@ -254,6 +305,8 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert not model.blocks[1].self_attn.record_anchor_diagnostics
     assert not model.blocks[0].sparse_current_compute
     assert model.blocks[1].sparse_current_compute
+    assert not model.blocks[0].sparse_current_attention
+    assert model.blocks[1].sparse_current_attention
     assert model.blocks[0].current_propagate_radius == 0
     assert model.blocks[1].current_propagate_radius == 1
 
@@ -261,6 +314,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model.anchor_sparse_config is None
     assert all(block.self_attn.anchor_sparse_config is None for block in model.blocks)
     assert not any(block.sparse_current_compute for block in model.blocks)
+    assert not any(block.sparse_current_attention for block in model.blocks)
     assert not any(block.current_propagate_radius for block in model.blocks)
 
 

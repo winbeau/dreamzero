@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--propagate-every", type=int, default=1)
     parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
+        "--current-attention",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
         "--profile-dir",
         type=Path,
         help="Optional artifact directory for dense and sparse CPU/CUDA traces.",
@@ -323,6 +328,7 @@ def main() -> None:
             propagate_radius=args.propagate_radius,
             propagate_every=args.propagate_every,
             reuse_denoise=args.reuse_denoise,
+            current_attention=args.current_attention,
             record_diagnostics=True,
         )
         sparse_samples, sparse_output = timed_forwards(
@@ -373,6 +379,7 @@ def main() -> None:
         "propagate_radius": args.propagate_radius,
         "propagate_every": args.propagate_every,
         "reuse_denoise": args.reuse_denoise,
+        "current_attention": args.current_attention,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,
         "dense_p50_ms": dense_p50,

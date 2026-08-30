@@ -52,6 +52,7 @@ class Args:
     anchor_sparse_propagate_radius: int = 0
     anchor_sparse_propagate_every: int = 1
     anchor_sparse_reuse_denoise: bool = True
+    anchor_sparse_current_attention: bool = False
     anchor_sparse_record_diagnostics: bool = False
 
 
@@ -852,12 +853,14 @@ def main(args: Args) -> None:
             propagate_radius=args.anchor_sparse_propagate_radius,
             propagate_every=args.anchor_sparse_propagate_every,
             reuse_denoise=args.anchor_sparse_reuse_denoise,
+            current_attention=args.anchor_sparse_current_attention,
             record_diagnostics=args.anchor_sparse_record_diagnostics,
         )
     logger.info(
         "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
         "current_keep=%.3f dense_prefix=%d dense_suffix=%d "
-        "propagate_radius=%d propagate_every=%d recent_dense_frames=%d "
+        "propagate_radius=%d propagate_every=%d current_attention=%s "
+        "recent_dense_frames=%d "
         "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
         args.anchor_sparse_keep_ratio,
@@ -866,6 +869,7 @@ def main(args: Args) -> None:
         args.anchor_sparse_dense_suffix_layers,
         args.anchor_sparse_propagate_radius,
         args.anchor_sparse_propagate_every,
+        args.anchor_sparse_current_attention,
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
