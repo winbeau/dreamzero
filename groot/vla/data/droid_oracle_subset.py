@@ -149,48 +149,38 @@ def build_oracle_selection(
     lengths = sorted(int(episode["length"]) for episode in eligible)
     low_edge = _percentile(lengths, 1.0 / 3.0)
     high_edge = _percentile(lengths, 2.0 / 3.0)
-    split_ranges = {
-        "train": range(0, 4),
-        "validation": range(4, 5),
-        "test": range(5, 6),
-    }
-    candidate_components: dict[str, list[tuple[int, list[int]]]] = defaultdict(list)
-    for root, episode_ids in components.items():
-        signature = sorted({task for episode_id in episode_ids for task in normalized_tasks[episode_id]})
-        split_slot = _stable_int(seed, "component", *signature) % 6
-        split = next(name for name, slots in split_ranges.items() if split_slot in slots)
-        candidate_components[split].append((root, episode_ids))
-
     selected: list[dict] = []
     used_components: set[int] = set()
-    for split in split_names:
-        per_bucket = counts[split] // 3
-        for bucket in ("short", "middle", "long"):
-            candidates: list[tuple[int, int]] = []
-            for root, episode_ids in candidate_components[split]:
-                if root in used_components:
-                    continue
-                matching = [
-                    episode_id
-                    for episode_id in episode_ids
-                    if _length_bucket(
-                        int(episode_by_id[episode_id]["length"]), low_edge, high_edge
-                    )
-                    == bucket
-                ]
-                if matching:
-                    episode_id = min(
-                        matching,
-                        key=lambda value: _stable_int(seed, split, bucket, value),
-                    )
-                    candidates.append((root, episode_id))
-            candidates.sort(key=lambda item: _stable_int(seed, split, bucket, item[1]))
-            if len(candidates) < per_bucket:
-                raise ValueError(
-                    f"Not enough {split}/{bucket} task components: "
-                    f"need {per_bucket}, found {len(candidates)}"
+    for bucket in ("short", "middle", "long"):
+        candidates: list[tuple[int, int]] = []
+        for root, episode_ids in components.items():
+            if root in used_components:
+                continue
+            matching = [
+                episode_id
+                for episode_id in episode_ids
+                if _length_bucket(
+                    int(episode_by_id[episode_id]["length"]), low_edge, high_edge
                 )
-            for root, episode_id in candidates[:per_bucket]:
+                == bucket
+            ]
+            if matching:
+                episode_id = min(
+                    matching,
+                    key=lambda value: _stable_int(seed, bucket, value),
+                )
+                candidates.append((root, episode_id))
+        candidates.sort(key=lambda item: _stable_int(seed, bucket, item[1]))
+        required = sum(counts[split] // 3 for split in split_names)
+        if len(candidates) < required:
+            raise ValueError(
+                f"Not enough {bucket} task components: "
+                f"need {required}, found {len(candidates)}"
+            )
+        offset = 0
+        for split in split_names:
+            per_bucket = counts[split] // 3
+            for root, episode_id in candidates[offset : offset + per_bucket]:
                 used_components.add(root)
                 episode = episode_by_id[episode_id]
                 selected.append(
@@ -205,6 +195,7 @@ def build_oracle_selection(
                         "trajectory_stages": [dict(stage) for stage in TRAJECTORY_STAGES],
                     }
                 )
+            offset += per_bucket
 
     split_order = {name: index for index, name in enumerate(split_names)}
     selected.sort(
