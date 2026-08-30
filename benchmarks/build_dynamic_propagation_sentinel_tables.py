@@ -1,9 +1,10 @@
-"""Build current-token sentinel budgets aligned with packed propagation.
+"""Build current-token budgets aligned with packed propagation segments.
 
 The base timestep/layer table continues to control historical KV everywhere.
-Only the current-token budget at a propagation boundary is promoted.  The
-larger exact current-token delta is therefore available immediately before the
-packed state is spatially propagated back to the full video grid.
+The primary tables hold the current-token prefix constant inside each packed
+segment, preventing a token with skipped hidden-state updates from being
+reintroduced before propagation. Boundary-only sentinel tables are also
+emitted as an explicit negative/diagnostic ablation.
 """
 
 from __future__ import annotations
@@ -45,6 +46,33 @@ def propagation_boundary_layers(
     )
 
 
+def propagation_segments(
+    *,
+    num_layers: int,
+    dense_prefix_layers: int,
+    dense_suffix_layers: int,
+    propagate_every: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Partition packed layers at the exact propagation boundaries."""
+
+    boundaries = set(
+        propagation_boundary_layers(
+            num_layers=num_layers,
+            dense_prefix_layers=dense_prefix_layers,
+            dense_suffix_layers=dense_suffix_layers,
+            propagate_every=propagate_every,
+        )
+    )
+    sparse_end = num_layers - dense_suffix_layers
+    segments: list[tuple[int, ...]] = []
+    start = dense_prefix_layers
+    for layer_index in range(dense_prefix_layers, sparse_end):
+        if layer_index in boundaries:
+            segments.append(tuple(range(start, layer_index + 1)))
+            start = layer_index + 1
+    return tuple(segments)
+
+
 def build_sentinel_table(
     base: DynamicPackedBudgetTable,
     *,
@@ -73,6 +101,45 @@ def build_sentinel_table(
     )
 
 
+def build_segment_max_table(
+    base: DynamicPackedBudgetTable,
+    *,
+    current_floor: float | None = None,
+    dense_prefix_layers: int = 1,
+    dense_suffix_layers: int = 1,
+    propagate_every: int = 5,
+) -> DynamicPackedBudgetTable:
+    """Keep the current-token active prefix stable within every segment.
+
+    Allowing the prefix to shrink and then expand within a segment reintroduces
+    tokens whose hidden states skipped intervening Transformer layers.  Each
+    segment therefore uses its maximum configured current budget.  Historical
+    KV budgets remain layer-dependent because they carry no mutable packed
+    state between layers.
+    """
+
+    floor = canonical_budget(current_floor) if current_floor is not None else None
+    segments = propagation_segments(
+        num_layers=base.num_layers,
+        dense_prefix_layers=dense_prefix_layers,
+        dense_suffix_layers=dense_suffix_layers,
+        propagate_every=propagate_every,
+    )
+    current = np.asarray(base.current_keep_ratios, dtype=np.float64).copy()
+    for dit_index in range(base.num_dit_steps):
+        for segment in segments:
+            segment_ratio = float(current[dit_index, list(segment)].max())
+            if floor is not None:
+                segment_ratio = max(segment_ratio, floor)
+            current[dit_index, list(segment)] = segment_ratio
+    suffix = "max" if floor is None else f"floor{int(round(floor * 100))}"
+    return DynamicPackedBudgetTable(
+        history_keep_ratios=base.history_keep_ratios,
+        current_keep_ratios=tuple(map(tuple, current.tolist())),
+        name=f"{base.name}_prop{propagate_every}_segment_{suffix}",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-table", type=Path, required=True)
@@ -82,6 +149,16 @@ def main() -> None:
         type=float,
         nargs="+",
         default=[0.75, 1.0],
+    )
+    parser.add_argument(
+        "--segment-current-floor-ratios",
+        type=float,
+        nargs="*",
+        default=[0.75],
+        help=(
+            "Optional conservative floors for segment-stable current budgets; "
+            "a no-floor segment-max table is always emitted."
+        ),
     )
     parser.add_argument("--dense-prefix-layers", type=int, default=1)
     parser.add_argument("--dense-suffix-layers", type=int, default=1)
@@ -95,6 +172,12 @@ def main() -> None:
         dense_suffix_layers=args.dense_suffix_layers,
         propagate_every=args.propagate_every,
     )
+    segments = propagation_segments(
+        num_layers=base.num_layers,
+        dense_prefix_layers=args.dense_prefix_layers,
+        dense_suffix_layers=args.dense_suffix_layers,
+        propagate_every=args.propagate_every,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     table_summary: dict[str, object] = {}
     summary: dict[str, object] = {
@@ -103,8 +186,46 @@ def main() -> None:
         "dense_prefix_layers": args.dense_prefix_layers,
         "dense_suffix_layers": args.dense_suffix_layers,
         "boundary_layers": list(boundaries),
+        "segments": [list(segment) for segment in segments],
         "tables": table_summary,
     }
+
+    def record_table(key: str, path: Path, table: DynamicPackedBudgetTable) -> None:
+        path.write_text(json.dumps(table.to_dict(), indent=2) + "\n")
+        current = np.asarray(table.current_keep_ratios)
+        history = np.asarray(table.history_keep_ratios)
+        table_summary[key] = {
+            "path": str(path),
+            "name": table.name,
+            "mean_history_budget": float(history.mean()),
+            "mean_current_budget": float(current.mean()),
+            "early_mean_current_budget": float(current[0, 1:-1].mean()),
+            "late_mean_current_budget": float(current[-1, 1:-1].mean()),
+        }
+
+    segment_max = build_segment_max_table(
+        base,
+        dense_prefix_layers=args.dense_prefix_layers,
+        dense_suffix_layers=args.dense_suffix_layers,
+        propagate_every=args.propagate_every,
+    )
+    record_table("segment_max", args.output_dir / "segment_max.json", segment_max)
+    for ratio in args.segment_current_floor_ratios:
+        floor = canonical_budget(ratio)
+        suffix = str(int(round(floor * 100)))
+        table = build_segment_max_table(
+            base,
+            current_floor=floor,
+            dense_prefix_layers=args.dense_prefix_layers,
+            dense_suffix_layers=args.dense_suffix_layers,
+            propagate_every=args.propagate_every,
+        )
+        record_table(
+            f"segment_floor_{suffix}",
+            args.output_dir / f"segment_floor_{suffix}.json",
+            table,
+        )
+
     for ratio in args.sentinel_current_keep_ratios:
         table = build_sentinel_table(
             base,
@@ -115,17 +236,7 @@ def main() -> None:
         )
         suffix = str(int(round(canonical_budget(ratio) * 100)))
         path = args.output_dir / f"current_sentinel_{suffix}.json"
-        path.write_text(json.dumps(table.to_dict(), indent=2) + "\n")
-        current = np.asarray(table.current_keep_ratios)
-        history = np.asarray(table.history_keep_ratios)
-        table_summary[suffix] = {
-            "path": str(path),
-            "name": table.name,
-            "mean_history_budget": float(history.mean()),
-            "mean_current_budget": float(current.mean()),
-            "early_mean_current_budget": float(current[0, 1:-1].mean()),
-            "late_mean_current_budget": float(current[-1, 1:-1].mean()),
-        }
+        record_table(f"boundary_sentinel_{suffix}", path, table)
     summary_path = args.output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))

@@ -1,8 +1,10 @@
 import numpy as np
 
 from benchmarks.build_dynamic_propagation_sentinel_tables import (
+    build_segment_max_table,
     build_sentinel_table,
     propagation_boundary_layers,
+    propagation_segments,
 )
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicPackedBudgetTable,
@@ -16,6 +18,12 @@ def test_propagation_boundaries_include_regular_and_final_segments() -> None:
         dense_suffix_layers=1,
         propagate_every=5,
     ) == (5, 10, 15, 20, 25, 30, 35, 38)
+    assert propagation_segments(
+        num_layers=12,
+        dense_prefix_layers=1,
+        dense_suffix_layers=1,
+        propagate_every=4,
+    ) == ((1, 2, 3, 4), (5, 6, 7, 8), (9, 10))
 
 
 def test_sentinel_promotes_only_boundary_current_budgets() -> None:
@@ -56,3 +64,44 @@ def test_sentinel_never_reduces_a_more_conservative_base_budget() -> None:
     )
 
     assert table.current_keep_ratios == ((0.35, 1.00, 0.75),)
+
+
+def test_segment_max_prevents_stale_token_reentry_without_changing_history() -> None:
+    base = DynamicPackedBudgetTable(
+        history_keep_ratios=((0.20,) * 10,),
+        current_keep_ratios=(
+            (0.20, 0.35, 0.20, 0.50, 0.35, 0.20, 0.75, 0.25, 0.50, 0.20),
+        ),
+        name="oscillating",
+    )
+    table = build_segment_max_table(
+        base,
+        dense_prefix_layers=1,
+        dense_suffix_layers=1,
+        propagate_every=4,
+    )
+
+    assert table.history_keep_ratios == base.history_keep_ratios
+    assert table.current_keep_ratios == (
+        (0.20, 0.50, 0.50, 0.50, 0.50, 0.75, 0.75, 0.75, 0.75, 0.20),
+    )
+
+
+def test_segment_floor_is_applied_to_every_packed_layer() -> None:
+    base = DynamicPackedBudgetTable.constant(
+        num_dit_steps=1,
+        num_layers=7,
+        history_keep_ratio=0.20,
+        current_keep_ratio=0.35,
+    )
+    table = build_segment_max_table(
+        base,
+        current_floor=0.75,
+        dense_prefix_layers=1,
+        dense_suffix_layers=1,
+        propagate_every=3,
+    )
+
+    assert table.current_keep_ratios == (
+        (0.35, 0.75, 0.75, 0.75, 0.75, 0.75, 0.35),
+    )
