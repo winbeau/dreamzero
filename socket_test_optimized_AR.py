@@ -46,6 +46,11 @@ class Args:
     anchor_sparse_probe_dim: int = 16
     anchor_sparse_num_router_heads: int = 4
     anchor_sparse_smooth_radius: int = 1
+    anchor_sparse_current_keep_ratio: float = 1.0
+    anchor_sparse_dense_prefix_layers: int = 1
+    anchor_sparse_dense_suffix_layers: int = 1
+    anchor_sparse_propagate_radius: int = 0
+    anchor_sparse_propagate_every: int = 1
     anchor_sparse_reuse_denoise: bool = True
     anchor_sparse_record_diagnostics: bool = False
 
@@ -835,14 +840,26 @@ def main(args: Args) -> None:
             probe_dim=args.anchor_sparse_probe_dim,
             num_router_heads=args.anchor_sparse_num_router_heads,
             smooth_radius=args.anchor_sparse_smooth_radius,
+            current_keep_ratio=args.anchor_sparse_current_keep_ratio,
+            dense_prefix_layers=args.anchor_sparse_dense_prefix_layers,
+            dense_suffix_layers=args.anchor_sparse_dense_suffix_layers,
+            propagate_radius=args.anchor_sparse_propagate_radius,
+            propagate_every=args.anchor_sparse_propagate_every,
             reuse_denoise=args.anchor_sparse_reuse_denoise,
             record_diagnostics=args.anchor_sparse_record_diagnostics,
         )
     logger.info(
-        "Embodied anchor sparse attention: enabled=%s keep_ratio=%.3f "
-        "recent_dense_frames=%d diagnostics=%s backend=%s",
+        "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
+        "current_keep=%.3f dense_prefix=%d dense_suffix=%d "
+        "propagate_radius=%d propagate_every=%d recent_dense_frames=%d "
+        "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
         args.anchor_sparse_keep_ratio,
+        args.anchor_sparse_current_keep_ratio,
+        args.anchor_sparse_dense_prefix_layers,
+        args.anchor_sparse_dense_suffix_layers,
+        args.anchor_sparse_propagate_radius,
+        args.anchor_sparse_propagate_every,
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
