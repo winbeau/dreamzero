@@ -226,6 +226,25 @@ def build_timestep_segment_policy(
     )
 
 
+def build_history_floor_table(
+    base: DynamicPackedBudgetTable,
+    *,
+    history_floor: float,
+) -> DynamicPackedBudgetTable:
+    """Promote historical K/V only, preserving current packed compute exactly."""
+
+    floor = canonical_budget(history_floor)
+    history = np.maximum(
+        np.asarray(base.history_keep_ratios, dtype=np.float64), floor
+    )
+    suffix = str(int(round(floor * 100)))
+    return DynamicPackedBudgetTable(
+        history_keep_ratios=tuple(map(tuple, history.tolist())),
+        current_keep_ratios=base.current_keep_ratios,
+        name=f"{base.name}_history_floor{suffix}",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-table", type=Path, required=True)
@@ -253,6 +272,13 @@ def main() -> None:
         help="Comma-separated propagation-segment groups for localized floors.",
     )
     parser.add_argument("--segment-group-floor-ratio", type=float, default=0.75)
+    parser.add_argument(
+        "--history-floor-ratios",
+        type=float,
+        nargs="*",
+        default=[0.75, 1.0],
+        help="Historical-K/V-only floors emitted for the timestep policies.",
+    )
     parser.add_argument("--dense-prefix-layers", type=int, default=1)
     parser.add_argument("--dense-suffix-layers", type=int, default=1)
     parser.add_argument("--propagate-every", type=int, default=5)
@@ -376,6 +402,19 @@ def main() -> None:
         args.output_dir / "timestep_segment_quality.json",
         quality,
     )
+    for policy_key, policy in (
+        ("timestep_segment_balanced", balanced),
+        ("timestep_segment_quality", quality),
+    ):
+        for ratio in args.history_floor_ratios:
+            floor = canonical_budget(ratio)
+            suffix = str(int(round(floor * 100)))
+            table = build_history_floor_table(policy, history_floor=floor)
+            record_table(
+                f"{policy_key}_history_floor_{suffix}",
+                args.output_dir / f"{policy_key}_history_floor_{suffix}.json",
+                table,
+            )
 
     for ratio in args.sentinel_current_keep_ratios:
         table = build_sentinel_table(

@@ -1,6 +1,7 @@
 import numpy as np
 
 from benchmarks.build_dynamic_propagation_sentinel_tables import (
+    build_history_floor_table,
     build_segment_group_floor_table,
     build_segment_max_table,
     build_sentinel_table,
@@ -152,3 +153,16 @@ def test_timestep_segment_policy_changes_only_selected_dit_and_segment() -> None
         (0.35, 0.75, 0.75, 0.75, 0.50, 0.50, 0.50, 0.35),
         (0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35),
     )
+
+
+def test_history_floor_preserves_current_compute_and_only_promotes_history() -> None:
+    base = DynamicPackedBudgetTable(
+        history_keep_ratios=((0.20, 0.50, 1.00),),
+        current_keep_ratios=((0.35, 0.75, 0.50),),
+        name="candidate",
+    )
+    table = build_history_floor_table(base, history_floor=0.75)
+
+    assert table.history_keep_ratios == ((0.75, 0.75, 1.00),)
+    assert table.current_keep_ratios == base.current_keep_ratios
+    assert table.name == "candidate_history_floor75"
