@@ -74,14 +74,21 @@ one denoising call, so it is conservative when denoising reuse is enabled.  The
 table uses one recent dense frame and is therefore an aggressive operator upper
 bound rather than the primary method configuration.  The primary configuration
 keeps both current frames dense; at 20%/25% old-frame keep ratio this executes
-37.8%/41.7% of a nine-frame video KV history.  These are operator-level gates,
-not end-to-end or quality results.  An actual
-FlashAttention 2 run also showed the same qualitative speed window, but the
-first exact 24-action rerun overlapped with an external GPU workload and is
-explicitly excluded from headline numbers.  The 20% and 25% configurations
-advance as the initial speed-quality candidates; an uncontended exact-shape FA2
-rerun with two recent dense frames is mandatory before freezing performance
-results.
+37.8%/41.7% of a nine-frame video KV history.
+
+An uncontended exact-shape FlashAttention 2 rerun was then repeated on physical
+H200 GPUs 2--5 with 300 samples per GPU, 1,785 queries (1,760 video, 24 action,
+one state), and 7,920 video KV tokens.  The table reports the median across the
+four per-GPU p50 measurements:
+
+| Old-frame keep | Recent dense | Gather + FA2 p50 | Router p50 | Router/40 + attention | Speedup |
+|---:|---:|---:|---:|---:|---:|
+| 20% | 2 frames | 0.681 ms | 0.629 ms | 0.697 ms | 1.67x |
+| 25% | 2 frames | 0.725 ms | 0.637 ms | 0.741 ms | 1.57x |
+
+These are operator-level gates, not end-to-end or quality results.  The 20% and
+25% configurations advance as the initial speed-quality candidates; model-level
+full-budget parity, task quality, and end-to-end timing remain mandatory.
 
 ## Safety and parity invariants
 
