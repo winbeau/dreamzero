@@ -12,20 +12,29 @@ returned layer KV cache.
 
 The complete phase remains open. The checkpoint evidence rejects a single
 shared budget for all 40 heads, even when the early-DiT middle-stack budget is
-raised to 87.5%. A small number of M1-controlled head groups, confidence Dense
-fallback, and a full eight-DiT policy replay are therefore required before this
-phase can pass its quality gate.
+raised to 87.5%. A four-bucket M1 head-group executor is now implemented, but
+its extra 3--4 FA2 calls per layer recover neither video quality nor enough
+latency; this is retained as a negative ablation. Segmented spatial propagation
+inside the packed stack is substantially more effective. The current best
+early-DiT gate uses radius two every five layers, reaches 0.8987 video cosine at
+1.742x DiT speedup, and preserves the action gate. Confidence-controlled M1
+runtime routing and a full eight-DiT policy replay are still required before
+this phase can pass its quality gate.
 
 Implementation commits:
 
 - `28bbf47`: fixed-shape 8-by-40 dynamic budget table and Packed M2 runtime;
 - `6fe77ec`: reproducible Oracle-ordered fixed/timestep/layer/joint ablations;
 - `aa9706f`: per-rank early/late checkpoint gate and actual token accounting;
-- `e7d8c2d`: align the checkpoint gate with the eight real diffusion timesteps.
+- `e7d8c2d`: align the checkpoint gate with the eight real diffusion timesteps;
+- `dff03a7`: first fixed-membership dynamic packed head-group executor;
+- `0aa67eb`: group heads per `(timestep, layer)` by shared M1 budget bucket;
+- `45db7d4`: segmented packed spatial propagation without per-layer full scatter;
+- `71b1a58`: reproducible per-rank propagation sweep and boundary accounting.
 
 All listed commits are pushed to
 `origin/codex/dreamzero-anchor-sparse-opt`, and the H200 checkout is
-fast-forwarded through `e7d8c2d`.
+fast-forwarded through `71b1a58`.
 
 ## Runtime contract
 
@@ -141,6 +150,93 @@ as an executor-only trace: it varied the budget index while leaving the
 synthetic checkpoint timestep fixed at 750. It is excluded from the table
 above and from quality claims.
 
+## M1 head-group executor gate
+
+The calibrated M1 prior is quantized to four executor buckets
+`[25, 50, 75, 100]%`. Heads are regrouped independently for each
+`(timestep, layer)` cell, so a critical Dense head does not force unrelated
+heads into the Dense group. Group membership, gathered historical KV, and
+indices are cached. Current Q/O/FFN still follow the timestep/layer packed
+budget, while each historical-KV group uses one fixed-shape FA2 call. The 25
+action/state registers remain Dense in every group.
+
+The leakage-safe prior table has mean historical-KV budget 76.17%, with 37.59%
+of head cells assigned Dense. It uses 3--4 nonempty groups in typical layers.
+The first fixed-membership design was rejected before promotion because taking
+the maximum budget within a static group made more than 85% of effective group
+cells Dense; `0aa67eb` replaces it with dynamic shared-ratio membership.
+
+| M1 head groups + aggressive current Q | DiT / timestep | Dense p50 | Sparse p50 | Speedup | Action cosine | Action rel-L2 | Video cosine | Video rel-L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| four dynamic groups | early / 999 | 191.21 ms | 163.79 ms | 1.167x | 0.999821 | 1.902% | 0.4920 | 144.13% |
+| four dynamic groups | late / 249 | 187.19 ms | 116.79 ms | 1.603x | 0.999702 | 2.497% | 0.3578 | 210.74% |
+
+This negative result isolates two issues. Historical-KV head grouping does not
+repair error caused by dropping current video queries, and launching 3--4 FA2
+calls per layer largely removes the packed-kernel speed advantage. The result
+does not reject head-dependent M1 budgets; it rejects this particular
+historical-KV-only multi-call realization as the final fast path. Its exact
+full-budget video/action/cache invariant still passes.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/
+    m1_classifier/20260830_full_v2_calibrated/
+      selected_m1_bundle_v2_portable.joblib
+    dynamic_budgets/
+      20260830_m1_head_groups/prior_mean_group4.json
+      20260830_m1_headgroup_aggressive_tl_early_late_gpu01/
+```
+
+## Segmented packed spatial propagation gate
+
+At a propagation boundary, the executor reconstructs the maximum nested anchor
+prefix updated anywhere in the preceding segment, computes its delta, and
+propagates that delta over the original frame/row/column grid with a local
+spatial average. Selected anchors and all action/state registers remain exact.
+The result is immediately repacked for the next segment; the executor does not
+return to a full-sequence representation at every Transformer layer. Route,
+ordering, RoPE positions, and preallocated buffers are reused.
+
+The following rows all use the aggressive joint current/history budget at the
+real early timestep 999. They compare propagation shape/frequency while holding
+the 38-layer packed interval and actual DiT count fixed.
+
+| Propagation | Boundaries | Dense p50 | Sparse p50 | Speedup | Action cosine | Action rel-L2 | Video cosine | Video rel-L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| radius 1 / every 5 layers | 8 | 188.02 ms | 112.23 ms | 1.675x | 0.999837 | 1.970% | 0.7719 | 75.47% |
+| radius 1 / every 3 layers | 13 | 187.45 ms | 110.61 ms | 1.695x | 0.999862 | 1.696% | 0.7824 | 72.23% |
+| radius 2 / every 5 layers | 8 | 187.69 ms | 107.76 ms | 1.742x | 0.999845 | 1.914% | 0.8987 | 47.22% |
+
+The first row was captured before boundary accounting was moved ahead of the
+independent full-budget cache check, so its JSON contains a reset counter of
+zero; the configured 38-layer interval has eight boundaries. Commit `71b1a58`
+fixes the metric, and the two sweep rows report 13 and eight boundaries
+directly. The forward outputs and timings of the earlier row remain valid.
+
+Radius matters more than update frequency: increasing radius from one to two
+at the same five-layer interval raises early video cosine by 0.1268 while also
+improving the measured speed from 1.675x to 1.742x in this paired run. Merely
+changing the radius-one interval from five to three layers yields only a 0.0105
+cosine gain. Radius two every five layers is therefore the current propagation
+candidate for eight-DiT replay, not yet a final quality configuration.
+
+For completeness, radius one every five layers at the real late timestep 249
+measures 2.614x, action cosine 0.999889, and video cosine 0.5158. Every
+propagation row independently passes exact full-budget video, action, and cache
+checks.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/dynamic_budgets/
+    20260830_aggressive_tl_prop5_r1_gpu01/
+    20260830_aggressive_tl_prop_sweep_early_gpu01/
+```
+
 ## Interpretation and next gate
 
 The timestep hypothesis is useful for compute allocation: the Oracle-supported
@@ -150,15 +246,23 @@ strongly in the Dense Oracle.
 
 However, one shared token budget across every head is not a viable final
 policy. Raising all heads together spends nearly Dense compute on early DiT
-without recovering video. The next executor revision must therefore:
+without recovering video. Historical-KV-only head grouping is also not the
+answer: it keeps current-token starvation unchanged and introduces too many
+small attention launches. Spatial propagation demonstrates that restoring
+information to unselected current tokens is the higher-leverage direction.
 
-1. map the calibrated M1 output to a small number of fixed head groups;
-2. keep critical and confidence-uncertain groups Dense;
-3. use group-specific nested Q/K/V lengths with fixed-shape FA2 calls;
-4. apply the O projection without dropping the 25 Dense registers;
-5. log category, confidence, fallback, and effective group budget;
-6. replay all eight real DiT evaluations on held-out DROID requests before any
-   final quality claim.
+The next gate is therefore:
+
+1. retain radius-two/every-five segmented propagation as the current candidate;
+2. test a quality/aggressive hybrid current-token schedule, especially the
+   Oracle-sensitive late-layer recovery region;
+3. map calibrated per-request M1 confidence to a small number of shared groups
+   or a single promoted group shape, avoiding 3--4 FA2 launches in every layer;
+4. keep critical and confidence-uncertain routes Dense and log every fallback;
+5. replay all eight real DiT evaluations on held-out DROID requests before any
+   final quality claim;
+6. keep VV extrapolation as a separately timed late-step module so its gain is
+   never attributed to sparse attention.
 
 The aggressive and quality tables remain performance/structure ablations. No
 current dynamic table is promoted as the final M1 policy.
