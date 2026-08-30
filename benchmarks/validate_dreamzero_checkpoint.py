@@ -43,6 +43,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dense-prefix-layers", type=int, default=1)
     parser.add_argument("--dense-suffix-layers", type=int, default=1)
+    parser.add_argument(
+        "--dense-prefix-layer-candidates",
+        type=int,
+        nargs="+",
+        help="Optional per-rank prefix depths aligned with keep-ratios.",
+    )
+    parser.add_argument(
+        "--dense-suffix-layer-candidates",
+        type=int,
+        nargs="+",
+        help="Optional per-rank suffix depths aligned with keep-ratios.",
+    )
     parser.add_argument("--propagate-radius", type=int, default=0)
     parser.add_argument("--propagate-every", type=int, default=1)
     parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
@@ -251,6 +263,16 @@ def relative_l2(reference: torch.Tensor, candidate: torch.Tensor) -> float:
     return float((numerator / denominator).item())
 
 
+def cosine_similarity(reference: torch.Tensor, candidate: torch.Tensor) -> float:
+    reference_flat = reference.float().reshape(-1)
+    candidate_flat = candidate.float().reshape(-1)
+    denominator = (
+        torch.linalg.vector_norm(reference_flat)
+        * torch.linalg.vector_norm(candidate_flat)
+    ).clamp_min(1e-12)
+    return float(torch.dot(reference_flat, candidate_flat).div(denominator).item())
+
+
 def main() -> None:
     args = parse_args()
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -284,6 +306,12 @@ def main() -> None:
         raise ValueError(
             "Packed Middle Stack requires attention-query and current keep ratios to match"
         )
+    for name, candidates in (
+        ("dense-prefix-layer-candidates", args.dense_prefix_layer_candidates),
+        ("dense-suffix-layer-candidates", args.dense_suffix_layer_candidates),
+    ):
+        if candidates is not None and len(candidates) != len(args.keep_ratios):
+            raise ValueError(f"{name} must align one-to-one with keep-ratios")
     physical_gpu = args.physical_gpus[local_rank]
 
     load_start = time.perf_counter()
@@ -318,6 +346,16 @@ def main() -> None:
     candidate_attention_query_keep_ratio = args.attention_query_keep_ratios[
         candidate_index
     ]
+    candidate_dense_prefix_layers = (
+        args.dense_prefix_layer_candidates[candidate_index]
+        if args.dense_prefix_layer_candidates is not None
+        else args.dense_prefix_layers
+    )
+    candidate_dense_suffix_layers = (
+        args.dense_suffix_layer_candidates[candidate_index]
+        if args.dense_suffix_layer_candidates is not None
+        else args.dense_suffix_layers
+    )
 
     with torch.inference_mode():
         diffusion_model.configure_anchor_sparse_attention(enabled=False)
@@ -385,8 +423,8 @@ def main() -> None:
             recent_dense_frames=2,
             current_keep_ratio=candidate_current_keep_ratio,
             attention_query_keep_ratio=candidate_attention_query_keep_ratio,
-            dense_prefix_layers=args.dense_prefix_layers,
-            dense_suffix_layers=args.dense_suffix_layers,
+            dense_prefix_layers=candidate_dense_prefix_layers,
+            dense_suffix_layers=candidate_dense_suffix_layers,
             propagate_radius=args.propagate_radius,
             propagate_every=args.propagate_every,
             reuse_denoise=args.reuse_denoise,
@@ -443,6 +481,20 @@ def main() -> None:
 
     dense_p50 = statistics.median(dense_samples)
     sparse_p50 = statistics.median(sparse_samples)
+    current_frames = 2
+    recent_dense_frames = 2
+    dense_history_frames = min(
+        args.history_frames,
+        max(0, recent_dense_frames - current_frames),
+    )
+    sparse_history_frames = args.history_frames - dense_history_frames
+    packed_history_video_tokens = (
+        dense_history_frames * 880
+        + sparse_history_frames * max(1, round(880 * candidate_keep_ratio))
+    )
+    packed_current_video_tokens = (
+        current_frames * max(1, round(880 * candidate_current_keep_ratio))
+    )
     result = {
         "rank": rank,
         "physical_gpu": physical_gpu,
@@ -451,13 +503,13 @@ def main() -> None:
         "load_cpu_seconds": load_cpu_seconds,
         "move_gpu_seconds": move_gpu_seconds,
         "history_frames": args.history_frames,
-        "current_frames": 2,
+        "current_frames": current_frames,
         "keep_ratio": candidate_keep_ratio,
         "current_keep_ratio": candidate_current_keep_ratio,
         "attention_query_keep_ratio": candidate_attention_query_keep_ratio,
-        "recent_dense_frames": 2,
-        "dense_prefix_layers": args.dense_prefix_layers,
-        "dense_suffix_layers": args.dense_suffix_layers,
+        "recent_dense_frames": recent_dense_frames,
+        "dense_prefix_layers": candidate_dense_prefix_layers,
+        "dense_suffix_layers": candidate_dense_suffix_layers,
         "propagate_radius": args.propagate_radius,
         "propagate_every": args.propagate_every,
         "reuse_denoise": args.reuse_denoise,
@@ -478,13 +530,29 @@ def main() -> None:
         "no_update_sparse_action_exact": no_update_sparse_action_exact,
         "sparse_video_relative_l2": relative_l2(dense_video, sparse_video),
         "sparse_action_relative_l2": relative_l2(dense_action, sparse_action),
+        "sparse_video_cosine": cosine_similarity(dense_video, sparse_video),
+        "sparse_action_cosine": cosine_similarity(dense_action, sparse_action),
         "selected_video_tokens": route.selected_video_tokens if route is not None else None,
         "selected_current_query_tokens": (
-            2 * max(1, round(880 * candidate_attention_query_keep_ratio))
-            if args.current_attention and candidate_attention_query_keep_ratio < 1.0
+            current_frames
+            * max(1, round(880 * candidate_attention_query_keep_ratio))
+            if (
+                args.packed_middle
+                or (
+                    args.current_attention
+                    and candidate_attention_query_keep_ratio < 1.0
+                )
+            )
             else 1760
         ),
         "num_video_frames": route.num_video_frames if route is not None else None,
+        "packed_history_video_tokens": packed_history_video_tokens,
+        "packed_current_video_tokens": packed_current_video_tokens,
+        "packed_action_state_tokens": 25,
+        "packed_attention_query_tokens": packed_current_video_tokens + 25,
+        "packed_attention_key_value_tokens": (
+            packed_history_video_tokens + packed_current_video_tokens + 25
+        ),
         "max_memory_allocated_gib": torch.cuda.max_memory_allocated(device) / 1024**3,
     }
 
