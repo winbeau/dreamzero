@@ -127,13 +127,46 @@ performance gates.  The 90/90 pilot narrowly misses the 1.30x mean target and
 has a much wider tail despite its faster isolated DiT.  This is evidence that
 maximal token sparsity is not the end-to-end optimum.
 
+## Three-seed 100-request control
+
+The 80/80 configuration was then evaluated with three independent fixed seeds,
+100 measured requests per seed, on the same physical GPUs 5--6.  Dense and
+sparse services were run sequentially, and all 300 requests were paired by
+seed and request index.
+
+| Seed | Dense mean | Sparse mean | Mean speedup | Dense P50 | Sparse P50 | P50 speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20260830 | 1.7842 s | 1.4012 s | 1.273x | 1.7757 s | 1.3492 s | 1.316x |
+| 20260831 | 1.7784 s | 1.3733 s | 1.295x | 1.7763 s | 1.3461 s | 1.320x |
+| 20260832 | 1.7768 s | 1.3827 s | 1.285x | 1.7672 s | 1.3476 s | 1.311x |
+
+Combined 300-pair statistics:
+
+- dense/sparse mean: 1.7798 s / 1.3857 s, or 1.284x;
+- dense/sparse P50: 1.7750 s / 1.3475 s, or 1.317x;
+- dense/sparse P90: 1.8928 s / 1.4702 s, or 1.287x;
+- paired geometric-mean speedup: 1.285x;
+- paired bootstrap 95% CI: [1.275x, 1.295x];
+- sparse faster fraction: 300 / 300;
+- paired speedup range: 1.055x--1.459x.
+
+The larger control shows that the 20-request mean estimate was optimistic.
+P50, confidence-interval, and faster-fraction gates remain strong, but the
+1.284x mean misses the 1.30x paper target by about 1.2 percentage points.  No
+requests or seeds are excluded.
+
+Raw files and the aggregate comparison are under
+`e2e_server/20260830_100x3/`, including
+`paired_dense_vs_80_80_all_300.json`.
+
 ## Decision
 
 - Promote the exact no-update/history-KV optimization for all configurations.
 - Keep 0.20/0.50 without sparse current self-attention as the conservative
   implementation default until task quality is measured.
 - Retain 80/80 with sparse current self-attention as the primary speed-ceiling
-  ablation because it is the fastest stable end-to-end configuration tested.
+  ablation because it is the fastest stable end-to-end configuration tested,
+  while noting that its 300-request mean is 1.284x rather than the 1.30x target.
 - Retain 90/90 as an ablation showing diminishing systems returns and severe
   numerical degradation; do not use it as the main candidate.
 - Advance both the conservative candidate and 80/80 ablation to matched
