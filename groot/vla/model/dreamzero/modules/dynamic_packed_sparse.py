@@ -35,7 +35,14 @@ def _weighted_view_positions(capacities: tuple[int, ...]) -> tuple[tuple[int, ..
         raise ValueError("capacities must be positive")
     used = [0] * len(capacities)
     positions = [[] for _ in capacities]
-    for output_position in range(sum(capacities)):
+    output_position = 0
+    # Preserve the old router's minimum-view guarantee for every prefix whose
+    # budget can represent all physical views.
+    for index in range(len(capacities)):
+        positions[index].append(output_position)
+        used[index] += 1
+        output_position += 1
+    for output_position in range(output_position, sum(capacities)):
         candidates = [index for index, capacity in enumerate(capacities) if used[index] < capacity]
         selected = min(
             candidates,
