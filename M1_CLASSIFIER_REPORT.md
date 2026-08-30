@@ -19,9 +19,25 @@ Implementation commits:
 - `14b3f40`, `8bba7e0`: real Oracle parquet integration and schema fixes;
 - `3e8e4fb`: persisted deployment prior table and bundle metadata;
 - `2b8d64d`: calibrated fallback and minimum-macro-F1 model selection.
+- `c577622`: portable runtime `RoutePolicy` type for direct bundle loading.
 
 All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and
 the H200 checkout was fast-forwarded through them.
+
+The original v2 bundle encoded `RoutePolicy` under the training script's
+`__main__` module and therefore could not be loaded by a clean deployment
+process. It has been losslessly migrated to schema v2 and verified in a fresh
+Python process at:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/m1_classifier/20260830_full_v2_calibrated/
+    selected_m1_bundle_v2_portable.joblib
+```
+
+The migrated artifact retains the selected estimator, confidence calibrator,
+threshold `0.9598636879969709`, zero mechanical bucket promotion, and all
+12,800 `(t,l,h)` train-only prior rows.
 
 ## Data and split protocol
 
