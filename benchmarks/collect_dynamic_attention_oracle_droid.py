@@ -215,6 +215,24 @@ def _capture_gate(jsonl_path: Path, expected_layers: list[int]) -> dict[str, obj
     return gate
 
 
+def _pad_leading_video_frames(data_point: dict, expected_frames: int) -> None:
+    """Restore repeated boundary frames that timestamp decoding deduplicates."""
+
+    for key, value in data_point.items():
+        if not key.startswith("video."):
+            continue
+        if value.shape[0] > expected_frames:
+            raise ValueError(
+                f"Video decoder returned {value.shape[0]} frames, expected {expected_frames}"
+            )
+        missing = expected_frames - value.shape[0]
+        if missing:
+            if value.shape[0] == 0:
+                raise ValueError(f"Video decoder returned no frames for {key}")
+            leading = np.repeat(value[:1], missing, axis=0)
+            data_point[key] = np.concatenate((leading, value), axis=0)
+
+
 def _request_data_point(
     dataset: LeRobotSingleDataset,
     *,
@@ -234,6 +252,7 @@ def _request_data_point(
             request_indices = delta_indices + base_step
         indices[key] = np.clip(request_indices, 0, trajectory_length - 1)
     data_point = dataset.get_step_data(trajectory_id, indices)
+    _pad_leading_video_frames(data_point, len(video_offsets))
     selected_language_key = LANGUAGE_KEYS[instruction_index]
     task = data_point[selected_language_key][0]
     for language_key in LANGUAGE_KEYS:
