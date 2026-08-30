@@ -242,6 +242,43 @@ def _pad_leading_video_frames(data_point: dict, expected_frames: int) -> None:
             data_point[key] = np.concatenate((leading, value), axis=0)
 
 
+def _condition_summary(data_point: dict) -> dict[str, float]:
+    state_values = [
+        np.asarray(value, dtype=np.float64).reshape(-1)
+        for key, value in data_point.items()
+        if key.startswith("state.")
+    ]
+    action_values = [
+        np.asarray(value, dtype=np.float64)
+        for key, value in data_point.items()
+        if key.startswith("action.")
+    ]
+    state = np.concatenate(state_values) if state_values else np.zeros(1)
+    action = (
+        np.concatenate([value.reshape(-1) for value in action_values])
+        if action_values
+        else np.zeros(1)
+    )
+    action_delta = (
+        np.concatenate(
+            [
+                (value[-1] - value[0]).reshape(-1)
+                for value in action_values
+                if value.shape[0] > 0
+            ]
+        )
+        if action_values
+        else np.zeros(1)
+    )
+    return {
+        "state_l2": float(np.linalg.vector_norm(state)),
+        "state_abs_mean": float(np.mean(np.abs(state))),
+        "action_l2": float(np.linalg.vector_norm(action)),
+        "action_std": float(np.std(action)),
+        "action_temporal_delta_l2": float(np.linalg.vector_norm(action_delta)),
+    }
+
+
 def _request_data_point(
     dataset: LeRobotSingleDataset,
     *,
@@ -289,6 +326,7 @@ def _warmup_history(
             video_offsets=(-3, -2, -1, 0),
             instruction_index=instruction_index,
         )
+        sample_metadata.update(_condition_summary(data_point))
         return task
 
     action_head = policy.trained_model.action_head
