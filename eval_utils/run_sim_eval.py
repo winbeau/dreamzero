@@ -18,6 +18,7 @@ Finally, run the evaluation script:
 python run_eval.py --episodes 10 --headless
 """
 
+import json
 import uuid
 
 import tyro
@@ -34,7 +35,12 @@ from tqdm import tqdm
 
 from openpi_client import image_tools
 from sim_evals.inference.abstract_client import InferenceClient
-from policy_client import WebsocketClientPolicy
+try:
+    from eval_utils.policy_client import WebsocketClientPolicy
+    from eval_utils.sim_eval_metrics import SCENE_SUCCESS_SPECS, evaluate_position_success
+except ModuleNotFoundError:
+    from policy_client import WebsocketClientPolicy
+    from sim_eval_metrics import SCENE_SUCCESS_SPECS, evaluate_position_success
 
 
 class DreamZeroJointPosClient(InferenceClient):
@@ -42,9 +48,11 @@ class DreamZeroJointPosClient(InferenceClient):
                 remote_host:str = "localhost", 
                 remote_port:int = 6000,
                 open_loop_horizon:int = 8,
+                print_request_shapes: bool = False,
     ) -> None:
         self.client = WebsocketClientPolicy(remote_host, remote_port)
         self.open_loop_horizon = open_loop_horizon
+        self.print_request_shapes = print_request_shapes
         self.actions_from_chunk_completed = 0
         self.pred_action_chunk = None
         self.session_id = str(uuid.uuid4())
@@ -85,8 +93,9 @@ class DreamZeroJointPosClient(InferenceClient):
                 "prompt": instruction,
                 "session_id": self.session_id,
             }
-            for k, v in request_data.items():
-                print(f"{k}: {v.shape if not isinstance(v, str) else v}")
+            if self.print_request_shapes:
+                for k, v in request_data.items():
+                    print(f"{k}: {v.shape if not isinstance(v, str) else v}")
             
             result = self.client.infer(request_data)
             actions = result["actions"] if isinstance(result, dict) else result
@@ -144,12 +153,18 @@ def main(
         headless: bool = True,
         host: str = "localhost",
         port: int = 6000,
+        device: str = "cuda:0",
+        seed: int = 0,
+        max_steps: int | None = None,
+        print_request_shapes: bool = False,
+        stop_on_success: bool = False,
         ):
     # launch omniverse app with arguments (inside function to prevent overriding tyro)
     from isaaclab.app import AppLauncher
     parser = argparse.ArgumentParser(description="Tutorial on creating an empty stage.")
     AppLauncher.add_app_launcher_args(parser)
     args_cli, _ = parser.parse_known_args()
+    args_cli.device = device
     args_cli.enable_cameras = True
     args_cli.headless = headless
     app_launcher = AppLauncher(args_cli)
@@ -181,36 +196,84 @@ def main(
     env_cfg.set_scene(scene)
     env = gym.make("DROID", cfg=env_cfg)
 
-    obs, _ = env.reset()
-    obs, _ = env.reset() # need second render cycle to get correctly loaded materials
-    client = DreamZeroJointPosClient(remote_host=host, remote_port=port)
+    client = DreamZeroJointPosClient(
+        remote_host=host,
+        remote_port=port,
+        print_request_shapes=print_request_shapes,
+    )
 
 
     video_dir = Path("runs") / datetime.now().strftime("%Y-%m-%d") / datetime.now().strftime("%H-%M-%S")
     video_dir.mkdir(parents=True, exist_ok=True)
-    video = []
-    ep = 0
-    max_steps = env.env.max_episode_length
+    episode_metrics = []
+    episode_steps = env.env.max_episode_length
+    if max_steps is not None:
+        if max_steps <= 0:
+            raise ValueError(f"max_steps must be positive, got {max_steps}")
+        episode_steps = min(episode_steps, max_steps)
     with torch.no_grad():
         for ep in range(episodes):
-            for _ in tqdm(range(max_steps), desc=f"Episode {ep+1}/{episodes}"):
+            episode_seed = seed + ep
+            obs, _ = env.reset(seed=episode_seed)
+            obs, _ = env.reset() # need second render cycle to get correctly loaded materials
+            client.reset()
+            scene_spec = SCENE_SUCCESS_SPECS[scene]
+            source_asset = env.unwrapped.scene[scene_spec["source_asset"]]
+            target_asset = env.unwrapped.scene[scene_spec["target_asset"]]
+            initial_source_position = source_asset.data.root_pos_w[0, :3].detach().cpu().numpy()
+            initial_target_position = target_asset.data.root_pos_w[0, :3].detach().cpu().numpy()
+            video = []
+            terminated = False
+            truncated = False
+            steps_taken = 0
+            final_metric = evaluate_position_success(
+                scene,
+                initial_source_position,
+                initial_target_position,
+            )
+            for _ in tqdm(range(episode_steps), desc=f"Episode {ep+1}/{episodes}"):
                 ret = client.infer(obs, instruction)
                 if not headless:
                     cv2.imshow("Right Camera", cv2.cvtColor(ret["viz"], cv2.COLOR_RGB2BGR))
                     cv2.waitKey(1)
                 video.append(ret["viz"])
-                action = torch.tensor(ret["action"])[None]
+                action = torch.as_tensor(
+                    ret["action"],
+                    dtype=torch.float32,
+                    device=env.unwrapped.device,
+                )[None]
                 obs, _, term, trunc, _ = env.step(action)
-                if term or trunc:
+                steps_taken += 1
+                terminated = bool(torch.as_tensor(term).any().item())
+                truncated = bool(torch.as_tensor(trunc).any().item())
+                final_metric = evaluate_position_success(
+                    scene,
+                    source_asset.data.root_pos_w[0, :3].detach().cpu().numpy(),
+                    target_asset.data.root_pos_w[0, :3].detach().cpu().numpy(),
+                )
+                if terminated or truncated or (stop_on_success and final_metric["success"]):
                     break
 
-            client.reset()
             mediapy.write_video(
                 video_dir / f"episode_{ep}.mp4",
                 video,
                 fps=15,
             )
-            video = []
+            episode_metric = {
+                "episode": ep,
+                "seed": episode_seed,
+                "scene": scene,
+                "instruction": instruction,
+                "steps": steps_taken,
+                "terminated": terminated,
+                "truncated": truncated,
+                "initial_source_position_m": initial_source_position.tolist(),
+                "initial_target_position_m": initial_target_position.tolist(),
+                **final_metric,
+            }
+            episode_metrics.append(episode_metric)
+            with (video_dir / "metrics.json").open("w") as metrics_file:
+                json.dump(episode_metrics, metrics_file, indent=2)
 
     env.close()
     simulation_app.close()
