@@ -4,10 +4,12 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     AnchorSparseConfig,
     ViewRegion,
     action_conditioned_anchor_scores,
+    build_current_video_query_route,
     build_video_key_route,
     droid_composite_view_regions,
     gather_sequence_by_index,
     route_indices_to_spatial_mask,
+    scatter_sequence_by_index,
     select_view_balanced_anchor_indices,
     smooth_spatial_scores,
     token_indices_to_pixel_boxes,
@@ -129,6 +131,24 @@ def test_full_budget_route_is_exact_dense_identity() -> None:
     assert torch.equal(gathered, sequence)
 
 
+def test_current_query_route_is_sparse_for_every_current_frame() -> None:
+    config = AnchorSparseConfig(
+        frame_seqlen=4,
+        grid_height=2,
+        grid_width=2,
+        keep_ratio=0.5,
+        recent_dense_frames=1,
+        smooth_radius=0,
+    )
+    scores = torch.tensor(
+        [[[1.0, 4.0, 2.0, 3.0], [8.0, 7.0, 6.0, 5.0]]]
+    )
+    route = build_current_video_query_route(scores, config, keep_ratio=0.5)
+    assert route.shape == (1, 4)
+    assert set(route[0, :2].tolist()) == {1, 3}
+    assert set(route[0, 2:].tolist()) == {4, 5}
+
+
 def test_batch_gather_matches_independent_index_select() -> None:
     sequence = torch.arange(2 * 6 * 3).reshape(2, 6, 3)
     indices = torch.tensor([[5, 1, 3], [0, 4, 2]])
@@ -137,6 +157,19 @@ def test_batch_gather_matches_independent_index_select() -> None:
         [sequence[0].index_select(0, indices[0]), sequence[1].index_select(0, indices[1])]
     )
     assert torch.equal(gathered, expected)
+
+
+def test_batch_scatter_replaces_only_selected_positions() -> None:
+    sequence = torch.arange(2 * 6 * 3).reshape(2, 6, 3)
+    indices = torch.tensor([[5, 1, 3], [0, 4, 2]])
+    updates = torch.full((2, 3, 3), -1)
+    scattered = scatter_sequence_by_index(sequence, indices, updates)
+    for batch in range(2):
+        for position in range(6):
+            if position in indices[batch].tolist():
+                assert torch.equal(scattered[batch, position], torch.full((3,), -1))
+            else:
+                assert torch.equal(scattered[batch, position], sequence[batch, position])
 
 
 def test_route_indices_convert_to_per_frame_spatial_mask() -> None:

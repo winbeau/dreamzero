@@ -223,6 +223,9 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     model.configure_anchor_sparse_attention(
         enabled=True,
         keep_ratio=0.2,
+        current_keep_ratio=0.25,
+        dense_prefix_layers=1,
+        dense_suffix_layers=0,
         probe_dim=2,
         num_router_heads=1,
         smooth_radius=0,
@@ -239,7 +242,32 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     )
     assert model.blocks[0].self_attn.record_anchor_diagnostics
     assert not model.blocks[1].self_attn.record_anchor_diagnostics
+    assert not model.blocks[0].sparse_current_compute
+    assert model.blocks[1].sparse_current_compute
 
     model.configure_anchor_sparse_attention(enabled=False)
     assert model.anchor_sparse_config is None
     assert all(block.self_attn.anchor_sparse_config is None for block in model.blocks)
+    assert not any(block.sparse_current_compute for block in model.blocks)
+
+
+def test_sparse_current_update_keeps_unselected_video_tokens_and_updates_registers() -> None:
+    module = _load_attention_module()
+    x = torch.arange(7, dtype=torch.float32).reshape(1, 7, 1)
+    e = tuple(torch.zeros(1, 7, 1, 1) for _ in range(6))
+    current_video_indices = torch.tensor([[1, 3]])
+
+    def add_ten(selected_x, selected_e):
+        assert selected_x.shape == (1, 5, 1)
+        assert all(part.shape == (1, 5, 1, 1) for part in selected_e)
+        return selected_x + 10
+
+    updated = module.sparse_current_token_update(
+        x=x,
+        e=e,
+        current_video_indices=current_video_indices,
+        action_register_length=3,
+        update_fn=add_ten,
+    )
+
+    assert torch.equal(updated[0, :, 0], torch.tensor([0.0, 11.0, 2.0, 13.0, 14.0, 15.0, 16.0]))

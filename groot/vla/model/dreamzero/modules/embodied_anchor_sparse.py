@@ -21,7 +21,7 @@ layer instead of one kernel per head/profile.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 import torch
@@ -356,6 +356,40 @@ def select_view_balanced_anchor_indices(
     return torch.cat(selected, dim=-1).sort(dim=-1).values
 
 
+def build_current_video_query_route(
+    frame_scores: torch.Tensor,
+    config: AnchorSparseConfig,
+    *,
+    keep_ratio: float,
+) -> torch.Tensor:
+    """Build frame-local anchor indices for current video-query computation.
+
+    Unlike historical KV routing, every current frame uses the same sparse
+    budget.  Returned indices address the flattened current-video sequence and
+    therefore start at zero, independent of the historical cache length.
+    """
+
+    if not 0.0 < keep_ratio <= 1.0:
+        raise ValueError("keep_ratio must lie in (0, 1]")
+    if frame_scores.ndim != 3 or frame_scores.shape[-1] != config.frame_seqlen:
+        raise ValueError("frame_scores must have shape [B, F, frame_seqlen]")
+    batch, num_frames, _ = frame_scores.shape
+    if num_frames == 0:
+        return torch.empty((batch, 0), dtype=torch.long, device=frame_scores.device)
+
+    query_config = replace(
+        config,
+        keep_ratio=keep_ratio,
+        recent_dense_frames=0,
+    )
+    local = select_view_balanced_anchor_indices(frame_scores, query_config)
+    offsets = (
+        torch.arange(num_frames, device=frame_scores.device, dtype=local.dtype)
+        * config.frame_seqlen
+    )
+    return (local + offsets.view(1, num_frames, 1)).reshape(batch, -1)
+
+
 def build_video_key_route(
     frame_scores: torch.Tensor,
     config: AnchorSparseConfig,
@@ -458,6 +492,32 @@ def gather_sequence_by_index(
     expand_shape = (*indices.shape, *sequence.shape[2:])
     expanded = indices.view(view_shape).expand(expand_shape)
     return torch.gather(sequence, dim=1, index=expanded)
+
+
+def scatter_sequence_by_index(
+    sequence: torch.Tensor,
+    indices: torch.Tensor,
+    updates: torch.Tensor,
+    *,
+    validate_indices: bool = True,
+) -> torch.Tensor:
+    """Return ``sequence`` with batch-specific sequence positions replaced."""
+
+    if sequence.ndim < 2 or indices.ndim != 2:
+        raise ValueError("sequence must be [B, L, ...] and indices must be [B, K]")
+    if sequence.shape[0] != indices.shape[0]:
+        raise ValueError("sequence and indices batch sizes differ")
+    expected_shape = (sequence.shape[0], indices.shape[1], *sequence.shape[2:])
+    if updates.shape != expected_shape:
+        raise ValueError(
+            f"updates must have shape {expected_shape}, got {tuple(updates.shape)}"
+        )
+    if validate_indices and (torch.any(indices < 0) or torch.any(indices >= sequence.shape[1])):
+        raise ValueError("indices contain an out-of-range sequence position")
+    view_shape = (*indices.shape, *((1,) * (sequence.ndim - 2)))
+    expand_shape = (*indices.shape, *sequence.shape[2:])
+    expanded = indices.view(view_shape).expand(expand_shape)
+    return sequence.scatter(dim=1, index=expanded, src=updates)
 
 
 def route_indices_to_spatial_mask(

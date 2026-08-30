@@ -4,9 +4,11 @@ from groot.vla.model.dreamzero.modules.wan2_1_attention import AttentionModule
 from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     AnchorRoute,
     AnchorSparseConfig,
+    build_current_video_query_route,
     droid_composite_view_regions,
     gather_sequence_by_index,
     route_action_conditioned_video_keys,
+    scatter_sequence_by_index,
 )
 from groot.vla.model.n1_5.modules.action_encoder import (
     SinusoidalPositionalEncoding,
@@ -33,6 +35,45 @@ import torch.distributed as dist
 import os
 
 ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
+
+
+def sparse_current_token_update(
+    x: torch.Tensor,
+    e: tuple[torch.Tensor, ...],
+    current_video_indices: torch.Tensor,
+    action_register_length: int,
+    update_fn,
+) -> torch.Tensor:
+    """Apply a token-wise block update to anchors plus all action/state tokens.
+
+    The unselected current-video tokens retain the self-attention residual that
+    precedes this function.  Action and state registers always remain dense.
+    """
+
+    if action_register_length <= 0 or action_register_length >= x.shape[1]:
+        raise ValueError("Sparse current-token compute requires a non-empty register suffix")
+    video_seq_len = x.shape[1] - action_register_length
+    if current_video_indices.shape[0] != x.shape[0]:
+        raise ValueError("current_video_indices batch size differs from x")
+    register_indices = torch.arange(
+        video_seq_len,
+        x.shape[1],
+        device=x.device,
+        dtype=torch.long,
+    ).expand(x.shape[0], -1)
+    compute_indices = torch.cat([current_video_indices, register_indices], dim=1)
+    selected_x = gather_sequence_by_index(x, compute_indices, validate_indices=False)
+    selected_e = tuple(
+        gather_sequence_by_index(part, compute_indices, validate_indices=False)
+        for part in e
+    )
+    updated = update_fn(selected_x, selected_e)
+    return scatter_sequence_by_index(
+        x,
+        compute_indices,
+        updated,
+        validate_indices=False,
+    )
 
 
 class CategorySpecificLinear(nn.Module):
@@ -1090,7 +1131,15 @@ class CausalWanSelfAttention(nn.Module):
                 attention_k = new_k
                 attention_v = new_v
                 sparse_config = self.anchor_sparse_config
-                if sparse_config is not None and sparse_config.keep_ratio < 1.0:
+                routing_active = (
+                    sparse_config is not None
+                    and (
+                        sparse_config.keep_ratio < 1.0
+                        or self.record_anchor_diagnostics
+                    )
+                )
+                if routing_active:
+                    assert sparse_config is not None
                     if new_k.shape[1] % sparse_config.frame_seqlen != 0:
                         raise ValueError(
                             "Embodied anchor routing requires complete video frames, got "
@@ -1123,16 +1172,17 @@ class CausalWanSelfAttention(nn.Module):
                         updated_anchor_route_indices = route.video_indices.detach()
                         if self.record_anchor_diagnostics:
                             self.last_anchor_route = route.detached()
-                    attention_k = gather_sequence_by_index(
-                        new_k,
-                        updated_anchor_route_indices,
-                        validate_indices=False,
-                    )
-                    attention_v = gather_sequence_by_index(
-                        new_v,
-                        updated_anchor_route_indices,
-                        validate_indices=False,
-                    )
+                    if sparse_config.keep_ratio < 1.0:
+                        attention_k = gather_sequence_by_index(
+                            new_k,
+                            updated_anchor_route_indices,
+                            validate_indices=False,
+                        )
+                        attention_v = gather_sequence_by_index(
+                            new_v,
+                            updated_anchor_route_indices,
+                            validate_indices=False,
+                        )
                 x = self.attn(
                     torch.cat([roped_query, roped_action_query], dim=1),
                     torch.cat([attention_k, roped_action_key], dim=1),
@@ -1179,6 +1229,7 @@ class CausalWanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        self.sparse_current_compute = False
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
@@ -1226,6 +1277,7 @@ class CausalWanAttentionBlock(nn.Module):
         current_start_frame: int = 0,
         is_tf: bool = True,
         anchor_route_indices: torch.Tensor | None = None,
+        current_video_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
         Args:
@@ -1264,7 +1316,7 @@ class CausalWanAttentionBlock(nn.Module):
         x = x + (y * e[2].squeeze(2))
 
         # cross-attention & ffn function
-        def cross_attn_ffn(x, context, e):
+        def cross_attn_ffn(x, e):
             x = x + self.cross_attn(self.norm3(x), context)
             y = self.ffn(
                 (self.norm2(x) * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
@@ -1272,7 +1324,18 @@ class CausalWanAttentionBlock(nn.Module):
             x = x + (y * e[5].squeeze(2))
             return x
 
-        x = cross_attn_ffn(x, context, e)
+        if self.sparse_current_compute and current_video_indices is not None:
+            if action_register_length is None:
+                raise ValueError("Sparse current-token compute requires action/state registers")
+            x = sparse_current_token_update(
+                x=x,
+                e=e,
+                current_video_indices=current_video_indices,
+                action_register_length=action_register_length,
+                update_fn=cross_attn_ffn,
+            )
+        else:
+            x = cross_attn_ffn(x, e)
         return x, updated_kv_cache, updated_anchor_route_indices
 
 
@@ -1363,6 +1426,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  anchor_sparse_probe_dim=16,
                  anchor_sparse_num_router_heads=4,
                  anchor_sparse_smooth_radius=1,
+                 anchor_sparse_current_keep_ratio=1.0,
+                 anchor_sparse_dense_prefix_layers=1,
+                 anchor_sparse_dense_suffix_layers=1,
                  anchor_sparse_reuse_denoise=True,
                  anchor_sparse_record_diagnostics=False):
         r"""
@@ -1436,8 +1502,20 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.num_state_per_block = num_state_per_block
         self.concat_first_frame_latent = concat_first_frame_latent
         self.anchor_sparse_enabled = anchor_sparse_enabled
+        self.anchor_sparse_current_keep_ratio = anchor_sparse_current_keep_ratio
+        self.anchor_sparse_dense_prefix_layers = anchor_sparse_dense_prefix_layers
+        self.anchor_sparse_dense_suffix_layers = anchor_sparse_dense_suffix_layers
         self.anchor_sparse_reuse_denoise = anchor_sparse_reuse_denoise
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
+
+        if not 0.0 < anchor_sparse_current_keep_ratio <= 1.0:
+            raise ValueError("anchor_sparse_current_keep_ratio must lie in (0, 1]")
+        if anchor_sparse_dense_prefix_layers < 0 or anchor_sparse_dense_suffix_layers < 0:
+            raise ValueError("Dense prefix/suffix layer counts must be non-negative")
+        if anchor_sparse_current_keep_ratio < 1.0 and anchor_sparse_dense_prefix_layers < 1:
+            raise ValueError("Current-token routing requires at least one dense prefix layer")
+        if anchor_sparse_dense_prefix_layers + anchor_sparse_dense_suffix_layers > num_layers:
+            raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
 
         if anchor_sparse_enabled and frame_seqlen != 880:
             raise ValueError(
@@ -1463,6 +1541,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # the same causal control block.  These are intentionally plain Python
         # attributes rather than state-dict buffers.
         self._anchor_sparse_route_cache: torch.Tensor | None = None
+        self._anchor_sparse_current_route_cache: torch.Tensor | None = None
         self._anchor_sparse_route_cache_key: tuple[Any, ...] | None = None
         self._anchor_sparse_last_start_frame: int | None = None
 
@@ -1516,10 +1595,20 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 num_action_per_block,
                 num_state_per_block,
                 self.anchor_sparse_config,
-                anchor_sparse_record_diagnostics and block_index == 0,
+                (
+                    anchor_sparse_record_diagnostics
+                    or anchor_sparse_current_keep_ratio < 1.0
+                ) and block_index == 0,
             )
             for block_index in range(num_layers)
         ])
+        sparse_end = num_layers - anchor_sparse_dense_suffix_layers
+        for block_index, block in enumerate(self.blocks):
+            block.sparse_current_compute = (
+                anchor_sparse_enabled
+                and anchor_sparse_current_keep_ratio < 1.0
+                and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
+            )
 
         # head
         self.head = CausalHead(dim, out_dim, patch_size, eps)
@@ -1549,6 +1638,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         """Clear per-control-block anchor indices, e.g. at an episode reset."""
 
         self._anchor_sparse_route_cache = None
+        self._anchor_sparse_current_route_cache = None
         self._anchor_sparse_route_cache_key = None
         self._anchor_sparse_last_start_frame = None
         for block in self.blocks:
@@ -1563,6 +1653,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         probe_dim: int = 16,
         num_router_heads: int = 4,
         smooth_radius: int = 1,
+        current_keep_ratio: float = 1.0,
+        dense_prefix_layers: int = 1,
+        dense_suffix_layers: int = 1,
         reuse_denoise: bool = True,
         record_diagnostics: bool = False,
     ) -> None:
@@ -1579,6 +1672,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 "Embodied anchor routing currently supports only the released "
                 f"DreamZero-DROID 22x40 layout, got frame_seqlen={self.frame_seqlen}."
             )
+        if not 0.0 < current_keep_ratio <= 1.0:
+            raise ValueError("current_keep_ratio must lie in (0, 1]")
+        if dense_prefix_layers < 0 or dense_suffix_layers < 0:
+            raise ValueError("Dense prefix/suffix layer counts must be non-negative")
+        if current_keep_ratio < 1.0 and dense_prefix_layers < 1:
+            raise ValueError("Current-token routing requires at least one dense prefix layer")
+        if dense_prefix_layers + dense_suffix_layers > len(self.blocks):
+            raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
         config = None
         if enabled:
             config = AnchorSparseConfig(
@@ -1595,12 +1696,23 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         self.anchor_sparse_enabled = enabled
         self.anchor_sparse_config = config
+        self.anchor_sparse_current_keep_ratio = current_keep_ratio
+        self.anchor_sparse_dense_prefix_layers = dense_prefix_layers
+        self.anchor_sparse_dense_suffix_layers = dense_suffix_layers
         self.anchor_sparse_reuse_denoise = reuse_denoise
         self.anchor_sparse_record_diagnostics = record_diagnostics
+        sparse_end = len(self.blocks) - dense_suffix_layers
         for block_index, block in enumerate(self.blocks):
             block.self_attn.anchor_sparse_config = config
             block.self_attn.record_anchor_diagnostics = (
-                enabled and record_diagnostics and block_index == 0
+                enabled
+                and (record_diagnostics or current_keep_ratio < 1.0)
+                and block_index == 0
+            )
+            block.sparse_current_compute = (
+                enabled
+                and current_keep_ratio < 1.0
+                and dense_prefix_layers <= block_index < sparse_end
             )
         self.clear_anchor_sparse_route_cache()
 
@@ -1938,6 +2050,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         video_seq_len = x.shape[1]
 
         anchor_route_indices: torch.Tensor | None = None
+        current_video_indices: torch.Tensor | None = None
         anchor_route_cache_key: tuple[Any, ...] | None = None
         if self.anchor_sparse_config is not None and action is not None:
             if (
@@ -1975,6 +2088,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     and self._anchor_sparse_route_cache_key == anchor_route_cache_key
                 ):
                     anchor_route_indices = self._anchor_sparse_route_cache
+                    current_video_indices = self._anchor_sparse_current_route_cache
 
         if action is not None:
             embodiment_id = torch.tensor([0], device=x.device).repeat(x.shape[0])
@@ -2031,8 +2145,31 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 kv_cache=kv_cache[block_index],
                 current_start_frame=current_start_frame,
                 anchor_route_indices=anchor_route_indices,
+                current_video_indices=current_video_indices,
             )
             updated_kv_caches.append(updated_kv_cache)
+            if (
+                block_index == 0
+                and self.anchor_sparse_config is not None
+                and self.anchor_sparse_current_keep_ratio < 1.0
+                and current_video_indices is None
+            ):
+                route = block.self_attn.last_anchor_route
+                if route is None:
+                    raise RuntimeError(
+                        "The dense prefix layer did not produce scores for current-token routing"
+                    )
+                if video_seq_len % self.frame_seqlen != 0:
+                    raise ValueError(
+                        "Current-token routing requires complete video frames, got "
+                        f"{video_seq_len} tokens for frame_seqlen={self.frame_seqlen}"
+                    )
+                current_frames = video_seq_len // self.frame_seqlen
+                current_video_indices = build_current_video_query_route(
+                    route.scores[:, -current_frames:],
+                    self.anchor_sparse_config,
+                    keep_ratio=self.anchor_sparse_current_keep_ratio,
+                ).detach()
 
         if (
             self.anchor_sparse_reuse_denoise
@@ -2040,6 +2177,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             and anchor_route_indices is not None
         ):
             self._anchor_sparse_route_cache = anchor_route_indices.detach()
+            self._anchor_sparse_current_route_cache = (
+                current_video_indices.detach()
+                if current_video_indices is not None
+                else None
+            )
             self._anchor_sparse_route_cache_key = anchor_route_cache_key
 
         if action is not None:

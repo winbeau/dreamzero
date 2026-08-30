@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--keep-ratios", type=float, nargs="+", default=[0.20, 0.25])
+    parser.add_argument(
+        "--current-keep-ratios", type=float, nargs="+", default=[0.20, 0.25]
+    )
+    parser.add_argument("--dense-prefix-layers", type=int, default=1)
+    parser.add_argument("--dense-suffix-layers", type=int, default=1)
     parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
 
@@ -156,6 +161,8 @@ def main() -> None:
         )
     if not args.keep_ratios:
         raise ValueError("keep-ratios must contain at least one candidate")
+    if len(args.current_keep_ratios) != len(args.keep_ratios):
+        raise ValueError("current-keep-ratios must align one-to-one with keep-ratios")
     physical_gpu = args.physical_gpus[local_rank]
 
     load_start = time.perf_counter()
@@ -182,7 +189,9 @@ def main() -> None:
         device=device,
         history_frames=args.history_frames,
     )
-    candidate_keep_ratio = args.keep_ratios[rank % len(args.keep_ratios)]
+    candidate_index = rank % len(args.keep_ratios)
+    candidate_keep_ratio = args.keep_ratios[candidate_index]
+    candidate_current_keep_ratio = args.current_keep_ratios[candidate_index]
 
     with torch.inference_mode():
         diffusion_model.configure_anchor_sparse_attention(enabled=False)
@@ -197,6 +206,7 @@ def main() -> None:
             enabled=True,
             keep_ratio=1.0,
             recent_dense_frames=2,
+            current_keep_ratio=1.0,
             reuse_denoise=False,
         )
         full_video, full_action, full_caches = invoke(diffusion_model, inputs)
@@ -216,6 +226,9 @@ def main() -> None:
             enabled=True,
             keep_ratio=candidate_keep_ratio,
             recent_dense_frames=2,
+            current_keep_ratio=candidate_current_keep_ratio,
+            dense_prefix_layers=args.dense_prefix_layers,
+            dense_suffix_layers=args.dense_suffix_layers,
             reuse_denoise=args.reuse_denoise,
             record_diagnostics=True,
         )
@@ -240,7 +253,10 @@ def main() -> None:
         "history_frames": args.history_frames,
         "current_frames": 2,
         "keep_ratio": candidate_keep_ratio,
+        "current_keep_ratio": candidate_current_keep_ratio,
         "recent_dense_frames": 2,
+        "dense_prefix_layers": args.dense_prefix_layers,
+        "dense_suffix_layers": args.dense_suffix_layers,
         "reuse_denoise": args.reuse_denoise,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,
