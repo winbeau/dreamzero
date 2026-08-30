@@ -630,7 +630,6 @@ dependencies = [
     { name = "click", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "datasets", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "decord2", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "deepspeed", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "diffusers", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "dm-tree", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -700,6 +699,9 @@ dev = [
 gpu = [
     { name = "flash-attn", marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
+training = [
+    { name = "deepspeed", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -709,7 +711,7 @@ requires-dist = [
     { name = "click" },
     { name = "datasets", specifier = "==3.6.0" },
     { name = "decord2" },
-    { name = "deepspeed" },
+    { name = "deepspeed", marker = "extra == 'training'" },
     { name = "diffusers", specifier = "==0.30.2" },
     { name = "dm-tree" },
     { name = "einops", specifier = "==0.8.1" },
@@ -770,7 +772,7 @@ requires-dist = [
     { name = "tyro" },
     { name = "wandb" },
 ]
-provides-extras = ["dev", "deployment", "gpu"]
+provides-extras = ["dev", "deployment", "gpu", "training"]
 
 [[package]]
 name = "eigenpy"

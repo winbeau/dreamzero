@@ -77,7 +77,6 @@ dependencies = [
     "openpi-client==0.1.1",
     "huggingface_hub",
     "decord2",
-    "deepspeed",
     "tiktoken",
     "sentencepiece"
 ]
@@ -95,6 +94,9 @@ deployment = [
 ]
 gpu = [
     "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl",
+]
+training = [
+    "deepspeed",
 ]
 
 [tool.uv]
