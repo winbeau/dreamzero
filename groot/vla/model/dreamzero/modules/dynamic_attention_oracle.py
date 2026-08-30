@@ -398,7 +398,7 @@ def _attention_statistics_record(
 class DenseAttentionOracleCollector:
     """Collect per-step/layer/head Oracle features without changing outputs."""
 
-    schema_version = 1
+    schema_version = 2
 
     def __init__(self, config: DenseAttentionOracleConfig) -> None:
         self.config = config
@@ -408,7 +408,8 @@ class DenseAttentionOracleCollector:
         self.step_context: dict[str, int] | None = None
         self.records: list[dict[str, object]] = []
         self.support_profiles: dict[str, torch.Tensor] = {}
-        self.previous_support: dict[tuple[int, str], torch.Tensor] = {}
+        self.previous_support: dict[tuple[int, str, str], torch.Tensor] = {}
+        self.cfg_branch: str | None = None
 
     @property
     def active(self) -> bool:
@@ -445,6 +446,12 @@ class DenseAttentionOracleCollector:
         }
         self.step_context = None
         self.previous_support.clear()
+        self.cfg_branch = None
+
+    def set_cfg_branch(self, branch: str | None) -> None:
+        if branch is not None and branch not in {"conditional", "unconditional"}:
+            raise ValueError(f"Unsupported CFG branch: {branch}")
+        self.cfg_branch = branch
 
     def set_step(
         self,
@@ -472,7 +479,7 @@ class DenseAttentionOracleCollector:
         support: torch.Tensor,
         num_keys: int,
     ) -> torch.Tensor:
-        cache_key = (layer_index, query_kind)
+        cache_key = (layer_index, query_kind, self.cfg_branch or "single")
         previous = self.previous_support.get(cache_key)
         if previous is None:
             turnover = torch.zeros(
@@ -552,9 +559,12 @@ class DenseAttentionOracleCollector:
             action_support,
             video_key.shape[1],
         )
+        cfg_branch = self.cfg_branch or "single"
+        branch_suffix = "" if cfg_branch == "single" else f"_b{cfg_branch}"
         profile_prefix = (
             f"r{self.config.rank}_req{self.request_index:06d}_"
             f"d{self.step_context['dit_index']:02d}_l{layer_index:02d}"
+            f"{branch_suffix}"
         )
         # 7,920 keys fit in uint16.  Keep the ranking externally, never in Git.
         support_dtype = torch.uint16 if video_key.shape[1] <= 65535 else torch.int32
@@ -571,6 +581,7 @@ class DenseAttentionOracleCollector:
                 "rank": self.config.rank,
                 **self.request_metadata,
                 **self.step_context,
+                "cfg_branch": cfg_branch,
                 "layer_index": int(layer_index),
                 "num_heads": int(video_query.shape[2]),
                 "num_video_queries": int(video_query.shape[1]),
@@ -606,4 +617,5 @@ class DenseAttentionOracleCollector:
         self.previous_support.clear()
         self.step_context = None
         self.request_metadata = {}
+        self.cfg_branch = None
         return jsonl_path, profiles_path

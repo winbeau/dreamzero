@@ -1,3 +1,5 @@
+import json
+
 import torch
 
 from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
@@ -122,6 +124,60 @@ def test_collector_writes_one_request_with_step_layer_and_profiles(tmp_path) -> 
         "r0_req000000_d03_l04_action",
     }
     assert all(profile.shape == (2, 3) for profile in profiles.values())
+
+
+def test_cfg_branches_keep_profiles_and_turnover_independent(tmp_path) -> None:
+    collector = DenseAttentionOracleCollector(
+        DenseAttentionOracleConfig(
+            output_dir=tmp_path,
+            keep_ratios=(1.0, 0.5),
+            max_video_queries=2,
+            max_action_queries=1,
+            query_chunk_size=1,
+            support_ratio=0.5,
+        )
+    )
+    collector.begin_request(current_start_frame=7, instruction="move object")
+    generator = torch.Generator().manual_seed(19)
+    query = torch.randn(1, 3, 2, 4, generator=generator)
+    action_query = torch.randn(1, 1, 2, 4, generator=generator)
+    key = torch.randn(1, 6, 2, 4, generator=generator)
+    value = torch.randn(1, 6, 2, 4, generator=generator)
+
+    for dit_index in (0, 1):
+        collector.set_step(
+            scheduler_index=dit_index,
+            dit_index=dit_index,
+            scheduler_steps=16,
+            timestep=999 - dit_index,
+        )
+        for branch in ("conditional", "unconditional"):
+            collector.set_cfg_branch(branch)
+            collector.observe(
+                layer_index=0,
+                video_query=query,
+                action_query=action_query,
+                video_key=key,
+                video_value=value,
+            )
+
+    outputs = collector.flush_request()
+    assert outputs is not None
+    jsonl_path, profiles_path = outputs
+    records = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
+    profiles = torch.load(profiles_path, weights_only=True)
+    assert len(records) == 4
+    assert {record["cfg_branch"] for record in records} == {
+        "conditional",
+        "unconditional",
+    }
+    assert all(
+        record["video_support_turnover"] == [0.0, 0.0]
+        for record in records
+    )
+    assert len(profiles) == 8
+    assert any("_bconditional_" in key for key in profiles)
+    assert any("_bunconditional_" in key for key in profiles)
 
 
 def test_collector_layer_filter_skips_unselected_layers(tmp_path) -> None:

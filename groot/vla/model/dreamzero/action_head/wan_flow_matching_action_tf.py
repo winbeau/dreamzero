@@ -879,6 +879,17 @@ class WANPolicyHead(ActionHead):
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         predictions = []
         for index, prompt_emb in enumerate(context):
+            if self.ip_size > 1:
+                cfg_branch = "conditional" if self.ip_rank == 0 else "unconditional"
+            else:
+                cfg_branch = "conditional" if index == 0 else "unconditional"
+            set_oracle_cfg_branch = getattr(
+                self.model,
+                "set_dynamic_attention_oracle_cfg_branch",
+                None,
+            )
+            if set_oracle_cfg_branch is not None:
+                set_oracle_cfg_branch(cfg_branch)
             kv_cache = kv_caches[index]
             crossattn_cache = crossattn_caches[index]
             if not kv_cache_metadata["update_kv_cache"] and self.trt_engine is not None:

@@ -2021,6 +2021,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 timestep=timestep,
             )
 
+    def set_dynamic_attention_oracle_cfg_branch(self, branch: str | None) -> None:
+        collector = self._dynamic_attention_oracle_collector
+        if collector is not None:
+            collector.set_cfg_branch(branch)
+
     def flush_dynamic_attention_oracle_request(self):
         collector = self._dynamic_attention_oracle_collector
         if collector is None:
