@@ -9,8 +9,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from benchmarks.collect_dynamic_attention_oracle_droid import _condition_summary
-
 
 STATE_COMPONENTS = {
     "state.joint_position": slice(7, 14),
@@ -21,6 +19,39 @@ ACTION_COMPONENTS = {
     "action.gripper_position": slice(12, 13),
 }
 ACTION_OFFSETS = np.arange(24, dtype=np.int64)
+
+
+def _condition_summary(data_point: dict) -> dict[str, float]:
+    """Mirror the collector formula without importing its model dependencies."""
+
+    state_values = [
+        np.asarray(value, dtype=np.float64).reshape(-1)
+        for key, value in data_point.items()
+        if key.startswith("state.")
+    ]
+    action_values = [
+        np.asarray(value, dtype=np.float64)
+        for key, value in data_point.items()
+        if key.startswith("action.")
+    ]
+    state = np.concatenate(state_values) if state_values else np.zeros(1)
+    action = (
+        np.concatenate([value.reshape(-1) for value in action_values])
+        if action_values
+        else np.zeros(1)
+    )
+    action_delta = (
+        np.concatenate([(value[-1] - value[0]).reshape(-1) for value in action_values])
+        if action_values
+        else np.zeros(1)
+    )
+    return {
+        "state_l2": float(np.linalg.norm(state)),
+        "state_abs_mean": float(np.mean(np.abs(state))),
+        "action_l2": float(np.linalg.norm(action)),
+        "action_std": float(np.std(action)),
+        "action_temporal_delta_l2": float(np.linalg.norm(action_delta)),
+    }
 
 
 def _read_jsonl(path: Path):
