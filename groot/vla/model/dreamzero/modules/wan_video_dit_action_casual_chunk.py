@@ -22,6 +22,7 @@ from groot.vla.model.dreamzero.modules.dynamic_packed_sparse import (
     pack_middle_state,
 )
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
 )
 from groot.vla.model.n1_5.modules.action_encoder import (
@@ -333,6 +334,12 @@ class CausalWanSelfAttention(nn.Module):
         self._anchor_sparse_history_cache_key: tuple[Any, ...] | None = None
         self._anchor_sparse_history_k: torch.Tensor | None = None
         self._anchor_sparse_history_v: torch.Tensor | None = None
+        self._anchor_sparse_history_cache: dict[
+            tuple[Any, ...], tuple[torch.Tensor, torch.Tensor]
+        ] = {}
+        self._packed_head_index_cache: dict[
+            tuple[tuple[int, ...], str, int | None], torch.Tensor
+        ] = {}
         # layers
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -349,6 +356,7 @@ class CausalWanSelfAttention(nn.Module):
         self._anchor_sparse_history_cache_key = None
         self._anchor_sparse_history_k = None
         self._anchor_sparse_history_v = None
+        self._anchor_sparse_history_cache.clear()
 
     def _get_sparse_history_kv(
         self,
@@ -372,12 +380,11 @@ class CausalWanSelfAttention(nn.Module):
             tuple(history_indices.shape),
             tuple(history_indices.stride()),
         )
-        if (
-            self._anchor_sparse_history_cache_key == cache_key
-            and self._anchor_sparse_history_k is not None
-            and self._anchor_sparse_history_v is not None
-        ):
-            return self._anchor_sparse_history_k, self._anchor_sparse_history_v
+        cached = self._anchor_sparse_history_cache.get(cache_key)
+        if cached is not None:
+            self._anchor_sparse_history_cache_key = cache_key
+            self._anchor_sparse_history_k, self._anchor_sparse_history_v = cached
+            return cached
 
         selected_k = gather_sequence_by_index(
             history_k,
@@ -393,8 +400,24 @@ class CausalWanSelfAttention(nn.Module):
             self._anchor_sparse_history_cache_key = cache_key
             self._anchor_sparse_history_k = selected_k.detach()
             self._anchor_sparse_history_v = selected_v.detach()
+            self._anchor_sparse_history_cache[cache_key] = (
+                self._anchor_sparse_history_k,
+                self._anchor_sparse_history_v,
+            )
             return self._anchor_sparse_history_k, self._anchor_sparse_history_v
         return selected_k, selected_v
+
+    def _packed_head_indices(
+        self,
+        heads: tuple[int, ...],
+        device: torch.device,
+    ) -> torch.Tensor:
+        cache_key = (heads, device.type, device.index)
+        cached = self._packed_head_index_cache.get(cache_key)
+        if cached is None:
+            cached = torch.tensor(heads, device=device, dtype=torch.long)
+            self._packed_head_index_cache[cache_key] = cached
+        return cached
 
     def forward_packed(
         self,
@@ -405,6 +428,8 @@ class CausalWanSelfAttention(nn.Module):
         kv_cache: torch.Tensor,
         history_indices: torch.Tensor,
         history_token_count: int,
+        head_groups: tuple[tuple[tuple[int, ...], float], ...] | None = None,
+        history_indices_by_ratio: dict[float, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Run Q/K/V/O only on packed current tokens plus Dense registers.
 
@@ -446,20 +471,71 @@ class CausalWanSelfAttention(nn.Module):
             if history_token_count > 0
             else kv_cache[1, :, :0]
         )
-        if history_indices.numel():
-            history_key, history_value = self._get_sparse_history_kv(
-                history_key,
-                history_value,
-                history_indices,
+        if head_groups is None:
+            if history_indices.numel():
+                history_key, history_value = self._get_sparse_history_kv(
+                    history_key,
+                    history_value,
+                    history_indices,
+                )
+            else:
+                history_key = history_key[:, :0]
+                history_value = history_value[:, :0]
+            output = self.attn(
+                query,
+                torch.cat((history_key, key), dim=1),
+                torch.cat((history_value, value), dim=1),
             )
         else:
-            history_key = history_key[:, :0]
-            history_value = history_value[:, :0]
-        output = self.attn(
-            query,
-            torch.cat((history_key, key), dim=1),
-            torch.cat((history_value, value), dim=1),
-        )
+            if history_indices_by_ratio is None:
+                raise ValueError(
+                    "Grouped packed attention requires history indices by ratio"
+                )
+            flattened_heads = sorted(
+                head for group_heads, _ in head_groups for head in group_heads
+            )
+            if flattened_heads != list(range(self.num_heads)):
+                raise ValueError("Packed head groups must partition every attention head")
+            output = value.new_zeros(value.shape)
+            for group_heads, history_keep_ratio in head_groups:
+                head_indices = self._packed_head_indices(group_heads, query.device)
+                if history_keep_ratio == 1.0:
+                    group_history_key = history_key
+                    group_history_value = history_value
+                else:
+                    group_history_indices = history_indices_by_ratio.get(
+                        history_keep_ratio
+                    )
+                    if group_history_indices is None:
+                        raise ValueError(
+                            "Missing packed history indices for head-group ratio "
+                            f"{history_keep_ratio}"
+                        )
+                    group_history_key, group_history_value = (
+                        self._get_sparse_history_kv(
+                            history_key,
+                            history_value,
+                            group_history_indices,
+                        )
+                    )
+                group_output = self.attn(
+                    query.index_select(2, head_indices),
+                    torch.cat(
+                        (
+                            group_history_key.index_select(2, head_indices),
+                            key.index_select(2, head_indices),
+                        ),
+                        dim=1,
+                    ),
+                    torch.cat(
+                        (
+                            group_history_value.index_select(2, head_indices),
+                            value.index_select(2, head_indices),
+                        ),
+                        dim=1,
+                    ),
+                )
+                output = output.index_copy(2, head_indices, group_output)
         return self.o(output.flatten(2))
 
     def _visualize_attention_mask(self, total_len, first_image_len, image_blocks_len, 
@@ -1675,6 +1751,8 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache: torch.Tensor,
         history_indices: torch.Tensor,
         history_token_count: int,
+        head_groups: tuple[tuple[tuple[int, ...], float], ...] | None = None,
+        history_indices_by_ratio: dict[float, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Keep a packed current-token state through one complete DiT block."""
 
@@ -1689,6 +1767,8 @@ class CausalWanAttentionBlock(nn.Module):
             kv_cache=kv_cache,
             history_indices=history_indices,
             history_token_count=history_token_count,
+            head_groups=head_groups,
+            history_indices_by_ratio=history_indices_by_ratio,
         )
         x = x + y * modulation[2].squeeze(2)
         x = x + self.cross_attn(self.norm3(x), context)
@@ -1961,6 +2041,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._anchor_sparse_packed_history_indices: dict[float, torch.Tensor] = {}
         self._anchor_sparse_last_start_frame: int | None = None
         self._dynamic_packed_budget_table: DynamicPackedBudgetTable | None = None
+        self._dynamic_packed_head_group_budget_table: (
+            DynamicPackedHeadGroupBudgetTable | None
+        ) = None
         self._dynamic_sparse_dit_index: int | None = None
         self._dynamic_sparse_scheduler_index: int | None = None
         self._dynamic_sparse_scheduler_steps: int | None = None
@@ -2321,6 +2404,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_record_diagnostics = record_diagnostics
         if not packed_middle_active:
             self._dynamic_packed_budget_table = None
+            self._dynamic_packed_head_group_budget_table = None
         sparse_end = len(self.blocks) - dense_suffix_layers
         block_config = config
         if packed_middle_active and block_config is not None:
@@ -2386,6 +2470,35 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_packed_budget_table = table
         self.clear_anchor_sparse_route_cache()
 
+    def configure_dynamic_packed_head_group_budget_table(
+        self,
+        table: DynamicPackedHeadGroupBudgetTable | None,
+    ) -> None:
+        """Attach at most four fixed head groups with dynamic history budgets."""
+
+        if table is not None:
+            if not self.anchor_sparse_packed_middle:
+                raise ValueError(
+                    "Dynamic packed head groups require an active Packed Middle Stack"
+                )
+            if table.num_dit_steps != 8:
+                raise ValueError(
+                    "DreamZero head-group budgets must cover exactly 8 real DiT evaluations"
+                )
+            if table.num_layers != len(self.blocks):
+                raise ValueError(
+                    "Dynamic head-group layer count differs from the model depth"
+                )
+            if table.num_groups > 4:
+                raise ValueError("Packed M2 supports at most four shared head groups")
+            flattened = sorted(head for group in table.head_groups for head in group)
+            if flattened != list(range(self.num_heads)):
+                raise ValueError(
+                    "Dynamic head groups must partition every model head exactly once"
+                )
+        self._dynamic_packed_head_group_budget_table = table
+        self.clear_anchor_sparse_route_cache()
+
     def _packed_budget_ratios_for_layer(
         self,
         layer_index: int,
@@ -2401,6 +2514,19 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 "Dynamic packed budget table is active before the real DiT index was set"
             )
         return table.ratios(self._dynamic_sparse_dit_index, layer_index)
+
+    def _packed_head_groups_for_layer(
+        self,
+        layer_index: int,
+    ) -> tuple[tuple[tuple[int, ...], float], ...] | None:
+        table = self._dynamic_packed_head_group_budget_table
+        if table is None:
+            return None
+        if self._dynamic_sparse_dit_index is None:
+            raise RuntimeError(
+                "Dynamic packed head-group table is active before the real DiT index was set"
+            )
+        return table.groups_for_layer(self._dynamic_sparse_dit_index, layer_index)
 
     def get_last_anchor_route(self) -> AnchorRoute | None:
         """Return the last recorded layer-0 route for heatmap diagnostics."""
@@ -2920,14 +3046,25 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             and bool(middle_layer_indices)
         )
         packed_layer_ratios: dict[int, tuple[float, float]] = {}
+        packed_layer_head_groups: dict[
+            int, tuple[tuple[tuple[int, ...], float], ...] | None
+        ] = {}
         if packed_context_is_eligible:
             packed_layer_ratios = {
                 layer_index: self._packed_budget_ratios_for_layer(layer_index)
                 for layer_index in middle_layer_indices
             }
+            packed_layer_head_groups = {
+                layer_index: self._packed_head_groups_for_layer(layer_index)
+                for layer_index in middle_layer_indices
+            }
         packed_has_sparse_layer = any(
             history_ratio < 1.0 or current_ratio < 1.0
             for history_ratio, current_ratio in packed_layer_ratios.values()
+        ) or any(
+            groups is not None
+            and any(history_ratio < 1.0 for _, history_ratio in groups)
+            for groups in packed_layer_head_groups.values()
         )
         packed_middle_active = (
             packed_context_is_eligible
@@ -2944,7 +3081,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             else self.anchor_sparse_current_keep_ratio
         )
         history_keep_ratios = tuple(
-            sorted({history for history, _ in packed_layer_ratios.values()})
+            sorted(
+                {history for history, _ in packed_layer_ratios.values()}
+                | {
+                    history_ratio
+                    for groups in packed_layer_head_groups.values()
+                    if groups is not None
+                    for _, history_ratio in groups
+                }
+            )
         )
 
         for block_index, block in enumerate(self.blocks):
@@ -3013,6 +3158,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 history_keep_ratio, current_keep_ratio = packed_layer_ratios[
                     block_index
                 ]
+                layer_head_groups = packed_layer_head_groups.get(block_index)
                 packed_current_video_tokens = (
                     packed_current_profile.video_tokens_for_ratio(current_keep_ratio)
                 )
@@ -3026,6 +3172,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     kv_cache=kv_cache[block_index],
                     history_indices=packed_history_indices[history_keep_ratio],
                     history_token_count=packed_history_token_count,
+                    head_groups=layer_head_groups,
+                    history_indices_by_ratio=(
+                        packed_history_indices
+                        if layer_head_groups is not None
+                        else None
+                    ),
                 )
                 packed_state.update_active(
                     updated_packed,

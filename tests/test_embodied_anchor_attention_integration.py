@@ -10,6 +10,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     AnchorSparseConfig,
 )
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
 )
 
@@ -218,6 +219,79 @@ def test_packed_attention_projects_only_effective_tokens():
 
     assert output.shape == packed_x.shape
     assert projected_lengths == [5, 5, 5]
+
+
+def test_packed_head_groups_use_distinct_history_lengths_and_dense_registers():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+    attention_shapes = []
+    hook = attention.attn.register_forward_pre_hook(
+        lambda _module, inputs: attention_shapes.append(
+            (inputs[0].shape[1], inputs[1].shape[1], inputs[0].shape[2])
+        )
+    )
+    try:
+        output = attention.forward_packed(
+            packed_x,
+            torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+            action_register_length=3,
+            kv_cache=cache,
+            history_indices=history_indices,
+            history_token_count=cache.shape[2],
+            head_groups=(((0,), 1.0), ((1,), 0.5)),
+            history_indices_by_ratio={0.5: history_indices},
+        )
+    finally:
+        hook.remove()
+
+    assert output.shape == packed_x.shape
+    assert attention_shapes == [(5, 13, 1), (5, 9, 1)]
+    assert len(attention._anchor_sparse_history_cache) == 1
+
+
+def test_equal_budget_head_groups_match_single_packed_attention_call():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    packed_freqs = torch.ones((1, 5, 1, 2), dtype=torch.complex128)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+
+    single = attention.forward_packed(
+        packed_x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+    )
+    grouped = attention.forward_packed(
+        packed_x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+        head_groups=(((0,), 0.5), ((1,), 0.5)),
+        history_indices_by_ratio={0.5: history_indices},
+    )
+
+    assert torch.allclose(grouped, single, atol=1e-6, rtol=1e-6)
 
 
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
@@ -671,6 +745,14 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         current_keep_ratio=0.25,
     )
     model.configure_dynamic_packed_budget_table(dynamic_table)
+    head_group_table = DynamicPackedHeadGroupBudgetTable(
+        head_groups=((0,), (1,)),
+        group_names=("critical", "normal"),
+        history_keep_ratios=tuple(
+            tuple((1.0, 0.20) for _ in range(2)) for _ in range(8)
+        ),
+    )
+    model.configure_dynamic_packed_head_group_budget_table(head_group_table)
     model.set_dynamic_attention_oracle_step(
         scheduler_index=0,
         dit_index=0,
@@ -678,6 +760,10 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         timestep=999,
     )
     assert model._packed_budget_ratios_for_layer(1) == (0.20, 0.25)
+    assert model._packed_head_groups_for_layer(1) == (
+        ((0,), 1.0),
+        ((1,), 0.20),
+    )
     route = AnchorRoute(
         video_indices=torch.arange(3 * 880).reshape(1, -1),
         scores=torch.randn(1, 3, 880),
@@ -712,6 +798,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     )
     assert not model.anchor_sparse_packed_middle
     assert model._dynamic_packed_budget_table is None
+    assert model._dynamic_packed_head_group_budget_table is None
     assert not any(block.self_attn.record_anchor_diagnostics for block in model.blocks)
 
     model.configure_anchor_sparse_attention(enabled=False)

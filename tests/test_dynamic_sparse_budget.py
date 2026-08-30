@@ -1,6 +1,9 @@
+import json
+
 import pytest
 
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
     bucket_at_least,
 )
@@ -44,4 +47,40 @@ def test_arbitrary_dynamic_shape_is_rejected() -> None:
         DynamicPackedBudgetTable(
             history_keep_ratios=((0.3,),),
             current_keep_ratios=((0.2,),),
+        )
+
+
+def test_dynamic_head_group_budget_roundtrip_and_partition_validation(tmp_path):
+    table = DynamicPackedHeadGroupBudgetTable(
+        head_groups=((0, 2), (1, 3)),
+        group_names=("critical", "normal"),
+        history_keep_ratios=tuple(
+            tuple((1.0, 0.35) for _ in range(3)) for _ in range(2)
+        ),
+        name="tiny",
+    )
+
+    assert table.num_dit_steps == 2
+    assert table.num_layers == 3
+    assert table.num_groups == 2
+    assert table.num_heads == 4
+    assert table.groups_for_layer(1, 2) == (
+        ((0, 2), 1.0),
+        ((1, 3), 0.35),
+    )
+
+    path = tmp_path / "head_groups.json"
+    path.write_text(json.dumps(table.to_dict()))
+    assert DynamicPackedHeadGroupBudgetTable.from_json(path) == table
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        DynamicPackedHeadGroupBudgetTable(
+            head_groups=((0, 1), (1, 2)),
+            history_keep_ratios=(((1.0, 0.5),),),
+        )
+
+    with pytest.raises(ValueError, match="group count"):
+        DynamicPackedHeadGroupBudgetTable(
+            head_groups=((0,), (1,)),
+            history_keep_ratios=(((1.0,),),),
         )

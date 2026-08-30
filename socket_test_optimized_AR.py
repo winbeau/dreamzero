@@ -56,6 +56,7 @@ class Args:
     anchor_sparse_current_attention: bool = False
     anchor_sparse_packed_middle: bool = False
     anchor_sparse_dynamic_budget_table: str | None = None
+    anchor_sparse_dynamic_head_group_budget_table: str | None = None
     anchor_sparse_record_diagnostics: bool = False
     dynamic_oracle_output_dir: str | None = None
     dynamic_oracle_max_video_queries: int | None = 32
@@ -886,12 +887,32 @@ def main(args: Args) -> None:
                 args.anchor_sparse_dynamic_budget_table
             )
         )
+    if args.anchor_sparse_dynamic_head_group_budget_table is not None:
+        from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+            DynamicPackedHeadGroupBudgetTable,
+        )
+
+        configure_dynamic_head_groups = getattr(
+            diffusion_model,
+            "configure_dynamic_packed_head_group_budget_table",
+            None,
+        )
+        if configure_dynamic_head_groups is None:
+            raise RuntimeError(
+                "Loaded diffusion model does not support dynamic head-group budgets"
+            )
+        configure_dynamic_head_groups(
+            DynamicPackedHeadGroupBudgetTable.from_json(
+                args.anchor_sparse_dynamic_head_group_budget_table
+            )
+        )
     logger.info(
         "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
         "current_keep=%.3f attention_query_keep=%s dense_prefix=%d dense_suffix=%d "
         "propagate_radius=%d propagate_every=%d current_attention=%s packed_middle=%s "
         "recent_dense_frames=%d "
-        "dynamic_budget_table=%s diagnostics=%s backend=%s",
+        "dynamic_budget_table=%s dynamic_head_group_budget_table=%s "
+        "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
         args.anchor_sparse_keep_ratio,
         args.anchor_sparse_current_keep_ratio,
@@ -904,6 +925,7 @@ def main(args: Args) -> None:
         args.anchor_sparse_packed_middle,
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_dynamic_budget_table,
+        args.anchor_sparse_dynamic_head_group_budget_table,
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
     )

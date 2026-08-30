@@ -21,6 +21,7 @@ import torch.distributed as dist
 
 from groot.vla.model.dreamzero.base_vla import VLA
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
 )
 
@@ -76,6 +77,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument("--dynamic-budget-table", type=Path)
+    parser.add_argument("--dynamic-head-group-budget-table", type=Path)
     parser.add_argument("--dynamic-budget-dit-index", type=int, default=0)
     parser.add_argument(
         "--dynamic-budget-dit-indices",
@@ -320,13 +322,18 @@ def main() -> None:
         raise ValueError("Packed Middle Stack does not support per-layer propagation")
     if args.dynamic_budget_table is not None and not args.packed_middle:
         raise ValueError("Dynamic budget tables require --packed-middle")
+    if args.dynamic_head_group_budget_table is not None and not args.packed_middle:
+        raise ValueError("Dynamic head-group budget tables require --packed-middle")
     if not 0 <= args.dynamic_budget_dit_index < 8:
         raise ValueError("dynamic-budget-dit-index must lie in [0, 7]")
     if (
         args.dynamic_budget_dit_indices is not None
         and args.dynamic_budget_table is None
+        and args.dynamic_head_group_budget_table is None
     ):
-        raise ValueError("dynamic-budget-dit-indices requires --dynamic-budget-table")
+        raise ValueError(
+            "dynamic-budget-dit-indices requires a dynamic budget table"
+        )
     if args.dynamic_budget_dit_indices is not None:
         if len(args.dynamic_budget_dit_indices) != len(args.keep_ratios):
             raise ValueError(
@@ -395,6 +402,17 @@ def main() -> None:
         if args.dynamic_budget_table is not None
         else None
     )
+    dynamic_head_group_budget_table = (
+        DynamicPackedHeadGroupBudgetTable.from_json(
+            args.dynamic_head_group_budget_table
+        )
+        if args.dynamic_head_group_budget_table is not None
+        else None
+    )
+    dynamic_budget_active = (
+        dynamic_budget_table is not None
+        or dynamic_head_group_budget_table is not None
+    )
     candidate_dynamic_budget_dit_index = (
         args.dynamic_budget_dit_indices[candidate_index]
         if args.dynamic_budget_dit_indices is not None
@@ -402,10 +420,10 @@ def main() -> None:
     )
     candidate_diffusion_timestep = (
         REAL_DIT_TIMESTEPS[candidate_dynamic_budget_dit_index]
-        if dynamic_budget_table is not None
+        if dynamic_budget_active
         else 750
     )
-    if dynamic_budget_table is not None:
+    if dynamic_budget_active:
         inputs["timestep"].fill_(candidate_diffusion_timestep)
         inputs["timestep_action"].fill_(candidate_diffusion_timestep)
 
@@ -486,6 +504,11 @@ def main() -> None:
         )
         if dynamic_budget_table is not None:
             diffusion_model.configure_dynamic_packed_budget_table(dynamic_budget_table)
+        if dynamic_head_group_budget_table is not None:
+            diffusion_model.configure_dynamic_packed_head_group_budget_table(
+                dynamic_head_group_budget_table
+            )
+        if dynamic_budget_active:
             diffusion_model.set_dynamic_attention_oracle_step(
                 scheduler_index=REAL_DIT_SCHEDULER_INDICES[
                     candidate_dynamic_budget_dit_index
@@ -589,6 +612,27 @@ def main() -> None:
             # prefixes.
             packed_history_video_tokens = max(dynamic_middle_history_tokens)
             packed_current_video_tokens = max(dynamic_middle_current_tokens)
+    dynamic_head_group_history_ratios: list[list[float]] = []
+    if dynamic_head_group_budget_table is not None:
+        if dynamic_middle_layers:
+            head_group_layers = dynamic_middle_layers
+        else:
+            head_group_layers = list(
+                range(
+                    candidate_dense_prefix_layers,
+                    dynamic_head_group_budget_table.num_layers
+                    - candidate_dense_suffix_layers,
+                )
+            )
+        dynamic_head_group_history_ratios = [
+            list(
+                dynamic_head_group_budget_table.ratios(
+                    candidate_dynamic_budget_dit_index,
+                    layer_index,
+                )
+            )
+            for layer_index in head_group_layers
+        ]
     result = {
         "rank": rank,
         "physical_gpu": physical_gpu,
@@ -614,14 +658,19 @@ def main() -> None:
             if args.dynamic_budget_table is not None
             else None
         ),
+        "dynamic_head_group_budget_table": (
+            str(args.dynamic_head_group_budget_table)
+            if args.dynamic_head_group_budget_table is not None
+            else None
+        ),
         "dynamic_budget_dit_index": (
             candidate_dynamic_budget_dit_index
-            if args.dynamic_budget_table is not None
+            if dynamic_budget_active
             else None
         ),
         "dynamic_budget_diffusion_timestep": (
             candidate_diffusion_timestep
-            if args.dynamic_budget_table is not None
+            if dynamic_budget_active
             else None
         ),
         "dynamic_budget_table_name": (
@@ -662,6 +711,22 @@ def main() -> None:
         ),
         "dynamic_middle_history_tokens": dynamic_middle_history_tokens,
         "dynamic_middle_current_tokens": dynamic_middle_current_tokens,
+        "dynamic_head_group_table_name": (
+            dynamic_head_group_budget_table.name
+            if dynamic_head_group_budget_table is not None
+            else None
+        ),
+        "dynamic_head_group_names": (
+            list(dynamic_head_group_budget_table.group_names)
+            if dynamic_head_group_budget_table is not None
+            else []
+        ),
+        "dynamic_head_groups": (
+            [list(group) for group in dynamic_head_group_budget_table.head_groups]
+            if dynamic_head_group_budget_table is not None
+            else []
+        ),
+        "dynamic_head_group_history_ratios": dynamic_head_group_history_ratios,
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,

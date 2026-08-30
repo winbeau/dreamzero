@@ -158,3 +158,130 @@ class DynamicPackedBudgetTable:
             "history_keep_ratios": [list(row) for row in self.history_keep_ratios],
             "current_keep_ratios": [list(row) for row in self.current_keep_ratios],
         }
+
+
+def _canonical_budget_cube(
+    values: Sequence[Sequence[Sequence[float]]],
+    *,
+    field_name: str,
+) -> tuple[tuple[tuple[float, ...], ...], ...]:
+    cube = tuple(
+        tuple(tuple(canonical_budget(value) for value in groups) for groups in row)
+        for row in values
+    )
+    if not cube or not cube[0] or not cube[0][0]:
+        raise ValueError(f"{field_name} must be a non-empty 3D table")
+    layer_count = len(cube[0])
+    group_count = len(cube[0][0])
+    if any(len(row) != layer_count for row in cube):
+        raise ValueError(f"{field_name} rows must have equal layer counts")
+    if any(len(groups) != group_count for row in cube for groups in row):
+        raise ValueError(f"{field_name} cells must have equal group counts")
+    return cube
+
+
+@dataclass(frozen=True)
+class DynamicPackedHeadGroupBudgetTable:
+    """Fixed head partition with dynamic historical-KV budgets.
+
+    Current-query and packed-compute length remains controlled by
+    :class:`DynamicPackedBudgetTable`. This table gives a small number of
+    shared head groups separate historical K/V prefix lengths, so critical or
+    confidence-fallback heads can retain more context without forcing every
+    head to the same budget.
+    """
+
+    head_groups: tuple[tuple[int, ...], ...]
+    history_keep_ratios: tuple[tuple[tuple[float, ...], ...], ...]
+    group_names: tuple[str, ...] = ()
+    name: str = "dynamic_head_groups"
+
+    def __post_init__(self) -> None:
+        groups = tuple(tuple(int(head) for head in group) for group in self.head_groups)
+        if not groups or any(not group for group in groups):
+            raise ValueError("head_groups must contain non-empty groups")
+        flattened = tuple(head for group in groups for head in group)
+        if any(head < 0 for head in flattened):
+            raise ValueError("head indices must be non-negative")
+        if len(set(flattened)) != len(flattened):
+            raise ValueError("head_groups must not overlap")
+        cube = _canonical_budget_cube(
+            self.history_keep_ratios,
+            field_name="history_keep_ratios",
+        )
+        if len(cube[0][0]) != len(groups):
+            raise ValueError("Budget group count differs from head_groups")
+        names = tuple(str(value) for value in self.group_names)
+        if names and len(names) != len(groups):
+            raise ValueError("group_names must align with head_groups")
+        if not names:
+            names = tuple(f"group_{index}" for index in range(len(groups)))
+        object.__setattr__(self, "head_groups", groups)
+        object.__setattr__(self, "history_keep_ratios", cube)
+        object.__setattr__(self, "group_names", names)
+
+    @property
+    def num_dit_steps(self) -> int:
+        return len(self.history_keep_ratios)
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.history_keep_ratios[0])
+
+    @property
+    def num_groups(self) -> int:
+        return len(self.head_groups)
+
+    @property
+    def num_heads(self) -> int:
+        return sum(len(group) for group in self.head_groups)
+
+    def ratios(self, dit_index: int, layer_index: int) -> tuple[float, ...]:
+        if not 0 <= dit_index < self.num_dit_steps:
+            raise IndexError(f"dit_index {dit_index} is outside the head-group table")
+        if not 0 <= layer_index < self.num_layers:
+            raise IndexError(f"layer_index {layer_index} is outside the head-group table")
+        return self.history_keep_ratios[dit_index][layer_index]
+
+    def groups_for_layer(
+        self,
+        dit_index: int,
+        layer_index: int,
+    ) -> tuple[tuple[tuple[int, ...], float], ...]:
+        return tuple(zip(self.head_groups, self.ratios(dit_index, layer_index)))
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: dict[str, object],
+    ) -> "DynamicPackedHeadGroupBudgetTable":
+        return cls(
+            head_groups=payload["head_groups"],  # type: ignore[arg-type]
+            history_keep_ratios=payload["history_keep_ratios"],  # type: ignore[arg-type]
+            group_names=tuple(payload.get("group_names", ())),  # type: ignore[arg-type]
+            name=str(payload.get("name", "dynamic_head_groups")),
+        )
+
+    @classmethod
+    def from_json(
+        cls,
+        path: str | Path,
+    ) -> "DynamicPackedHeadGroupBudgetTable":
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "name": self.name,
+            "budget_buckets": list(BUDGET_BUCKETS),
+            "num_dit_steps": self.num_dit_steps,
+            "num_layers": self.num_layers,
+            "num_groups": self.num_groups,
+            "num_heads": self.num_heads,
+            "group_names": list(self.group_names),
+            "head_groups": [list(group) for group in self.head_groups],
+            "history_keep_ratios": [
+                [list(groups) for groups in row]
+                for row in self.history_keep_ratios
+            ],
+        }
