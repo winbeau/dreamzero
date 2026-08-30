@@ -315,6 +315,9 @@ class CausalWanSelfAttention(nn.Module):
         self.anchor_sparse_config = anchor_sparse_config
         self.record_anchor_diagnostics = record_anchor_diagnostics
         self.last_anchor_route: AnchorRoute | None = None
+        self._anchor_sparse_history_cache_key: tuple[Any, ...] | None = None
+        self._anchor_sparse_history_k: torch.Tensor | None = None
+        self._anchor_sparse_history_v: torch.Tensor | None = None
         # layers
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -324,6 +327,59 @@ class CausalWanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim)
         self.causal_attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim, causal=True)
+
+    def clear_anchor_sparse_history_cache(self) -> None:
+        """Release gathered historical KV retained across action denoise steps."""
+
+        self._anchor_sparse_history_cache_key = None
+        self._anchor_sparse_history_k = None
+        self._anchor_sparse_history_v = None
+
+    def _get_sparse_history_kv(
+        self,
+        history_k: torch.Tensor,
+        history_v: torch.Tensor,
+        history_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather historical anchors once for an immutable rollout KV cache."""
+
+        cache_key = (
+            history_k.data_ptr(),
+            history_k.storage_offset(),
+            tuple(history_k.shape),
+            tuple(history_k.stride()),
+            history_v.data_ptr(),
+            history_v.storage_offset(),
+            tuple(history_v.shape),
+            tuple(history_v.stride()),
+            history_indices.data_ptr(),
+            history_indices.storage_offset(),
+            tuple(history_indices.shape),
+            tuple(history_indices.stride()),
+        )
+        if (
+            self._anchor_sparse_history_cache_key == cache_key
+            and self._anchor_sparse_history_k is not None
+            and self._anchor_sparse_history_v is not None
+        ):
+            return self._anchor_sparse_history_k, self._anchor_sparse_history_v
+
+        selected_k = gather_sequence_by_index(
+            history_k,
+            history_indices,
+            validate_indices=False,
+        )
+        selected_v = gather_sequence_by_index(
+            history_v,
+            history_indices,
+            validate_indices=False,
+        )
+        if not history_k.requires_grad and not history_v.requires_grad:
+            self._anchor_sparse_history_cache_key = cache_key
+            self._anchor_sparse_history_k = selected_k.detach()
+            self._anchor_sparse_history_v = selected_v.detach()
+            return self._anchor_sparse_history_k, self._anchor_sparse_history_v
+        return selected_k, selected_v
 
     def _visualize_attention_mask(self, total_len, first_image_len, image_blocks_len, 
                                    action_len, state_len, num_image_blocks, 
@@ -898,6 +954,7 @@ class CausalWanSelfAttention(nn.Module):
         is_tf: bool = True,
         anchor_route_indices: torch.Tensor | None = None,
         current_video_indices: torch.Tensor | None = None,
+        update_kv_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
         Args:
@@ -1168,20 +1225,40 @@ class CausalWanSelfAttention(nn.Module):
             # If we are using local attention and the current KV cache size is larger
             # than the local attention size, we need to truncate the KV cache
 
-            updated_kv_cache = kv_cache
-            updated_k = updated_kv_cache[0]
-            updated_v = updated_kv_cache[1]
-            # Assign new keys/values directly up to current_end
-            new_k = torch.cat([updated_k, roped_key], dim=1)
-            new_v = torch.cat([updated_v, v], dim=1)
+            updated_k = kv_cache[0]
+            updated_v = kv_cache[1]
+            new_k: torch.Tensor | None = None
+            new_v: torch.Tensor | None = None
+            if update_kv_cache:
+                # Preserve the original cache-producing path byte-for-byte when
+                # the caller will consume the returned cache.
+                new_k = torch.cat([updated_k, roped_key], dim=1)
+                new_v = torch.cat([updated_v, v], dim=1)
+                new_k = new_k[:, -self.max_attention_size:]
+                new_v = new_v[:, -self.max_attention_size:]
+                history_k = new_k[:, :-num_new_tokens]
+                history_v = new_v[:, :-num_new_tokens]
+            else:
+                # Action denoising does not mutate the causal history.  Trim the
+                # history before concatenation so sparse attention can avoid
+                # materialising a full history+current KV tensor.
+                history_capacity = max(0, self.max_attention_size - num_new_tokens)
+                history_k = (
+                    updated_k[:, -history_capacity:]
+                    if history_capacity > 0
+                    else updated_k[:, :0]
+                )
+                history_v = (
+                    updated_v[:, -history_capacity:]
+                    if history_capacity > 0
+                    else updated_v[:, :0]
+                )
 
-            # We may need to truncate the KV cache if it's size is larger than the max attention size.
-            new_k = new_k[:, -self.max_attention_size:]
-            new_v = new_v[:, -self.max_attention_size:]
+            total_video_tokens = history_k.shape[1] + num_new_tokens
 
             if action_register_length is not None:
-                attention_k = new_k
-                attention_v = new_v
+                attention_k: torch.Tensor | None = new_k
+                attention_v: torch.Tensor | None = new_v
                 sparse_config = self.anchor_sparse_config
                 routing_active = (
                     sparse_config is not None
@@ -1192,18 +1269,18 @@ class CausalWanSelfAttention(nn.Module):
                 )
                 if routing_active:
                     assert sparse_config is not None
-                    if new_k.shape[1] % sparse_config.frame_seqlen != 0:
+                    if total_video_tokens % sparse_config.frame_seqlen != 0:
                         raise ValueError(
                             "Embodied anchor routing requires complete video frames, got "
-                            f"{new_k.shape[1]} keys for frame_seqlen={sparse_config.frame_seqlen}"
+                            f"{total_video_tokens} keys for frame_seqlen={sparse_config.frame_seqlen}"
                         )
-                    num_video_frames = new_k.shape[1] // sparse_config.frame_seqlen
+                    num_video_frames = total_video_tokens // sparse_config.frame_seqlen
                     expected_route_length = sparse_config.selected_video_tokens(num_video_frames)
                     route_is_valid = (
                         updated_anchor_route_indices is not None
                         and updated_anchor_route_indices.shape
-                        == (new_k.shape[0], expected_route_length)
-                        and updated_anchor_route_indices.device == new_k.device
+                        == (history_k.shape[0], expected_route_length)
+                        and updated_anchor_route_indices.device == history_k.device
                     )
                     if not route_is_valid:
                         tokens_per_block = self.num_action_per_block + self.num_state_per_block
@@ -1216,6 +1293,8 @@ class CausalWanSelfAttention(nn.Module):
                         action_query = roped_action_query[
                             :, :num_register_blocks * self.num_action_per_block
                         ]
+                        if new_k is None:
+                            new_k = torch.cat([history_k, roped_key], dim=1)
                         route = route_action_conditioned_video_keys(
                             action_query=action_query,
                             video_key=new_k,
@@ -1225,16 +1304,44 @@ class CausalWanSelfAttention(nn.Module):
                         if self.record_anchor_diagnostics:
                             self.last_anchor_route = route.detached()
                     if sparse_config.keep_ratio < 1.0:
-                        attention_k = gather_sequence_by_index(
-                            new_k,
-                            updated_anchor_route_indices,
-                            validate_indices=False,
+                        num_new_frames = num_new_tokens // sparse_config.frame_seqlen
+                        direct_sparse_history = (
+                            not update_kv_cache
+                            and num_new_tokens % sparse_config.frame_seqlen == 0
+                            and num_new_frames <= sparse_config.recent_dense_frames
+                            and expected_route_length >= num_new_tokens
                         )
-                        attention_v = gather_sequence_by_index(
-                            new_v,
-                            updated_anchor_route_indices,
-                            validate_indices=False,
-                        )
+                        if direct_sparse_history:
+                            historical_route_length = expected_route_length - num_new_tokens
+                            history_indices = updated_anchor_route_indices[
+                                :, :historical_route_length
+                            ]
+                            selected_history_k, selected_history_v = self._get_sparse_history_kv(
+                                history_k,
+                                history_v,
+                                history_indices,
+                            )
+                            attention_k = torch.cat([selected_history_k, roped_key], dim=1)
+                            attention_v = torch.cat([selected_history_v, v], dim=1)
+                        else:
+                            if new_k is None:
+                                new_k = torch.cat([history_k, roped_key], dim=1)
+                            if new_v is None:
+                                new_v = torch.cat([history_v, v], dim=1)
+                            attention_k = gather_sequence_by_index(
+                                new_k,
+                                updated_anchor_route_indices,
+                                validate_indices=False,
+                            )
+                            attention_v = gather_sequence_by_index(
+                                new_v,
+                                updated_anchor_route_indices,
+                                validate_indices=False,
+                            )
+                if attention_k is None:
+                    attention_k = torch.cat([history_k, roped_key], dim=1)
+                if attention_v is None:
+                    attention_v = torch.cat([history_v, v], dim=1)
                 if current_video_indices is not None:
                     selected_video_query = gather_sequence_by_index(
                         roped_query,
@@ -1261,12 +1368,18 @@ class CausalWanSelfAttention(nn.Module):
                     torch.cat([attention_v, action_v], dim=1),
                 )
             else:
+                if new_k is None:
+                    new_k = torch.cat([history_k, roped_key], dim=1)
+                if new_v is None:
+                    new_v = torch.cat([history_v, v], dim=1)
                 x = self.attn(
                     roped_query,
                     new_k,
                     new_v,
                 )
-            updated_kv_cache = torch.stack([new_k, new_v], dim=0)
+            if update_kv_cache:
+                assert new_k is not None and new_v is not None
+                updated_kv_cache = torch.stack([new_k, new_v], dim=0)
 
 
         # output
@@ -1360,6 +1473,7 @@ class CausalWanAttentionBlock(nn.Module):
         is_tf: bool = True,
         anchor_route_indices: torch.Tensor | None = None,
         current_video_indices: torch.Tensor | None = None,
+        update_kv_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
         Args:
@@ -1405,6 +1519,7 @@ class CausalWanAttentionBlock(nn.Module):
             current_video_indices=(
                 current_video_indices if sparse_self_attention else None
             ),
+            update_kv_cache=update_kv_cache,
         )
         x = x + (y * e[2].squeeze(2))
 
@@ -1770,6 +1885,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._anchor_sparse_last_start_frame = None
         for block in self.blocks:
             block.self_attn.last_anchor_route = None
+            block.self_attn.clear_anchor_sparse_history_cache()
 
     def configure_anchor_sparse_attention(
         self,
@@ -2191,6 +2307,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         state: torch.Tensor | None,
         kv_cache: list[torch.Tensor],
         current_start_frame: int,
+        update_kv_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Forward pass through the diffusion model blocks.
@@ -2298,8 +2415,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 current_start_frame=current_start_frame,
                 anchor_route_indices=anchor_route_indices,
                 current_video_indices=current_video_indices,
+                update_kv_cache=update_kv_cache,
             )
-            updated_kv_caches.append(updated_kv_cache)
+            if update_kv_cache:
+                if updated_kv_cache is None:
+                    raise RuntimeError("KV cache update was requested but a block returned None")
+                updated_kv_caches.append(updated_kv_cache)
             if (
                 block_index == 0
                 # The initial (and cache-rewind) pass uses the blockwise
@@ -2399,6 +2520,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             timestep_action=timestep_action,
             state=state,
             current_start_frame = current_start_frame,
+            update_kv_cache=False,
         ) 
 
         return x_video, action_noise_pred
@@ -2439,6 +2561,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             timestep_action=timestep_action,
             state=state,
             current_start_frame = current_start_frame,
+            update_kv_cache=False,
         ) 
 
         return x_video, action_noise_pred
@@ -2459,6 +2582,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         timestep_action=None,
         state=None,
         embodiment_id=None,
+        update_kv_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Run the diffusion model with kv caching.
@@ -2521,6 +2645,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             state=state,
             kv_cache=kv_cache,
             current_start_frame=current_start_frame,
+            update_kv_cache=update_kv_cache,
         )
 
         # Copy the updated KV caches back to the original KV cache.

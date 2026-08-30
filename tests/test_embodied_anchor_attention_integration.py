@@ -107,6 +107,106 @@ def test_cached_route_is_reused_by_real_kv_attention_path() -> None:
     assert torch.equal(cached_output, output)
 
 
+def test_no_update_dense_attention_skips_cache_without_changing_output() -> None:
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    x, cache, freqs = _inputs()
+
+    output, updated_cache, _ = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+    )
+    no_update_output, no_update_cache, _ = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+        update_kv_cache=False,
+    )
+
+    assert updated_cache is not None
+    assert no_update_cache is None
+    assert torch.equal(no_update_output, output)
+
+
+def test_no_update_sparse_attention_reuses_gathered_history() -> None:
+    module = _load_attention_module()
+    config = AnchorSparseConfig(
+        frame_seqlen=4,
+        grid_height=2,
+        grid_width=2,
+        keep_ratio=0.5,
+        recent_dense_frames=1,
+        probe_dim=2,
+        num_router_heads=1,
+        smooth_radius=0,
+    )
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+        anchor_sparse_config=config,
+    )
+    x, cache, freqs = _inputs()
+
+    output, _, route = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+    )
+    no_update_output, no_update_cache, reused_route = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+        anchor_route_indices=route,
+        update_kv_cache=False,
+    )
+    selected_history_k = attention._anchor_sparse_history_k
+    assert selected_history_k is not None
+
+    cached_output, _, _ = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+        anchor_route_indices=route,
+        update_kv_cache=False,
+    )
+
+    assert no_update_cache is None
+    assert reused_route is route
+    assert torch.equal(no_update_output, output)
+    assert torch.equal(cached_output, output)
+    assert attention._anchor_sparse_history_k is selected_history_k
+
+
 def test_state_register_is_dense_but_not_used_as_router_query(monkeypatch) -> None:
     module = _load_attention_module()
     config = AnchorSparseConfig(

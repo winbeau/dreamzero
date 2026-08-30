@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument(
+        "--update-kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Return updated per-layer KV caches during timed forwards.",
+    )
+    parser.add_argument(
         "--profile-dir",
         type=Path,
         help="Optional artifact directory for dense and sparse CPU/CUDA traces.",
@@ -277,6 +283,8 @@ def main() -> None:
         device=device,
         history_frames=args.history_frames,
     )
+    timing_inputs = {**inputs, "update_kv_cache": args.update_kv_cache}
+    exact_inputs = {**inputs, "update_kv_cache": True}
     candidate_index = rank % len(args.keep_ratios)
     candidate_keep_ratio = args.keep_ratios[candidate_index]
     candidate_current_keep_ratio = args.current_keep_ratios[candidate_index]
@@ -285,17 +293,30 @@ def main() -> None:
         diffusion_model.configure_anchor_sparse_attention(enabled=False)
         dense_samples, dense_output = timed_forwards(
             diffusion_model,
-            inputs,
+            timing_inputs,
             warmup=args.warmup,
             repeats=args.repeats,
         )
+        dense_video, dense_action, _ = dense_output
+        dense_video = dense_video.clone()
+        dense_action = dense_action.clone()
         if args.profile_dir is not None:
             profile_forward(
                 diffusion_model,
-                inputs,
+                timing_inputs,
                 output_prefix=args.profile_dir / f"rank{rank}_gpu{physical_gpu}_dense",
                 row_limit=args.profile_row_limit,
                 record_shapes=args.profile_record_shapes,
+            )
+
+        if args.update_kv_cache:
+            dense_exact_video, dense_exact_action, dense_exact_caches = dense_output
+        else:
+            dense_output = None
+            torch.cuda.empty_cache()
+            dense_exact_video, dense_exact_action, dense_exact_caches = invoke(
+                diffusion_model,
+                exact_inputs,
             )
 
         diffusion_model.configure_anchor_sparse_attention(
@@ -305,17 +326,22 @@ def main() -> None:
             current_keep_ratio=1.0,
             reuse_denoise=False,
         )
-        full_video, full_action, full_caches = invoke(diffusion_model, inputs)
-        dense_video, dense_action, dense_caches = dense_output
-        full_budget_video_exact = torch.equal(full_video, dense_video)
-        full_budget_action_exact = torch.equal(full_action, dense_action)
+        full_video, full_action, full_caches = invoke(diffusion_model, exact_inputs)
+        full_budget_video_exact = torch.equal(full_video, dense_exact_video)
+        full_budget_action_exact = torch.equal(full_action, dense_exact_action)
         full_budget_cache_exact = all(
             torch.equal(full_cache, dense_cache)
-            for full_cache, dense_cache in zip(full_caches, dense_caches)
+            for full_cache, dense_cache in zip(full_caches, dense_exact_caches)
         )
-        dense_video = dense_video.clone()
-        dense_action = dense_action.clone()
-        del full_video, full_action, full_caches, dense_caches, dense_output
+        del (
+            full_video,
+            full_action,
+            full_caches,
+            dense_exact_video,
+            dense_exact_action,
+            dense_exact_caches,
+            dense_output,
+        )
         torch.cuda.empty_cache()
 
         diffusion_model.configure_anchor_sparse_attention(
@@ -333,7 +359,7 @@ def main() -> None:
         )
         sparse_samples, sparse_output = timed_forwards(
             diffusion_model,
-            inputs,
+            timing_inputs,
             warmup=args.warmup,
             repeats=args.repeats,
         )
@@ -341,7 +367,7 @@ def main() -> None:
             diffusion_model.clear_anchor_sparse_route_cache()
             profile_forward(
                 diffusion_model,
-                inputs,
+                timing_inputs,
                 output_prefix=(
                     args.profile_dir / f"rank{rank}_gpu{physical_gpu}_sparse_cold_route"
                 ),
@@ -350,7 +376,7 @@ def main() -> None:
             )
             profile_forward(
                 diffusion_model,
-                inputs,
+                timing_inputs,
                 output_prefix=(
                     args.profile_dir / f"rank{rank}_gpu{physical_gpu}_sparse_cached_route"
                 ),
@@ -380,6 +406,7 @@ def main() -> None:
         "propagate_every": args.propagate_every,
         "reuse_denoise": args.reuse_denoise,
         "current_attention": args.current_attention,
+        "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,
         "dense_p50_ms": dense_p50,

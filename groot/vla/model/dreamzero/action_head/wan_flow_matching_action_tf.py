@@ -908,6 +908,7 @@ class WANPolicyHead(ActionHead):
                     kv_cache=kv_cache,
                     crossattn_cache=crossattn_cache,
                     current_start_frame=kv_cache_metadata["start_frame"],
+                    update_kv_cache=bool(kv_cache_metadata["update_kv_cache"]),
                 )
                 if kv_cache_metadata["update_kv_cache"]:
                     for block_index, updated_kv_cache in enumerate(updated_kv_caches):
