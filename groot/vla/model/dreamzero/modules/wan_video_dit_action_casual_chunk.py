@@ -434,8 +434,6 @@ class CausalWanSelfAttention(nn.Module):
             else kv_cache[1, :, :0]
         )
         if history_indices.numel():
-            if torch.any(history_indices >= history_key.shape[1]):
-                raise ValueError("history route exceeds the trimmed causal cache")
             history_key, history_value = self._get_sparse_history_kv(
                 history_key,
                 history_value,
