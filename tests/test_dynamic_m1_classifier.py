@@ -137,7 +137,7 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
                 for layer_index in range(2):
                     for head_index in range(2):
                         state_key = (layer_index, head_index)
-                        target_index = (dit_index + layer_index + head_index + episode) % 7
+                        target_index = (dit_index + layer_index + head_index) % 7
                         target = BUDGET_BUCKETS[target_index]
                         row = {
                             "request_key": request_key,
