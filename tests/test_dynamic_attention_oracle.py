@@ -128,8 +128,8 @@ def test_collector_writes_one_request_with_step_layer_and_profiles(tmp_path) -> 
     }
     assert profiles["r0_req000000_d03_l04_video"].shape == (2, 3)
     assert profiles["r0_req000000_d03_l04_action"].shape == (2, 3)
-    assert profiles["r0_req000000_d03_l04_video_vv"].shape == (2, 4)
-    assert profiles["r0_req000000_d03_l04_action_vv"].shape == (2, 4)
+    assert profiles["r0_req000000_d03_l04_video_vv"].shape == (2, 3)
+    assert profiles["r0_req000000_d03_l04_action_vv"].shape == (2, 3)
 
 
 def test_cfg_branches_keep_profiles_and_turnover_independent(tmp_path) -> None:
