@@ -271,11 +271,11 @@ def _condition_summary(data_point: dict) -> dict[str, float]:
         else np.zeros(1)
     )
     return {
-        "state_l2": float(np.linalg.vector_norm(state)),
+        "state_l2": float(np.linalg.norm(state)),
         "state_abs_mean": float(np.mean(np.abs(state))),
-        "action_l2": float(np.linalg.vector_norm(action)),
+        "action_l2": float(np.linalg.norm(action)),
         "action_std": float(np.std(action)),
-        "action_temporal_delta_l2": float(np.linalg.vector_norm(action_delta)),
+        "action_temporal_delta_l2": float(np.linalg.norm(action_delta)),
     }
 
 
