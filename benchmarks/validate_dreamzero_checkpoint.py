@@ -74,6 +74,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dynamic-budget-table", type=Path)
     parser.add_argument("--dynamic-budget-dit-index", type=int, default=0)
     parser.add_argument(
+        "--dynamic-budget-dit-indices",
+        type=int,
+        nargs="+",
+        help=(
+            "Optional per-rank real-DiT indices aligned with keep-ratios. "
+            "This permits an early/late comparison from one checkpoint load."
+        ),
+    )
+    parser.add_argument(
         "--update-kv-cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -309,6 +318,18 @@ def main() -> None:
         raise ValueError("Dynamic budget tables require --packed-middle")
     if not 0 <= args.dynamic_budget_dit_index < 8:
         raise ValueError("dynamic-budget-dit-index must lie in [0, 7]")
+    if (
+        args.dynamic_budget_dit_indices is not None
+        and args.dynamic_budget_table is None
+    ):
+        raise ValueError("dynamic-budget-dit-indices requires --dynamic-budget-table")
+    if args.dynamic_budget_dit_indices is not None:
+        if len(args.dynamic_budget_dit_indices) != len(args.keep_ratios):
+            raise ValueError(
+                "dynamic-budget-dit-indices must align one-to-one with keep-ratios"
+            )
+        if any(not 0 <= index < 8 for index in args.dynamic_budget_dit_indices):
+            raise ValueError("dynamic-budget-dit-indices must lie in [0, 7]")
     if args.packed_middle and (
         args.attention_query_keep_ratios != args.current_keep_ratios
     ):
@@ -369,6 +390,11 @@ def main() -> None:
         DynamicPackedBudgetTable.from_json(args.dynamic_budget_table)
         if args.dynamic_budget_table is not None
         else None
+    )
+    candidate_dynamic_budget_dit_index = (
+        args.dynamic_budget_dit_indices[candidate_index]
+        if args.dynamic_budget_dit_indices is not None
+        else args.dynamic_budget_dit_index
     )
 
     with torch.inference_mode():
@@ -450,9 +476,9 @@ def main() -> None:
             diffusion_model.configure_dynamic_packed_budget_table(dynamic_budget_table)
             diffusion_model.set_dynamic_attention_oracle_step(
                 scheduler_index=(0, 1, 2, 6, 10, 13, 14, 15)[
-                    args.dynamic_budget_dit_index
+                    candidate_dynamic_budget_dit_index
                 ],
-                dit_index=args.dynamic_budget_dit_index,
+                dit_index=candidate_dynamic_budget_dit_index,
                 scheduler_steps=16,
                 timestep=0,
             )
@@ -519,6 +545,38 @@ def main() -> None:
     packed_current_video_tokens = (
         current_frames * max(1, round(880 * candidate_current_keep_ratio))
     )
+    dynamic_middle_layers: list[int] = []
+    dynamic_middle_history_ratios: list[float] = []
+    dynamic_middle_current_ratios: list[float] = []
+    dynamic_middle_history_tokens: list[int] = []
+    dynamic_middle_current_tokens: list[int] = []
+    if dynamic_budget_table is not None:
+        dynamic_middle_layers = list(
+            range(
+                candidate_dense_prefix_layers,
+                dynamic_budget_table.num_layers - candidate_dense_suffix_layers,
+            )
+        )
+        for layer_index in dynamic_middle_layers:
+            history_ratio, current_ratio = dynamic_budget_table.ratios(
+                candidate_dynamic_budget_dit_index,
+                layer_index,
+            )
+            dynamic_middle_history_ratios.append(history_ratio)
+            dynamic_middle_current_ratios.append(current_ratio)
+            dynamic_middle_history_tokens.append(
+                dense_history_frames * 880
+                + sparse_history_frames * max(1, round(880 * history_ratio))
+            )
+            dynamic_middle_current_tokens.append(
+                current_frames * max(1, round(880 * current_ratio))
+            )
+        if dynamic_middle_layers:
+            # The packed state is gathered once at the largest current budget
+            # used by the middle stack. Individual layers consume nested active
+            # prefixes.
+            packed_history_video_tokens = max(dynamic_middle_history_tokens)
+            packed_current_video_tokens = max(dynamic_middle_current_tokens)
     result = {
         "rank": rank,
         "physical_gpu": physical_gpu,
@@ -545,10 +603,48 @@ def main() -> None:
             else None
         ),
         "dynamic_budget_dit_index": (
-            args.dynamic_budget_dit_index
+            candidate_dynamic_budget_dit_index
             if args.dynamic_budget_table is not None
             else None
         ),
+        "dynamic_budget_table_name": (
+            dynamic_budget_table.name if dynamic_budget_table is not None else None
+        ),
+        "dynamic_middle_layers": dynamic_middle_layers,
+        "dynamic_middle_history_ratios": dynamic_middle_history_ratios,
+        "dynamic_middle_current_ratios": dynamic_middle_current_ratios,
+        "dynamic_middle_history_ratio_mean": (
+            statistics.fmean(dynamic_middle_history_ratios)
+            if dynamic_middle_history_ratios
+            else None
+        ),
+        "dynamic_middle_current_ratio_mean": (
+            statistics.fmean(dynamic_middle_current_ratios)
+            if dynamic_middle_current_ratios
+            else None
+        ),
+        "dynamic_middle_history_ratio_min": (
+            min(dynamic_middle_history_ratios)
+            if dynamic_middle_history_ratios
+            else None
+        ),
+        "dynamic_middle_history_ratio_max": (
+            max(dynamic_middle_history_ratios)
+            if dynamic_middle_history_ratios
+            else None
+        ),
+        "dynamic_middle_current_ratio_min": (
+            min(dynamic_middle_current_ratios)
+            if dynamic_middle_current_ratios
+            else None
+        ),
+        "dynamic_middle_current_ratio_max": (
+            max(dynamic_middle_current_ratios)
+            if dynamic_middle_current_ratios
+            else None
+        ),
+        "dynamic_middle_history_tokens": dynamic_middle_history_tokens,
+        "dynamic_middle_current_tokens": dynamic_middle_current_tokens,
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,
