@@ -145,7 +145,15 @@ def main() -> None:
     args = parse_args()
     dist.init_process_group("nccl")
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     local_rank = int(os.environ["LOCAL_RANK"])
+    if len(args.physical_gpus) != world_size:
+        raise ValueError(
+            "physical-gpus must name exactly one device per rank: "
+            f"got {args.physical_gpus} for world_size={world_size}"
+        )
+    if not args.keep_ratios:
+        raise ValueError("keep-ratios must contain at least one candidate")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     physical_gpu = args.physical_gpus[local_rank]
