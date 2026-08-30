@@ -11,6 +11,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     route_action_conditioned_video_keys,
     scatter_sequence_by_index,
 )
+from groot.vla.model.dreamzero.modules.dynamic_packed_sparse import apply_packed_rope
 from groot.vla.model.n1_5.modules.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
@@ -382,6 +383,73 @@ class CausalWanSelfAttention(nn.Module):
             self._anchor_sparse_history_v = selected_v.detach()
             return self._anchor_sparse_history_k, self._anchor_sparse_history_v
         return selected_k, selected_v
+
+    def forward_packed(
+        self,
+        x: torch.Tensor,
+        packed_freqs: torch.Tensor,
+        *,
+        action_register_length: int,
+        kv_cache: torch.Tensor,
+        history_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run Q/K/V/O only on packed current tokens plus Dense registers.
+
+        ``x`` may use any token order because causal action denoising uses
+        unmasked attention for the current block.  ``packed_freqs`` preserves
+        every token's original frame/row/column or action/state position.
+        Historical K/V are already RoPE-applied in the immutable causal cache.
+        This path never mutates that cache.
+        """
+
+        if x.ndim != 3:
+            raise ValueError("packed x must have shape [B, L, C]")
+        if not 0 < action_register_length < x.shape[1]:
+            raise ValueError("packed attention requires Dense action/state registers")
+        if kv_cache.ndim != 5 or kv_cache.shape[0] != 2:
+            raise ValueError("kv_cache must have shape [2, B, L, H, D]")
+        if history_indices.ndim != 2 or history_indices.shape[0] != x.shape[0]:
+            raise ValueError("history_indices must have shape [B, K]")
+        batch, sequence, _ = x.shape
+        query = self.norm_q(self.q(x)).view(
+            batch, sequence, self.num_heads, self.head_dim
+        )
+        key = self.norm_k(self.k(x)).view(
+            batch, sequence, self.num_heads, self.head_dim
+        )
+        value = self.v(x).view(batch, sequence, self.num_heads, self.head_dim)
+        query = apply_packed_rope(query, packed_freqs).type_as(value)
+        key = apply_packed_rope(key, packed_freqs).type_as(value)
+
+        current_video_tokens = sequence - action_register_length
+        history_capacity = max(0, self.max_attention_size - current_video_tokens)
+        history_key = (
+            kv_cache[0, :, -history_capacity:]
+            if history_capacity > 0
+            else kv_cache[0, :, :0]
+        )
+        history_value = (
+            kv_cache[1, :, -history_capacity:]
+            if history_capacity > 0
+            else kv_cache[1, :, :0]
+        )
+        if history_indices.numel():
+            if torch.any(history_indices >= history_key.shape[1]):
+                raise ValueError("history route exceeds the trimmed causal cache")
+            history_key, history_value = self._get_sparse_history_kv(
+                history_key,
+                history_value,
+                history_indices,
+            )
+        else:
+            history_key = history_key[:, :0]
+            history_value = history_value[:, :0]
+        output = self.attn(
+            query,
+            torch.cat((history_key, key), dim=1),
+            torch.cat((history_value, value), dim=1),
+        )
+        return self.o(output.flatten(2))
 
     def _visualize_attention_mask(self, total_len, first_image_len, image_blocks_len, 
                                    action_len, state_len, num_image_blocks, 
@@ -1584,6 +1652,38 @@ class CausalWanAttentionBlock(nn.Module):
         else:
             x = cross_attn_ffn(x, e)
         return x, updated_kv_cache, updated_anchor_route_indices
+
+    def forward_packed(
+        self,
+        x: torch.Tensor,
+        e0: torch.Tensor,
+        packed_freqs: torch.Tensor,
+        *,
+        action_register_length: int,
+        context: torch.Tensor,
+        kv_cache: torch.Tensor,
+        history_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Keep a packed current-token state through one complete DiT block."""
+
+        if e0.shape != (x.shape[0], x.shape[1], 6, self.dim):
+            raise ValueError("packed e0 must have shape [B, L, 6, C]")
+        modulation = (self.modulation.unsqueeze(1) + e0).chunk(6, dim=2)
+        y = self.self_attn.forward_packed(
+            self.norm1(x) * (1 + modulation[1].squeeze(2))
+            + modulation[0].squeeze(2),
+            packed_freqs,
+            action_register_length=action_register_length,
+            kv_cache=kv_cache,
+            history_indices=history_indices,
+        )
+        x = x + y * modulation[2].squeeze(2)
+        x = x + self.cross_attn(self.norm3(x), context)
+        y = self.ffn(
+            self.norm2(x) * (1 + modulation[4].squeeze(2))
+            + modulation[3].squeeze(2)
+        )
+        return x + y * modulation[5].squeeze(2)
 
 
 class CausalHead(nn.Module):

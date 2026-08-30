@@ -143,6 +143,75 @@ def test_no_update_dense_attention_skips_cache_without_changing_output() -> None
     assert torch.equal(no_update_output, output)
 
 
+def test_packed_attention_full_current_budget_matches_dense_path() -> None:
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    x, cache, freqs = _inputs()
+    dense_output, _, _ = attention(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+        update_kv_cache=False,
+    )
+    packed_freqs = torch.ones(
+        (1, x.shape[1], 1, attention.head_dim // 2),
+        dtype=torch.complex128,
+    )
+    packed_output = attention.forward_packed(
+        x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=torch.arange(cache.shape[2]).reshape(1, -1),
+    )
+
+    assert torch.allclose(packed_output, dense_output, atol=1e-6, rtol=1e-6)
+
+
+def test_packed_attention_projects_only_effective_tokens():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    projected_lengths = []
+    hooks = [
+        projection.register_forward_pre_hook(
+            lambda _module, inputs: projected_lengths.append(inputs[0].shape[1])
+        )
+        for projection in (attention.q, attention.k, attention.v)
+    ]
+    try:
+        output = attention.forward_packed(
+            packed_x,
+            torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+            action_register_length=3,
+            kv_cache=cache,
+            history_indices=torch.tensor([[1, 3, 5, 7]]),
+        )
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert output.shape == packed_x.shape
+    assert projected_lengths == [5, 5, 5]
+
+
 def test_oracle_observes_dense_video_action_layout_without_changing_output() -> None:
     module = _load_attention_module()
     dense = module.CausalWanSelfAttention(
