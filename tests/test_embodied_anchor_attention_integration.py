@@ -719,7 +719,8 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         attention_query_keep_ratio=0.25,
         dense_prefix_layers=1,
         dense_suffix_layers=0,
-        propagate_radius=0,
+        propagate_radius=1,
+        propagate_every=5,
         current_attention=True,
         packed_middle=True,
         probe_dim=2,
@@ -737,6 +738,8 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model.blocks[0].self_attn.record_anchor_diagnostics
     assert not any(block.sparse_current_compute for block in model.blocks)
     assert not any(block.sparse_current_attention for block in model.blocks)
+    assert model.anchor_sparse_propagate_radius == 1
+    assert model.anchor_sparse_propagate_every == 5
 
     dynamic_table = DynamicPackedBudgetTable.constant(
         num_dit_steps=8,

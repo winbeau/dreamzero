@@ -318,8 +318,6 @@ def main() -> None:
         )
     if args.packed_middle and args.update_kv_cache:
         raise ValueError("Packed Middle Stack timing requires --no-update-kv-cache")
-    if args.packed_middle and args.propagate_radius > 0:
-        raise ValueError("Packed Middle Stack does not support per-layer propagation")
     if args.dynamic_budget_table is not None and not args.packed_middle:
         raise ValueError("Dynamic budget tables require --packed-middle")
     if args.dynamic_head_group_budget_table is not None and not args.packed_middle:
@@ -734,6 +732,11 @@ def main() -> None:
         ),
         "dynamic_head_group_history_ratios": dynamic_head_group_history_ratios,
         "dynamic_head_group_assignments": dynamic_head_group_assignments,
+        "packed_propagation_boundaries": (
+            diffusion_model._anchor_sparse_last_packed_propagation_count
+            if args.packed_middle
+            else 0
+        ),
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,

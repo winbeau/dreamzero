@@ -23,6 +23,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     AnchorSparseConfig,
     ViewRegion,
     gather_sequence_by_index,
+    propagate_spatial_anchor_updates,
     scatter_sequence_by_index,
 )
 
@@ -231,6 +232,7 @@ class PackedMiddleState:
     original_indices: torch.Tensor
     register_tokens: int
     maximum_video_tokens: int
+    updated_video_tokens: int = 0
 
     def active_length(self, video_tokens: int) -> int:
         if not 0 <= video_tokens <= self.maximum_video_tokens:
@@ -248,12 +250,58 @@ class PackedMiddleState:
         if updated.shape != self.packed_x[:, :length].shape:
             raise ValueError("updated packed state has the wrong shape")
         self.packed_x[:, :length] = updated
+        self.updated_video_tokens = max(self.updated_video_tokens, video_tokens)
 
     def recover_full(self) -> torch.Tensor:
         return scatter_sequence_by_index(
             self.frozen_full_x,
             self.original_indices,
             self.packed_x,
+            validate_indices=False,
+        )
+
+    def recover_propagated(
+        self,
+        *,
+        video_tokens: int | None = None,
+        config: AnchorSparseConfig,
+        radius: int,
+    ) -> torch.Tensor:
+        """Scatter a segment and interpolate active anchor deltas spatially."""
+
+        if radius <= 0:
+            raise ValueError("Packed propagation radius must be positive")
+        if video_tokens is None:
+            video_tokens = self.updated_video_tokens
+        if video_tokens <= 0:
+            raise ValueError("Packed propagation requires an updated video prefix")
+        active_length = self.active_length(video_tokens)
+        video_seq_len = self.frozen_full_x.shape[1] - self.register_tokens
+        active_indices = self.original_indices[:, :active_length]
+        register_indices = active_indices[:, : self.register_tokens]
+        video_indices = active_indices[:, self.register_tokens :]
+        original_video = gather_sequence_by_index(
+            self.frozen_full_x[:, :video_seq_len],
+            video_indices,
+            validate_indices=False,
+        )
+        video_delta = (
+            self.packed_x[:, self.register_tokens : active_length] - original_video
+        )
+        propagated_video_delta = propagate_spatial_anchor_updates(
+            video_delta,
+            video_indices,
+            video_seq_len=video_seq_len,
+            config=config,
+            radius=radius,
+        )
+        full_delta = self.frozen_full_x.new_zeros(self.frozen_full_x.shape)
+        full_delta[:, :video_seq_len] = propagated_video_delta
+        recovered = self.frozen_full_x + full_delta
+        return scatter_sequence_by_index(
+            recovered,
+            register_indices,
+            self.packed_x[:, : self.register_tokens],
             validate_indices=False,
         )
 

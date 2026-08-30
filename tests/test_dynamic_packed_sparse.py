@@ -125,6 +125,43 @@ def test_active_update_changes_only_registers_and_requested_video_prefix():
     assert int((recovered == 1).all(dim=-1).sum()) == packed.active_length(video_tokens)
 
 
+def test_packed_segment_boundary_propagates_anchor_delta_and_keeps_registers_exact():
+    config = AnchorSparseConfig(
+        frame_seqlen=4,
+        grid_height=2,
+        grid_width=2,
+        keep_ratio=0.25,
+        recent_dense_frames=0,
+        probe_dim=2,
+        num_router_heads=1,
+        smooth_radius=0,
+        views=(ViewRegion("full", 0, 2, 0, 2),),
+    )
+    profile = build_nested_current_profile(torch.tensor([[[4.0, 3.0, 2.0, 1.0]]]), config)
+    x = torch.zeros(1, 6, 2)
+    e0 = torch.zeros(1, 6, 6, 2)
+    packed = pack_middle_state(
+        x,
+        e0,
+        profile,
+        maximum_keep_ratio=0.25,
+        action_register_length=2,
+    )
+    updated = packed.active_x(1).clone()
+    updated[:, :2] = 7.0
+    updated[:, 2:] = 2.0
+    packed.update_active(updated, 1)
+
+    recovered = packed.recover_propagated(
+        video_tokens=1,
+        config=config,
+        radius=1,
+    )
+
+    assert torch.equal(recovered[:, :4], torch.full((1, 4, 2), 2.0))
+    assert torch.equal(recovered[:, 4:], torch.full((1, 2, 2), 7.0))
+
+
 def test_packed_rope_matches_dense_original_positions():
     torch.manual_seed(7)
     batch, video_tokens, action_tokens, state_tokens = 2, 8, 3, 1

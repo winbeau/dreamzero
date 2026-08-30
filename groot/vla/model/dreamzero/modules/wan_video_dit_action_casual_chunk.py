@@ -2002,12 +2002,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("anchor_sparse_propagate_radius must be non-negative")
         if anchor_sparse_propagate_radius > 0 and anchor_sparse_propagate_every <= 0:
             raise ValueError("anchor_sparse_propagate_every must be positive when propagation is enabled")
-        if packed_middle_active and anchor_sparse_propagate_radius > 0:
-            raise ValueError(
-                "Packed Middle Stack scatters only at a Dense boundary and does not "
-                "support per-layer spatial propagation"
-            )
-
         if anchor_sparse_enabled and frame_seqlen != 880:
             raise ValueError(
                 "The initial embodied anchor router supports the released DreamZero-DROID "
@@ -2047,6 +2041,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_dit_index: int | None = None
         self._dynamic_sparse_scheduler_index: int | None = None
         self._dynamic_sparse_scheduler_steps: int | None = None
+        self._anchor_sparse_last_packed_propagation_count = 0
         self._dynamic_attention_oracle_collector: Any | None = None
 
         max_num_embodiments = 1
@@ -2371,11 +2366,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("propagate_radius must be non-negative")
         if propagate_radius > 0 and propagate_every <= 0:
             raise ValueError("propagate_every must be positive when propagation is enabled")
-        if packed_middle_active and propagate_radius > 0:
-            raise ValueError(
-                "Packed Middle Stack scatters only at a Dense boundary and does not "
-                "support per-layer spatial propagation"
-            )
         config = None
         if enabled:
             config = AnchorSparseConfig(
@@ -3090,6 +3080,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 }
             )
         )
+        self._anchor_sparse_last_packed_propagation_count = 0
 
         for block_index, block in enumerate(self.blocks):
             in_packed_middle = (
@@ -3139,18 +3130,20 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         raise ValueError(
                             "Packed RoPE requires one complete action/state register block"
                         )
-                    packed_freqs = gather_packed_rope_frequencies(
-                        freqs,
-                        self.freqs_action,
-                        self.freqs_state,
-                        packed_state.original_indices,
-                        video_seq_len=video_seq_len,
-                        num_action_tokens=action_length,
-                        num_state_tokens=num_state_tokens,
-                        action_state_index=(
-                            (current_start_frame - 1) // self.num_frame_per_block
-                        ),
-                    )
+                    if packed_freqs is None:
+                        packed_freqs = gather_packed_rope_frequencies(
+                            freqs,
+                            self.freqs_action,
+                            self.freqs_state,
+                            packed_state.original_indices,
+                            video_seq_len=video_seq_len,
+                            num_action_tokens=action_length,
+                            num_state_tokens=num_state_tokens,
+                            action_state_index=(
+                                (current_start_frame - 1)
+                                // self.num_frame_per_block
+                            ),
+                        )
                 assert packed_state is not None
                 assert packed_current_profile is not None
                 assert packed_freqs is not None
@@ -3182,6 +3175,27 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     updated_packed,
                     packed_current_video_tokens,
                 )
+                packed_offset = (
+                    block_index - self.anchor_sparse_dense_prefix_layers + 1
+                )
+                should_propagate_packed = (
+                    self.anchor_sparse_propagate_radius > 0
+                    and (
+                        packed_offset % self.anchor_sparse_propagate_every == 0
+                        or block_index == sparse_end - 1
+                    )
+                )
+                if should_propagate_packed:
+                    if self.anchor_sparse_config is None:
+                        raise RuntimeError(
+                            "Packed propagation requires an anchor sparse config"
+                        )
+                    x = packed_state.recover_propagated(
+                        config=self.anchor_sparse_config,
+                        radius=self.anchor_sparse_propagate_radius,
+                    )
+                    packed_state = None
+                    self._anchor_sparse_last_packed_propagation_count += 1
                 continue
 
             if packed_state is not None:
