@@ -440,3 +440,41 @@ Artifacts:
     dense_log_summary.json
     sparse_log_summary.json
 ```
+
+## Real DROID history-chain rejection
+
+The random-image smoke above was not sufficient to select a policy. The same
+service path was therefore driven by the task-disjoint DROID Oracle manifest:
+one real episode, its early/middle/late instructions and states, and three
+historical four-frame blocks before each measured target. Every history and
+target call retained eight real DiT evaluations.
+
+The full-budget Packed path exactly matches Dense after the complete history
+chain (`action cosine = 1.0`, relative L2 `= 0`), so reset, distributed state,
+and Packed M2 exactness are not the source of the following errors.
+
+| Policy | History mean | Current mean | Target mean speedup | Middle cosine / rel-L2 | Late cosine / rel-L2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| balanced | 37.50% | 56.19% | 1.421x | 0.990942 / 13.43% | 0.988943 / 16.10% |
+| quality | 37.50% | 61.23% | 1.419x | 0.996679 / 8.25% | 0.981261 / 20.37% |
+| quality + history floor 75% | 75.00% | 61.23% | 1.157x | 0.993865 / 11.24% | 0.990773 / 13.95% |
+| quality + Dense history | 100.00% | 61.23% | 1.264x | 0.998383 / 5.77% | 0.997600 / 8.17% |
+| current floor 75% + Dense history | 100.00% | 74.44% | 1.183x | 0.999405 / 4.05% | 0.997019 / 8.06% |
+| full-budget Packed | 100.00% | 100.00% | 0.982x | 1.000000 / 0% | 1.000000 / 0% |
+
+The latency rows contain only two measured target requests and are diagnostic,
+not paper estimates. The quality result is nevertheless decisive: no shared
+global table in this sweep meets the required worst-request action threshold.
+Even the conservative 75% current / Dense history table passes the middle
+target but fails the late target. The balanced table is therefore rejected as
+the candidate for the 100-request run.
+
+The next policy must use calibrated request/head confidence to promote or
+fallback before executing the target. A low-confidence trajectory cannot be
+assigned a universal 75% fallback; the demonstrated late request requires a
+Dense fallback. Historical-K/V budget must also be part of the confidence
+decision rather than remaining the aggressive Oracle average.
+
+Artifacts:
+
+`dynamic_m1_m2/e2e/20260830_droid_108_round1/`

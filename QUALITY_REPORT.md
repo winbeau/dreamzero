@@ -41,3 +41,33 @@ still required.
 Artifacts:
 
 `dynamic_m1_m2/e2e/20260830_balanced_smoke/`
+
+## Real DROID history-chain gate
+
+The candidate policies were next evaluated on real frames, robot state, and
+instructions from the task-disjoint DROID Oracle subset. Each target was
+preceded by three real history blocks so that errors could accumulate through
+the same AR cache path used by deployment.
+
+| Policy | Early cosine / rel-L2 | Middle cosine / rel-L2 | Late cosine / rel-L2 | Decision |
+| --- | ---: | ---: | ---: | --- |
+| balanced | 0.996445 / 8.43% | 0.990942 / 13.43% | 0.988943 / 16.10% | reject |
+| quality | 0.997333 / 7.41% | 0.996679 / 8.25% | 0.981261 / 20.37% | reject |
+| history floor 75% | 0.996397 / 8.84% | 0.993865 / 11.24% | 0.990773 / 13.95% | reject |
+| Dense history | 0.996315 / 8.59% | 0.998383 / 5.77% | 0.997600 / 8.17% | reject |
+| current floor 75% + Dense history | 0.998071 / 6.63% | 0.999405 / 4.05% | 0.997019 / 8.06% | reject late |
+| full-budget Packed | 1.000000 / 0% | 1.000000 / 0% | 1.000000 / 0% | pass exactness |
+
+The full-budget control proves that Packed M2 and service resets remain exact
+under the real history chain. The approximation error grows by trajectory and
+is not monotonic in a shared budget: raising late current compute from the
+balanced table to the quality table made this late example worse. This is
+direct evidence for confidence-aware M1 fallback and against selecting a
+single global budget from isolated one-step averages.
+
+No sparse row is promoted to the 100-request or closed-loop quality run yet.
+The demonstrated late request is a mandatory Dense-fallback regression case.
+
+Artifacts:
+
+`dynamic_m1_m2/e2e/20260830_droid_108_round1/`

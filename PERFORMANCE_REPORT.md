@@ -112,3 +112,26 @@ and 95%-faster-request gate remain open.
 Raw artifacts:
 
 `dynamic_m1_m2/e2e/20260830_balanced_smoke/`
+
+## Real DROID diagnostic performance
+
+The first task-disjoint DROID history-chain smoke used one episode at its
+early, middle, and late trajectory stages, with three history calls before
+each target. One target was reserved as warmup and two were measured. This is
+too small for a paper latency claim but prevents selection on random images.
+
+| Packed policy | Mean target latency | Speedup vs Dense | Quality decision |
+| --- | ---: | ---: | --- |
+| Dense | 1.9032 s | 1.000x | reference |
+| balanced | 1.3393 s | 1.421x | reject |
+| quality | 1.3414 s | 1.419x | reject |
+| quality + history floor 75% | 1.6455 s | 1.157x | reject |
+| quality + Dense history | 1.5057 s | 1.264x | reject |
+| current floor 75% + Dense history | 1.6088 s | 1.183x | reject late target |
+| full-budget Packed | 1.9379 s | 0.982x | exactness control |
+
+The nominal 1.42x rows cannot be reported as accepted acceleration because
+they fail action quality. The conservative rows show that indiscriminately
+buying quality with shared history/current floors also erases too much of the
+speed target. The performance path now depends on confident per-request or
+shared-group sparse routing plus Dense fallback, not a single global table.
