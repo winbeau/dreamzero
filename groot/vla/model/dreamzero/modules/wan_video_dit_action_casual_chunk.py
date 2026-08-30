@@ -38,6 +38,15 @@ import os
 ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
 
 
+def action_conditioned_causal_routing_is_eligible(
+    current_start_frame: int,
+    action_register_length: int | None,
+) -> bool:
+    """Whether a pass can safely use action-conditioned current-token routing."""
+
+    return current_start_frame > 0 and action_register_length is not None
+
+
 def sparse_current_token_update(
     x: torch.Tensor,
     e: tuple[torch.Tensor, ...],
@@ -1347,9 +1356,14 @@ class CausalWanAttentionBlock(nn.Module):
             x = x + (y * e[5].squeeze(2))
             return x
 
-        if self.sparse_current_compute and current_video_indices is not None:
-            if action_register_length is None:
-                raise ValueError("Sparse current-token compute requires action/state registers")
+        if (
+            self.sparse_current_compute
+            and current_video_indices is not None
+            and action_conditioned_causal_routing_is_eligible(
+                current_start_frame,
+                action_register_length,
+            )
+        ):
             if self.self_attn.anchor_sparse_config is None:
                 raise RuntimeError("Sparse current-token compute requires an anchor config")
             x = sparse_current_token_update(
@@ -2217,6 +2231,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             updated_kv_caches.append(updated_kv_cache)
             if (
                 block_index == 0
+                # The initial (and cache-rewind) pass uses the blockwise
+                # conditioning path above, which intentionally does not expose
+                # action-conditioned key scores.  Keep that pass fully dense;
+                # current-token routing starts only once causal KV history exists.
+                and action_conditioned_causal_routing_is_eligible(
+                    current_start_frame,
+                    action_register_length,
+                )
+                # Video-only cache-fill calls run before action denoising and do
+                # not carry action/state registers. Their KV update stays dense;
+                # the following WAM call builds the action-conditioned route.
                 and self.anchor_sparse_config is not None
                 and self.anchor_sparse_current_keep_ratio < 1.0
                 and current_video_indices is None

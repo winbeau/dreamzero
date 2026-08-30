@@ -1369,11 +1369,14 @@ class WANPolicyHead(ActionHead):
         self.vae.to(device=self._device, dtype=torch.bfloat16)
         import os
         ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
+        DISABLE_TORCH_COMPILE = os.getenv(
+            "DREAMZERO_DISABLE_TORCH_COMPILE", "False"
+        ).lower() == "true"
         LOAD_TRT_ENGINE = os.getenv("LOAD_TRT_ENGINE", None)
 
         # Torch compile the modules. Skip _forward_blocks: Dynamo with fullgraph can fail on
         # shape variation (e.g. x [1,50,C] vs e [1,200,C]); the block aligns e to x at runtime.
-        if not ENABLE_TENSORRT:
+        if not ENABLE_TENSORRT and not DISABLE_TORCH_COMPILE:
             print("Torch compiling the TextEncoder, ImageEncoder, and VAE modules (Wan _forward_blocks not compiled).")
 
             self.text_encoder.forward = torch.compile(
@@ -1387,6 +1390,8 @@ class WANPolicyHead(ActionHead):
             self.vae.model.encode = torch.compile(
                 mode="reduce-overhead", fullgraph=True, dynamic=False,
             )(self.vae.model.encode)
+        elif DISABLE_TORCH_COMPILE:
+            print("Skipping torch.compile because DREAMZERO_DISABLE_TORCH_COMPILE=true.")
         
         self.trt_engine = None
         if LOAD_TRT_ENGINE is not None:
@@ -1397,12 +1402,17 @@ class WANPolicyHead(ActionHead):
 
     def parallelize(self, device_mesh: DeviceMesh) -> None:
         ip_mesh = device_mesh["ip"]
-        self.ip_rank = ip_mesh.get_local_rank()
-        self.ip_size = ip_mesh.size()
-        self.ip_group = ip_mesh.get_group()
+        ip_rank = ip_mesh.get_local_rank()
+        ip_size = ip_mesh.size()
+        assert ip_size == 1 or ip_size == 2, "ip_size must be 1 or 2"
+        assert ip_rank >= 0 and ip_rank < ip_size, "ip_rank must be in [0, ip_size)"
 
-        assert self.ip_size == 1 or self.ip_size == 2, "ip_size must be 1 or 2"
-        assert self.ip_rank >= 0 and self.ip_rank < self.ip_size, "ip_rank must be in [0, ip_size)"
+        # Commit the distributed state only after validation. Otherwise the broad
+        # compatibility fallback in GrootSimPolicy can leave a partially configured
+        # head whose two-peer exchange protocol deadlocks for larger world sizes.
+        self.ip_rank = ip_rank
+        self.ip_size = ip_size
+        self.ip_group = ip_mesh.get_group()
 
     @property
     def device(self):

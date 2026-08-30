@@ -765,6 +765,12 @@ def init_mesh() -> DeviceMesh:
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    if world_size not in (1, 2):
+        raise ValueError(
+            "DreamZero inference parallelism supports only 1 or 2 ranks; "
+            f"got world_size={world_size}. Run separate 2-rank server replicas "
+            "instead of one larger process group."
+        )
     print(f"Rank {rank}/{world_size} (PID: {os.getpid()}) setting device to {rank}")
 
     torch.cuda.set_device(rank)

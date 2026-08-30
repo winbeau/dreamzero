@@ -50,6 +50,14 @@ def _inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return x, cache, freqs
 
 
+def test_current_token_routing_requires_causal_action_pass() -> None:
+    module = _load_attention_module()
+
+    assert not module.action_conditioned_causal_routing_is_eligible(0, 25)
+    assert not module.action_conditioned_causal_routing_is_eligible(1, None)
+    assert module.action_conditioned_causal_routing_is_eligible(1, 25)
+
+
 def test_cached_route_is_reused_by_real_kv_attention_path() -> None:
     module = _load_attention_module()
     config = AnchorSparseConfig(
