@@ -90,7 +90,7 @@ These are operator-level gates, not end-to-end or quality results.  The 20% and
 25% configurations advance as the initial speed-quality candidates; model-level
 full-budget parity, task quality, and end-to-end timing remain mandatory.
 
-## First real-checkpoint DiT gate
+## Real-checkpoint DiT gate
 
 The released 16.48B-parameter diffusion model was loaded independently on
 physical H200 GPUs 2--5 and evaluated with seven cached frames plus the current
@@ -98,13 +98,14 @@ two-frame block.  A 1.0 keep ratio was bitwise identical to the disabled dense
 path for video output, action output, and every layer's full KV cache.
 
 The paired dense/sparse DiT forward is materially smaller than the operator
-speedup.  After excluding one shared first-sample system stall on GPU 5, both
-candidates are approximately 1.15x:
+speedup.  With three warmup forwards and eight measured dense/sparse forwards
+per GPU, the repeated gate is stable across the two GPUs assigned to each
+candidate:
 
 | Old-frame keep | Selected video KV | Real DiT speedup | Video relative L2 | Action relative L2 |
 |---:|---:|---:|---:|---:|
-| 20% | 2,992 / 7,920 | 1.15x | 8.37% | 4.24% |
-| 25% | 3,300 / 7,920 | 1.15x | 7.56% | 3.74% |
+| 20% | 2,992 / 7,920 | 1.157x | 8.37% | 4.24% |
+| 25% | 3,300 / 7,920 | 1.148x | 7.56% | 3.74% |
 
 This is a synthetic fixed-input model gate, not a control-quality result.  It
 also shows that historical-KV attention sparsity alone does not yet meet the
