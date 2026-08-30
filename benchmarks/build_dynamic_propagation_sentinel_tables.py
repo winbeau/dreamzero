@@ -140,6 +140,49 @@ def build_segment_max_table(
     )
 
 
+def build_segment_group_floor_table(
+    base: DynamicPackedBudgetTable,
+    *,
+    segment_indices: tuple[int, ...],
+    current_floor: float,
+    dense_prefix_layers: int = 1,
+    dense_suffix_layers: int = 1,
+    propagate_every: int = 5,
+) -> DynamicPackedBudgetTable:
+    """Promote selected stable segments while leaving all others at segment max."""
+
+    floor = canonical_budget(current_floor)
+    segments = propagation_segments(
+        num_layers=base.num_layers,
+        dense_prefix_layers=dense_prefix_layers,
+        dense_suffix_layers=dense_suffix_layers,
+        propagate_every=propagate_every,
+    )
+    if not segment_indices or len(set(segment_indices)) != len(segment_indices):
+        raise ValueError("segment_indices must be non-empty and unique")
+    if any(not 0 <= index < len(segments) for index in segment_indices):
+        raise ValueError("segment index is outside the packed propagation segments")
+    stable = build_segment_max_table(
+        base,
+        dense_prefix_layers=dense_prefix_layers,
+        dense_suffix_layers=dense_suffix_layers,
+        propagate_every=propagate_every,
+    )
+    current = np.asarray(stable.current_keep_ratios, dtype=np.float64).copy()
+    for segment_index in segment_indices:
+        layers = list(segments[segment_index])
+        current[:, layers] = np.maximum(current[:, layers], floor)
+    group = "_".join(str(index) for index in segment_indices)
+    return DynamicPackedBudgetTable(
+        history_keep_ratios=base.history_keep_ratios,
+        current_keep_ratios=tuple(map(tuple, current.tolist())),
+        name=(
+            f"{base.name}_prop{propagate_every}_segments{group}_"
+            f"floor{int(round(floor * 100))}"
+        ),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-table", type=Path, required=True)
@@ -160,6 +203,13 @@ def main() -> None:
             "a no-floor segment-max table is always emitted."
         ),
     )
+    parser.add_argument(
+        "--segment-floor-groups",
+        nargs="*",
+        default=["0,1", "2,3"],
+        help="Comma-separated propagation-segment groups for localized floors.",
+    )
+    parser.add_argument("--segment-group-floor-ratio", type=float, default=0.75)
     parser.add_argument("--dense-prefix-layers", type=int, default=1)
     parser.add_argument("--dense-suffix-layers", type=int, default=1)
     parser.add_argument("--propagate-every", type=int, default=5)
@@ -223,6 +273,25 @@ def main() -> None:
         record_table(
             f"segment_floor_{suffix}",
             args.output_dir / f"segment_floor_{suffix}.json",
+            table,
+        )
+
+    group_floor = canonical_budget(args.segment_group_floor_ratio)
+    for raw_group in args.segment_floor_groups:
+        indices = tuple(int(value) for value in raw_group.split(",") if value)
+        table = build_segment_group_floor_table(
+            base,
+            segment_indices=indices,
+            current_floor=group_floor,
+            dense_prefix_layers=args.dense_prefix_layers,
+            dense_suffix_layers=args.dense_suffix_layers,
+            propagate_every=args.propagate_every,
+        )
+        group = "_".join(str(index) for index in indices)
+        suffix = str(int(round(group_floor * 100)))
+        record_table(
+            f"segment_group_{group}_floor_{suffix}",
+            args.output_dir / f"segment_group_{group}_floor_{suffix}.json",
             table,
         )
 

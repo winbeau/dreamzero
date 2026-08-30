@@ -1,6 +1,7 @@
 import numpy as np
 
 from benchmarks.build_dynamic_propagation_sentinel_tables import (
+    build_segment_group_floor_table,
     build_segment_max_table,
     build_sentinel_table,
     propagation_boundary_layers,
@@ -104,4 +105,25 @@ def test_segment_floor_is_applied_to_every_packed_layer() -> None:
 
     assert table.current_keep_ratios == (
         (0.35, 0.75, 0.75, 0.75, 0.75, 0.75, 0.35),
+    )
+
+
+def test_segment_group_floor_promotes_only_selected_stable_segments() -> None:
+    base = DynamicPackedBudgetTable(
+        history_keep_ratios=((0.20,) * 12,),
+        current_keep_ratios=(
+            (0.20, 0.35, 0.20, 0.50, 0.35, 0.20, 0.50, 0.25, 0.35, 0.50, 0.35, 0.20),
+        ),
+    )
+    table = build_segment_group_floor_table(
+        base,
+        segment_indices=(1,),
+        current_floor=0.75,
+        dense_prefix_layers=1,
+        dense_suffix_layers=1,
+        propagate_every=4,
+    )
+
+    assert table.current_keep_ratios == (
+        (0.20, 0.50, 0.50, 0.50, 0.50, 0.75, 0.75, 0.75, 0.75, 0.50, 0.50, 0.20),
     )
