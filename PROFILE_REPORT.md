@@ -165,10 +165,61 @@ not the primary optimization target.
    must keep action/state dense, retain exact full-budget behavior, and use a
    confidence-triggered dense fallback rather than task-specific rules.
 
+## Post-profile implementation gate
+
+The first two priorities were implemented and gated at revisions
+`e55ff818bf29472118d30d285ecb53402c88af3c` and
+`cfce1a12ce3dd9a1595c4518ecdd99586f26fae5`.
+
+Sparse current-query self-attention is retained as an opt-in ablation, not the
+default.  It improved checkpoint DiT speedup to about 1.297x on GPUs 5--6, but
+the synthetic video/action relative L2 rose to 66.30%/7.34%.  This is worse
+than the selected candidate's 57.32%/5.55%, so the option failed the numerical
+quality proxy and was not promoted.  Raw files are under
+`real_model_gate/20260830_current_attention_gpu56/`.
+
+The exact action-denoise optimization was promoted.  During all action denoise
+steps the caller sets `update_kv_cache=False` and discards every returned
+per-layer cache.  The model now propagates that intent through all 40 blocks,
+skips the final full-KV stack, and, for sparse attention, caches the gathered
+historical anchor K/V once per immutable history/route.  Each later denoise
+step concatenates only those historical anchors with the two dynamic current
+frames.  Cache-producing rollout updates retain the original path.
+
+The strict gate uses the same released checkpoint, BF16 FA2, physical GPUs
+5--6, and the 0.20/0.50 candidate above.  It performs both update-disabled and
+update-enabled forwards in one process and compares outputs elementwise.
+
+| GPU | Profile dense | Exact-opt dense | Profile sparse | Exact-opt sparse | Final speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 197.48 ms | 190.71 ms | 160.08 ms | 144.04 ms | 1.324x |
+| 6 | 194.38 ms | 189.52 ms | 155.98 ms | 143.02 ms | 1.325x |
+| Mean | 195.93 ms | 190.11 ms | 158.03 ms | 143.53 ms | 1.325x |
+
+Relative to the original profile gate, mean dense DiT latency falls 2.97% and
+mean sparse DiT latency falls 9.17%.  The mean per-GPU dense/sparse speedup
+increases from 1.240x to 1.325x.  A separate six-repeat run measured 190.48/188.95
+ms dense and 143.86/146.87 ms sparse on GPUs 5/6, respectively, confirming the
+same conclusion before the stricter exact fields were added.
+
+Every strict correctness field passes on both GPUs:
+
+- update-disabled dense video and action exactly equal update-enabled dense;
+- update-disabled sparse video and action exactly equal update-enabled sparse;
+- full-budget sparse video, action, and every returned layer KV cache exactly
+  equal dense;
+- the selected sparse candidate's video/action relative L2 remains exactly
+  57.3237%/5.5524%, so the optimization changes no approximation semantics.
+
+Raw strict-gate files are under
+`real_model_gate/20260830_no_kv_update_exact_gpu56/`; the preceding six-repeat
+files are under `real_model_gate/20260830_no_kv_update_gpu56/`.  CPU integration
+and routing tests pass 21/21 in the H200 repository uv environment.
+
 ## Gate decision
 
-The profiler phase passes: traces are reproducible on both H200s, the real
-checkpoint exactness control still passes, and the dominant costs are
-identified quantitatively. The next implementation phase should start with
-sparse self-attention queries and denoise-persistent historical KV packing,
-then rerun operator and checkpoint DiT gates before any end-to-end claim.
+The profiler and first implementation phase pass.  Sparse current-query
+self-attention remains disabled because its numerical proxy regressed, while
+the exact no-update/cache-reuse path passes all checkpoint gates and is the new
+default action-denoise behavior.  The next phase is a repeated end-to-end
+request pilot on GPUs 5--6 before any paper-level speed claim.
