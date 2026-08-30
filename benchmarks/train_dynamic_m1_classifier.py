@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
 from pathlib import Path
 
@@ -22,6 +21,7 @@ from sklearn.preprocessing import StandardScaler
 from groot.vla.model.dreamzero.modules.dynamic_m1_classifier import (
     BUDGET_BUCKETS,
     MappedGMMClassifier,
+    RoutePolicy,
 )
 
 
@@ -90,12 +90,6 @@ FEATURE_COLUMNS = (
     "prior_budget_std_tlh",
     "prior_critical_rate_tlh",
 )
-
-
-@dataclass(frozen=True)
-class RoutePolicy:
-    confidence_threshold: float
-    promotion_buckets: int
 
 
 def _ratio_suffix(ratio: float) -> str:

@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.mixture import GaussianMixture
 
 
 BUDGET_BUCKETS = np.asarray((0.10, 0.20, 0.25, 0.35, 0.50, 0.75, 1.00))
+
+
+@dataclass(frozen=True)
+class RoutePolicy:
+    """Calibrated deployment rule for budget promotion and Dense fallback."""
+
+    confidence_threshold: float
+    promotion_buckets: int
 
 
 class MappedGMMClassifier(ClassifierMixin, BaseEstimator):

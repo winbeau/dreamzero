@@ -37,6 +37,7 @@ class ZeroConfidenceCalibrator:
 
 
 def test_budget_indices_require_fixed_buckets():
+    assert RoutePolicy.__module__.endswith("dynamic_m1_classifier")
     assert budget_indices([0.1, 0.35, 1.0]).tolist() == [0, 3, 6]
     with pytest.raises(ValueError, match="outside fixed budget"):
         budget_indices([0.3])
