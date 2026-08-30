@@ -746,9 +746,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     )
     model.configure_dynamic_packed_budget_table(dynamic_table)
     head_group_table = DynamicPackedHeadGroupBudgetTable(
-        head_groups=((0,), (1,)),
-        group_names=("critical", "normal"),
-        history_keep_ratios=tuple(
+        head_keep_ratios=tuple(
             tuple((1.0, 0.20) for _ in range(2)) for _ in range(8)
         ),
     )

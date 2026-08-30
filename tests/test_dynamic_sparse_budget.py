@@ -52,10 +52,9 @@ def test_arbitrary_dynamic_shape_is_rejected() -> None:
 
 def test_dynamic_head_group_budget_roundtrip_and_partition_validation(tmp_path):
     table = DynamicPackedHeadGroupBudgetTable(
-        head_groups=((0, 2), (1, 3)),
-        group_names=("critical", "normal"),
-        history_keep_ratios=tuple(
-            tuple((1.0, 0.35) for _ in range(3)) for _ in range(2)
+        head_keep_ratios=tuple(
+            tuple((1.0, 0.35, 1.0, 0.35) for _ in range(3))
+            for _ in range(2)
         ),
         name="tiny",
     )
@@ -73,14 +72,12 @@ def test_dynamic_head_group_budget_roundtrip_and_partition_validation(tmp_path):
     path.write_text(json.dumps(table.to_dict()))
     assert DynamicPackedHeadGroupBudgetTable.from_json(path) == table
 
-    with pytest.raises(ValueError, match="must not overlap"):
+    with pytest.raises(ValueError, match="at most four"):
         DynamicPackedHeadGroupBudgetTable(
-            head_groups=((0, 1), (1, 2)),
-            history_keep_ratios=(((1.0, 0.5),),),
+            head_keep_ratios=(((0.1, 0.2, 0.35, 0.5, 0.75),),),
         )
 
-    with pytest.raises(ValueError, match="group count"):
+    with pytest.raises(ValueError, match="equal group counts"):
         DynamicPackedHeadGroupBudgetTable(
-            head_groups=((0,), (1,)),
-            history_keep_ratios=(((1.0,),),),
+            head_keep_ratios=(((1.0, 0.5), (1.0,)),),
         )

@@ -182,73 +182,81 @@ def _canonical_budget_cube(
 
 @dataclass(frozen=True)
 class DynamicPackedHeadGroupBudgetTable:
-    """Fixed head partition with dynamic historical-KV budgets.
+    """Per-head historical-KV budgets collapsed to a few runtime groups.
 
     Current-query and packed-compute length remains controlled by
-    :class:`DynamicPackedBudgetTable`. This table gives a small number of
-    shared head groups separate historical K/V prefix lengths, so critical or
-    confidence-fallback heads can retain more context without forcing every
-    head to the same budget.
+    :class:`DynamicPackedBudgetTable`. At each ``(timestep, layer)`` heads with
+    the same ratio are executed together, so critical or confidence-fallback
+    heads can retain more context without forcing every head to the same
+    budget. Every cell is restricted to at most four distinct ratios.
     """
 
-    head_groups: tuple[tuple[int, ...], ...]
-    history_keep_ratios: tuple[tuple[tuple[float, ...], ...], ...]
-    group_names: tuple[str, ...] = ()
+    head_keep_ratios: tuple[tuple[tuple[float, ...], ...], ...]
     name: str = "dynamic_head_groups"
 
     def __post_init__(self) -> None:
-        groups = tuple(tuple(int(head) for head in group) for group in self.head_groups)
-        if not groups or any(not group for group in groups):
-            raise ValueError("head_groups must contain non-empty groups")
-        flattened = tuple(head for group in groups for head in group)
-        if any(head < 0 for head in flattened):
-            raise ValueError("head indices must be non-negative")
-        if len(set(flattened)) != len(flattened):
-            raise ValueError("head_groups must not overlap")
         cube = _canonical_budget_cube(
-            self.history_keep_ratios,
-            field_name="history_keep_ratios",
+            self.head_keep_ratios,
+            field_name="head_keep_ratios",
         )
-        if len(cube[0][0]) != len(groups):
-            raise ValueError("Budget group count differs from head_groups")
-        names = tuple(str(value) for value in self.group_names)
-        if names and len(names) != len(groups):
-            raise ValueError("group_names must align with head_groups")
-        if not names:
-            names = tuple(f"group_{index}" for index in range(len(groups)))
-        object.__setattr__(self, "head_groups", groups)
-        object.__setattr__(self, "history_keep_ratios", cube)
-        object.__setattr__(self, "group_names", names)
+        if any(len(set(heads)) > 4 for row in cube for heads in row):
+            raise ValueError(
+                "Each timestep/layer may use at most four shared head-group ratios"
+            )
+        object.__setattr__(self, "head_keep_ratios", cube)
 
     @property
     def num_dit_steps(self) -> int:
-        return len(self.history_keep_ratios)
+        return len(self.head_keep_ratios)
 
     @property
     def num_layers(self) -> int:
-        return len(self.history_keep_ratios[0])
+        return len(self.head_keep_ratios[0])
 
     @property
     def num_groups(self) -> int:
-        return len(self.head_groups)
+        return max(
+            len(set(heads))
+            for row in self.head_keep_ratios
+            for heads in row
+        )
 
     @property
     def num_heads(self) -> int:
-        return sum(len(group) for group in self.head_groups)
+        return len(self.head_keep_ratios[0][0])
+
+    @property
+    def group_ratios(self) -> tuple[float, ...]:
+        return tuple(
+            sorted(
+                {
+                    ratio
+                    for row in self.head_keep_ratios
+                    for heads in row
+                    for ratio in heads
+                }
+            )
+        )
 
     def ratios(self, dit_index: int, layer_index: int) -> tuple[float, ...]:
         if not 0 <= dit_index < self.num_dit_steps:
             raise IndexError(f"dit_index {dit_index} is outside the head-group table")
         if not 0 <= layer_index < self.num_layers:
             raise IndexError(f"layer_index {layer_index} is outside the head-group table")
-        return self.history_keep_ratios[dit_index][layer_index]
+        return self.head_keep_ratios[dit_index][layer_index]
 
     def groups_for_layer(
         self,
         dit_index: int,
         layer_index: int,
     ) -> tuple[tuple[tuple[int, ...], float], ...]:
-        return tuple(zip(self.head_groups, self.ratios(dit_index, layer_index)))
+        groups: dict[float, list[int]] = {}
+        for head_index, ratio in enumerate(self.ratios(dit_index, layer_index)):
+            groups.setdefault(ratio, []).append(head_index)
+        return tuple(
+            (tuple(groups[ratio]), ratio)
+            for ratio in sorted(groups, reverse=True)
+        )
 
     @classmethod
     def from_dict(
@@ -256,9 +264,7 @@ class DynamicPackedHeadGroupBudgetTable:
         payload: dict[str, object],
     ) -> "DynamicPackedHeadGroupBudgetTable":
         return cls(
-            head_groups=payload["head_groups"],  # type: ignore[arg-type]
-            history_keep_ratios=payload["history_keep_ratios"],  # type: ignore[arg-type]
-            group_names=tuple(payload.get("group_names", ())),  # type: ignore[arg-type]
+            head_keep_ratios=payload["head_keep_ratios"],  # type: ignore[arg-type]
             name=str(payload.get("name", "dynamic_head_groups")),
         )
 
@@ -278,10 +284,9 @@ class DynamicPackedHeadGroupBudgetTable:
             "num_layers": self.num_layers,
             "num_groups": self.num_groups,
             "num_heads": self.num_heads,
-            "group_names": list(self.group_names),
-            "head_groups": [list(group) for group in self.head_groups],
-            "history_keep_ratios": [
-                [list(groups) for groups in row]
-                for row in self.history_keep_ratios
+            "group_ratios": list(self.group_ratios),
+            "head_keep_ratios": [
+                [list(heads) for heads in row]
+                for row in self.head_keep_ratios
             ],
         }

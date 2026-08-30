@@ -2474,7 +2474,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self,
         table: DynamicPackedHeadGroupBudgetTable | None,
     ) -> None:
-        """Attach at most four fixed head groups with dynamic history budgets."""
+        """Attach per-head history budgets collapsed to at most four groups."""
 
         if table is not None:
             if not self.anchor_sparse_packed_middle:
@@ -2491,10 +2491,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 )
             if table.num_groups > 4:
                 raise ValueError("Packed M2 supports at most four shared head groups")
-            flattened = sorted(head for group in table.head_groups for head in group)
-            if flattened != list(range(self.num_heads)):
+            if table.num_heads != self.num_heads:
                 raise ValueError(
-                    "Dynamic head groups must partition every model head exactly once"
+                    "Dynamic head-group table width differs from the model head count"
                 )
         self._dynamic_packed_head_group_budget_table = table
         self.clear_anchor_sparse_route_cache()

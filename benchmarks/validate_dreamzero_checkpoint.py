@@ -613,6 +613,7 @@ def main() -> None:
             packed_history_video_tokens = max(dynamic_middle_history_tokens)
             packed_current_video_tokens = max(dynamic_middle_current_tokens)
     dynamic_head_group_history_ratios: list[list[float]] = []
+    dynamic_head_group_assignments: list[list[dict[str, object]]] = []
     if dynamic_head_group_budget_table is not None:
         if dynamic_middle_layers:
             head_group_layers = dynamic_middle_layers
@@ -631,6 +632,16 @@ def main() -> None:
                     layer_index,
                 )
             )
+            for layer_index in head_group_layers
+        ]
+        dynamic_head_group_assignments = [
+            [
+                {"heads": list(heads), "history_keep_ratio": ratio}
+                for heads, ratio in dynamic_head_group_budget_table.groups_for_layer(
+                    candidate_dynamic_budget_dit_index,
+                    layer_index,
+                )
+            ]
             for layer_index in head_group_layers
         ]
     result = {
@@ -716,17 +727,13 @@ def main() -> None:
             if dynamic_head_group_budget_table is not None
             else None
         ),
-        "dynamic_head_group_names": (
-            list(dynamic_head_group_budget_table.group_names)
-            if dynamic_head_group_budget_table is not None
-            else []
-        ),
-        "dynamic_head_groups": (
-            [list(group) for group in dynamic_head_group_budget_table.head_groups]
+        "dynamic_head_group_ratios": (
+            list(dynamic_head_group_budget_table.group_ratios)
             if dynamic_head_group_budget_table is not None
             else []
         ),
         "dynamic_head_group_history_ratios": dynamic_head_group_history_ratios,
+        "dynamic_head_group_assignments": dynamic_head_group_assignments,
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,
