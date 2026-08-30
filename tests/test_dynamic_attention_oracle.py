@@ -88,8 +88,10 @@ def test_collector_writes_one_request_with_step_layer_and_profiles(tmp_path) -> 
             output_dir=tmp_path,
             keep_ratios=(1.0, 0.5),
             max_video_queries=3,
+            max_action_queries=1,
             query_chunk_size=2,
             support_ratio=0.5,
+            layer_indices=(4,),
         )
     )
     collector.begin_request(current_start_frame=7, instruction="pick object")
@@ -113,9 +115,34 @@ def test_collector_writes_one_request_with_step_layer_and_profiles(tmp_path) -> 
     line = jsonl_path.read_text().strip()
     assert '"scheduler_steps":16' in line
     assert '"layer_index":4' in line
+    assert '"num_sampled_action_queries":1' in line
     profiles = torch.load(profiles_path, weights_only=True)
     assert set(profiles) == {
         "r0_req000000_d03_l04_video",
         "r0_req000000_d03_l04_action",
     }
     assert all(profile.shape == (2, 3) for profile in profiles.values())
+
+
+def test_collector_layer_filter_skips_unselected_layers(tmp_path) -> None:
+    collector = DenseAttentionOracleCollector(
+        DenseAttentionOracleConfig(
+            output_dir=tmp_path,
+            keep_ratios=(1.0,),
+            max_video_queries=1,
+            max_action_queries=1,
+            layer_indices=(5,),
+        )
+    )
+    collector.begin_request(current_start_frame=1)
+    collector.set_step(scheduler_index=0, dit_index=0, scheduler_steps=16, timestep=999)
+    tensor = torch.randn(1, 2, 1, 2)
+    collector.observe(
+        layer_index=4,
+        video_query=tensor,
+        action_query=tensor[:, :1],
+        video_key=tensor,
+        video_value=tensor,
+    )
+    assert collector.records == []
+    assert collector.flush_request() is None

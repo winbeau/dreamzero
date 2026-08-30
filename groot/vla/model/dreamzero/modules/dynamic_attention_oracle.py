@@ -349,8 +349,10 @@ class DenseAttentionOracleConfig:
     keep_ratios: tuple[float, ...] = DEFAULT_KEEP_RATIOS
     top_p_thresholds: tuple[float, ...] = DEFAULT_TOP_P_THRESHOLDS
     max_video_queries: int | None = 32
+    max_action_queries: int | None = None
     query_chunk_size: int = 4
     support_ratio: float = 0.75
+    layer_indices: tuple[int, ...] = ()
     task_id: str | None = None
     trajectory_stage: str | None = None
 
@@ -360,10 +362,16 @@ class DenseAttentionOracleConfig:
             raise ValueError("rank must be non-negative")
         if self.max_video_queries is not None and self.max_video_queries <= 0:
             raise ValueError("max_video_queries must be positive or None")
+        if self.max_action_queries is not None and self.max_action_queries <= 0:
+            raise ValueError("max_action_queries must be positive or None")
         if self.query_chunk_size <= 0:
             raise ValueError("query_chunk_size must be positive")
         if not 0.0 < self.support_ratio <= 1.0:
             raise ValueError("support_ratio must lie in (0, 1]")
+        if any(index < 0 for index in self.layer_indices):
+            raise ValueError("layer_indices must be non-negative")
+        if len(set(self.layer_indices)) != len(self.layer_indices):
+            raise ValueError("layer_indices must be unique")
 
 
 def _tensor_json(value: torch.Tensor) -> list:
@@ -489,6 +497,8 @@ class DenseAttentionOracleCollector:
     ) -> None:
         if not self.active:
             return
+        if self.config.layer_indices and layer_index not in self.config.layer_indices:
+            return
         video_query_indices = deterministic_query_sample_indices(
             video_query.shape[1],
             self.config.max_video_queries,
@@ -504,12 +514,18 @@ class DenseAttentionOracleCollector:
             query_chunk_size=self.config.query_chunk_size,
             support_ratio=self.config.support_ratio,
         )
+        action_query_indices = deterministic_query_sample_indices(
+            action_query.shape[1],
+            self.config.max_action_queries,
+            device=action_query.device,
+        )
         action_statistics = analyze_dense_attention(
             action_query,
             video_key,
             video_value,
             keep_ratios=self.config.keep_ratios,
             top_p_thresholds=self.config.top_p_thresholds,
+            query_indices=action_query_indices,
             query_chunk_size=self.config.query_chunk_size,
             support_ratio=self.config.support_ratio,
         )
@@ -560,6 +576,7 @@ class DenseAttentionOracleCollector:
                 "num_video_queries": int(video_query.shape[1]),
                 "num_sampled_video_queries": int(video_query_indices.numel()),
                 "num_action_queries": int(action_query.shape[1]),
+                "num_sampled_action_queries": int(action_query_indices.numel()),
                 "num_video_keys": int(video_key.shape[1]),
                 "video": _attention_statistics_record(video_statistics),
                 "action": _attention_statistics_record(action_statistics),

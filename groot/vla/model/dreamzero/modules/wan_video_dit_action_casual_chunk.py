@@ -1949,8 +1949,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         rank: int = 0,
         keep_ratios: tuple[float, ...] = (1.0, 0.75, 0.50, 0.35, 0.25, 0.20, 0.10),
         max_video_queries: int | None = 32,
+        max_action_queries: int | None = None,
         query_chunk_size: int = 4,
         support_ratio: float = 0.75,
+        layer_indices: tuple[int, ...] = (),
         task_id: str | None = None,
         trajectory_stage: str | None = None,
     ) -> None:
@@ -1972,8 +1974,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     rank=rank,
                     keep_ratios=keep_ratios,
                     max_video_queries=max_video_queries,
+                    max_action_queries=max_action_queries,
                     query_chunk_size=query_chunk_size,
                     support_ratio=support_ratio,
+                    layer_indices=layer_indices,
                     task_id=task_id,
                     trajectory_stage=trajectory_stage,
                 )

@@ -57,8 +57,10 @@ class Args:
     anchor_sparse_record_diagnostics: bool = False
     dynamic_oracle_output_dir: str | None = None
     dynamic_oracle_max_video_queries: int | None = 32
+    dynamic_oracle_max_action_queries: int | None = None
     dynamic_oracle_query_chunk_size: int = 4
     dynamic_oracle_support_ratio: float = 0.75
+    dynamic_oracle_layer_indices: tuple[int, ...] = ()
     dynamic_oracle_task_id: str | None = None
     dynamic_oracle_trajectory_stage: str | None = None
 
@@ -900,16 +902,20 @@ def main(args: Args) -> None:
             output_dir=args.dynamic_oracle_output_dir,
             rank=rank,
             max_video_queries=args.dynamic_oracle_max_video_queries,
+            max_action_queries=args.dynamic_oracle_max_action_queries,
             query_chunk_size=args.dynamic_oracle_query_chunk_size,
             support_ratio=args.dynamic_oracle_support_ratio,
+            layer_indices=args.dynamic_oracle_layer_indices,
             task_id=args.dynamic_oracle_task_id,
             trajectory_stage=args.dynamic_oracle_trajectory_stage,
         )
         logger.info(
             "Dynamic Oracle capture enabled: output=%s max_video_queries=%s "
-            "chunk=%d support_ratio=%.3f",
+            "max_action_queries=%s layers=%s chunk=%d support_ratio=%.3f",
             args.dynamic_oracle_output_dir,
             args.dynamic_oracle_max_video_queries,
+            args.dynamic_oracle_max_action_queries,
+            args.dynamic_oracle_layer_indices or "all",
             args.dynamic_oracle_query_chunk_size,
             args.dynamic_oracle_support_ratio,
         )
