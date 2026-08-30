@@ -38,6 +38,22 @@ The selected indices are shared by every attention head.  Keys and values are
 gathered once per layer and evaluated by one dense FlashAttention kernel over
 the shorter sequence.
 
+## Current-query route
+
+Historical K/V routing, current-video self-attention Q routing, and
+current-video cross-attention/FFN routing have independent budgets.  All three
+reuse the action-conditioned layer-0 spatial scores, and their indices are
+cached across denoising calls.  If the current-Q and current-compute ratios are
+equal, they share the same route tensor.  Action and state queries are never
+removed because their outputs feed the action decoder.
+
+This separation makes Q compression directly measurable.  On the released
+checkpoint, holding historical KV and current compute at 20% while reducing Q
+from 20% to 10% or 5% did not improve DiT latency: the smaller FlashAttention
+shapes and extra gather/scatter path offset the FLOP reduction.  The mechanism
+is retained for ablation, while the primary aggressive configuration uses a
+shared 20% current route.
+
 ## Route lifetime
 
 Recomputing a top-k route in every layer is counterproductive.  A first H200

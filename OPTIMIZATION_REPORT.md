@@ -20,6 +20,12 @@ end-to-end run and an even worse 93.30%/14.47% numerical proxy.
 The aggressive configurations are therefore speed-ceiling ablations, not the
 quality-selected default.
 
+A follow-up query sweep confirms that current-video Q can be routed
+independently from historical KV and current cross-attention/FFN compute.
+However, reducing self-attention Q alone below the 20% current-compute route
+does not improve the real DiT: small-query FlashAttention shapes plus the
+additional gather/scatter path offset the saved attention FLOPs.
+
 ## Revisions and setup
 
 - exact action-denoise implementation: `85a1ca6`;
@@ -159,6 +165,49 @@ Raw files and the aggregate comparison are under
 `e2e_server/20260830_100x3/`, including
 `paired_dense_vs_80_80_all_300.json`.
 
+## Independent current-query compression
+
+Commit `4e8cc89` separates three budgets that were previously coupled:
+
+1. historical video K/V keep ratio;
+2. current-video cross-attention/FFN compute keep ratio;
+3. current-video self-attention Q keep ratio.
+
+Action and state queries remain dense because their outputs feed the action
+decoder directly.  When the Q and current-compute ratios match, the exact same
+route tensor is reused, preserving the original implementation and avoiding a
+second router invocation.
+
+The first sweep kept historical KV at 20% while coupling current compute and Q
+at progressively smaller ratios:
+
+| Historical KV | Current compute / Q | Q tokens | DiT p50 | Speedup | Video rel. L2 | Action rel. L2 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20% | 10% / 10% | 176 / 1,760 | 120.44 ms | 1.557x | 93.75% | 13.16% |
+| 20% | 5% / 5% | 88 / 1,760 | 119.25 ms | 1.568x | 96.89% | 14.26% |
+| 20% | 2.5% / 2.5% | 44 / 1,760 | 134.21 ms | 1.419x | 98.62% | 14.95% |
+
+The 2.5% point is slower rather than faster, demonstrating a real kernel-shape
+floor rather than monotonic scaling with token count.  Raw files are under
+`real_model_gate/20260830_q_sweep_k20_q10_q5_gpu56/` and
+`real_model_gate/20260830_q_sweep_k20_q2p5_gpu5/`.
+
+The decisive sweep then held current cross-attention/FFN compute at 20% and
+changed only self-attention Q:
+
+| Historical KV | Current compute | Self-attention Q | Q tokens | DiT p50 | Speedup | Video rel. L2 | Action rel. L2 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20% | 20% | 20% | 352 / 1,760 | 121.89 ms | 1.540x | 87.14% | 11.23% |
+| 20% | 20% | 10% | 176 / 1,760 | 123.24 ms | 1.528x | 87.06% | 12.19% |
+| 20% | 20% | 5% | 88 / 1,760 | 122.74 ms | 1.523x | 86.99% | 12.96% |
+
+Therefore the extra speed in the coupled 5% experiment comes from skipping
+more cross-attention/FFN token updates, not from Q compression itself.  Q-only
+compression is retained as a clean paper ablation and configurable mechanism,
+but 20% Q remains the systems choice for the 80/80 speed-ceiling candidate.
+Raw decoupled results are under
+`real_model_gate/20260830_decoupled_q_k20_compute20_q10_q5_gpu56/`.
+
 ## Decision
 
 - Promote the exact no-update/history-KV optimization for all configurations.
@@ -169,5 +218,8 @@ Raw files and the aggregate comparison are under
   while noting that its 300-request mean is 1.284x rather than the 1.30x target.
 - Retain 90/90 as an ablation showing diminishing systems returns and severe
   numerical degradation; do not use it as the main candidate.
+- Retain independent Q routing as an ablation, but do not reduce Q below the
+  current-compute route in the primary configuration: it is slower and worsens
+  the action numerical proxy.
 - Advance both the conservative candidate and 80/80 ablation to matched
   open-loop/closed-loop quality evaluation before making a final paper claim.

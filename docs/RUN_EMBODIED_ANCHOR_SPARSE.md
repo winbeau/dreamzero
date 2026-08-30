@@ -66,6 +66,14 @@ Current-token sparse compute is active only on action-conditioned causal WAM
 passes.  The initial/cache-rewind conditioning pass and the video-only KV-fill
 pass remain dense because neither exposes a valid action-conditioned route.
 
+`--anchor-sparse-attention-query-keep-ratio` independently controls the
+current-video self-attention Q budget when
+`--anchor-sparse-current-attention` is enabled.  If omitted, it defaults to
+`--anchor-sparse-current-keep-ratio`, preserving the original shared route.
+Action/state Q remains dense.  Real-checkpoint measurements found that setting
+Q below the current cross-attention/FFN budget did not improve latency, so the
+independent option is primarily an ablation control.
+
 ## End-to-end server latency
 
 The deterministic request generator sends three 180x320 RGB views, robot
