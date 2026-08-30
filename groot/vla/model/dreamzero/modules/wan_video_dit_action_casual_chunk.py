@@ -314,6 +314,8 @@ class CausalWanSelfAttention(nn.Module):
         self.num_state_per_block = num_state_per_block
         self.anchor_sparse_config = anchor_sparse_config
         self.record_anchor_diagnostics = record_anchor_diagnostics
+        self.dynamic_oracle_collector: Any | None = None
+        self.layer_index = -1
         self.last_anchor_route: AnchorRoute | None = None
         self._anchor_sparse_history_cache_key: tuple[Any, ...] | None = None
         self._anchor_sparse_history_k: torch.Tensor | None = None
@@ -1257,6 +1259,33 @@ class CausalWanSelfAttention(nn.Module):
             total_video_tokens = history_k.shape[1] + num_new_tokens
 
             if action_register_length is not None:
+                if self.dynamic_oracle_collector is not None:
+                    oracle_video_key = (
+                        new_k
+                        if new_k is not None
+                        else torch.cat([history_k, roped_key], dim=1)
+                    )
+                    oracle_video_value = (
+                        new_v
+                        if new_v is not None
+                        else torch.cat([history_v, v], dim=1)
+                    )
+                    tokens_per_block = (
+                        self.num_action_per_block + self.num_state_per_block
+                    )
+                    num_register_blocks = (
+                        roped_action_query.shape[1] // tokens_per_block
+                    )
+                    oracle_action_query = roped_action_query[
+                        :, :num_register_blocks * self.num_action_per_block
+                    ]
+                    self.dynamic_oracle_collector.observe(
+                        layer_index=self.layer_index,
+                        video_query=roped_query,
+                        action_query=oracle_action_query,
+                        video_key=oracle_video_key,
+                        video_value=oracle_video_value,
+                    )
                 attention_k: torch.Tensor | None = new_k
                 attention_v: torch.Tensor | None = new_v
                 sparse_config = self.anchor_sparse_config
@@ -1787,6 +1816,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._anchor_sparse_current_attention_route_cache: torch.Tensor | None = None
         self._anchor_sparse_route_cache_key: tuple[Any, ...] | None = None
         self._anchor_sparse_last_start_frame: int | None = None
+        self._dynamic_attention_oracle_collector: Any | None = None
 
         max_num_embodiments = 1
 
@@ -1851,6 +1881,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         ])
         sparse_end = num_layers - anchor_sparse_dense_suffix_layers
         for block_index, block in enumerate(self.blocks):
+            block.self_attn.layer_index = block_index
             block.sparse_current_compute = (
                 anchor_sparse_enabled
                 and anchor_sparse_current_keep_ratio < 1.0
@@ -1910,6 +1941,87 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.self_attn.last_anchor_route = None
             block.self_attn.clear_anchor_sparse_history_cache()
+
+    def configure_dynamic_attention_oracle(
+        self,
+        *,
+        output_dir: str | None,
+        rank: int = 0,
+        keep_ratios: tuple[float, ...] = (1.0, 0.75, 0.50, 0.35, 0.25, 0.20, 0.10),
+        max_video_queries: int | None = 32,
+        query_chunk_size: int = 4,
+        support_ratio: float = 0.75,
+        task_id: str | None = None,
+        trajectory_stage: str | None = None,
+    ) -> None:
+        """Enable or disable offline dense per-head Oracle collection."""
+
+        if output_dir is None:
+            collector = None
+        else:
+            from pathlib import Path
+
+            from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
+                DenseAttentionOracleCollector,
+                DenseAttentionOracleConfig,
+            )
+
+            collector = DenseAttentionOracleCollector(
+                DenseAttentionOracleConfig(
+                    output_dir=Path(output_dir),
+                    rank=rank,
+                    keep_ratios=keep_ratios,
+                    max_video_queries=max_video_queries,
+                    query_chunk_size=query_chunk_size,
+                    support_ratio=support_ratio,
+                    task_id=task_id,
+                    trajectory_stage=trajectory_stage,
+                )
+            )
+        self._dynamic_attention_oracle_collector = collector
+        for block_index, block in enumerate(self.blocks):
+            block.self_attn.layer_index = block_index
+            block.self_attn.dynamic_oracle_collector = collector
+
+    def begin_dynamic_attention_oracle_request(
+        self,
+        *,
+        current_start_frame: int,
+        instruction: object | None = None,
+        task_id: str | None = None,
+        trajectory_stage: str | None = None,
+    ) -> None:
+        collector = self._dynamic_attention_oracle_collector
+        if collector is not None:
+            collector.begin_request(
+                current_start_frame=current_start_frame,
+                instruction=instruction,
+                task_id=task_id,
+                trajectory_stage=trajectory_stage,
+            )
+
+    def set_dynamic_attention_oracle_step(
+        self,
+        *,
+        scheduler_index: int,
+        dit_index: int,
+        scheduler_steps: int,
+        timestep: int | torch.Tensor,
+    ) -> None:
+        collector = self._dynamic_attention_oracle_collector
+        if collector is not None:
+            collector.set_step(
+                scheduler_index=scheduler_index,
+                dit_index=dit_index,
+                scheduler_steps=scheduler_steps,
+                timestep=timestep,
+            )
+
+    def flush_dynamic_attention_oracle_request(self):
+        collector = self._dynamic_attention_oracle_collector
+        if collector is None:
+            return None
+        return collector.flush_request()
 
     def configure_anchor_sparse_attention(
         self,

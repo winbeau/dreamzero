@@ -1056,6 +1056,17 @@ class WANPolicyHead(ActionHead):
             print("current_start_frame >= local_attn_size, reset current_start_frame to 0")
             self.current_start_frame = 0
 
+        begin_oracle_request = getattr(
+            self.model,
+            "begin_dynamic_attention_oracle_request",
+            None,
+        )
+        if begin_oracle_request is not None:
+            begin_oracle_request(
+                current_start_frame=self.current_start_frame,
+                instruction=data["text"],
+            )
+
         if self.ip_rank == 0:
             print("videos shape", videos.shape, self.num_frames)
 
@@ -1262,6 +1273,18 @@ class WANPolicyHead(ActionHead):
             should_run_model = self.should_run_model(index, current_timestep, prev_predictions)
             if should_run_model:
                 dit_compute_steps += 1
+                set_oracle_step = getattr(
+                    self.model,
+                    "set_dynamic_attention_oracle_step",
+                    None,
+                )
+                if set_oracle_step is not None:
+                    set_oracle_step(
+                        scheduler_index=index,
+                        dit_index=dit_compute_steps - 1,
+                        scheduler_steps=len(sample_scheduler.timesteps),
+                        timestep=video_timestep,
+                    )
                 if self.current_start_frame + self.num_frame_per_block <= self.ys.shape[2]:
                     y = self.ys[:, :, self.current_start_frame : self.current_start_frame + self.num_frame_per_block]
                 else:
@@ -1347,6 +1370,14 @@ class WANPolicyHead(ActionHead):
                   f"Diffusion {diffusion_time:.2f} seconds, "
                   f"DIT Compute Steps {dit_compute_steps} steps, "
                   f"Scheduler {scheduler_time:.2f} seconds")
+
+        flush_oracle_request = getattr(
+            self.model,
+            "flush_dynamic_attention_oracle_request",
+            None,
+        )
+        if flush_oracle_request is not None:
+            flush_oracle_request()
 
         return BatchFeature(data={"action_pred": latents_action, "video_pred": output.transpose(1, 2)})
     

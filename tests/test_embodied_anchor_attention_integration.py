@@ -143,6 +143,68 @@ def test_no_update_dense_attention_skips_cache_without_changing_output() -> None
     assert torch.equal(no_update_output, output)
 
 
+def test_oracle_observes_dense_video_action_layout_without_changing_output() -> None:
+    module = _load_attention_module()
+    dense = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    observed = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    observed.load_state_dict(dense.state_dict())
+    x, cache, freqs = _inputs()
+
+    class Collector:
+        def __init__(self):
+            self.shapes = None
+
+        def observe(self, **kwargs):
+            self.shapes = {
+                key: tuple(value.shape)
+                for key, value in kwargs.items()
+                if isinstance(value, torch.Tensor)
+            }
+
+    collector = Collector()
+    observed.dynamic_oracle_collector = collector
+    observed.layer_index = 7
+    dense_output, dense_cache, _ = dense(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+    )
+    observed_output, observed_cache, _ = observed(
+        x,
+        freqs,
+        freqs,
+        freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        current_start_frame=1,
+    )
+
+    assert torch.equal(observed_output, dense_output)
+    assert torch.equal(observed_cache, dense_cache)
+    assert collector.shapes == {
+        "video_query": (1, 4, 2, 4),
+        "action_query": (1, 2, 2, 4),
+        "video_key": (1, 12, 2, 4),
+        "video_value": (1, 12, 2, 4),
+    }
+
+
 def test_no_update_sparse_attention_reuses_gathered_history() -> None:
     module = _load_attention_module()
     config = AnchorSparseConfig(

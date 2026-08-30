@@ -55,6 +55,12 @@ class Args:
     anchor_sparse_reuse_denoise: bool = True
     anchor_sparse_current_attention: bool = False
     anchor_sparse_record_diagnostics: bool = False
+    dynamic_oracle_output_dir: str | None = None
+    dynamic_oracle_max_video_queries: int | None = 32
+    dynamic_oracle_query_chunk_size: int = 4
+    dynamic_oracle_support_ratio: float = 0.75
+    dynamic_oracle_task_id: str | None = None
+    dynamic_oracle_trajectory_stage: str | None = None
 
 
 class ARDroidRoboarenaPolicy:
@@ -877,6 +883,36 @@ def main(args: Args) -> None:
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
     )
+
+    configure_dynamic_oracle = getattr(
+        diffusion_model,
+        "configure_dynamic_attention_oracle",
+        None,
+    )
+    if args.dynamic_oracle_output_dir is not None:
+        if args.anchor_sparse_enabled:
+            raise ValueError(
+                "Oracle evidence collection must run with anchor sparsity disabled"
+            )
+        if configure_dynamic_oracle is None:
+            raise RuntimeError("Loaded diffusion model does not support Oracle capture")
+        configure_dynamic_oracle(
+            output_dir=args.dynamic_oracle_output_dir,
+            rank=rank,
+            max_video_queries=args.dynamic_oracle_max_video_queries,
+            query_chunk_size=args.dynamic_oracle_query_chunk_size,
+            support_ratio=args.dynamic_oracle_support_ratio,
+            task_id=args.dynamic_oracle_task_id,
+            trajectory_stage=args.dynamic_oracle_trajectory_stage,
+        )
+        logger.info(
+            "Dynamic Oracle capture enabled: output=%s max_video_queries=%s "
+            "chunk=%d support_ratio=%.3f",
+            args.dynamic_oracle_output_dir,
+            args.dynamic_oracle_max_video_queries,
+            args.dynamic_oracle_query_chunk_size,
+            args.dynamic_oracle_support_ratio,
+        )
 
     # Create server for all ranks - rank 0 handles websocket, others run worker loop
     hostname = socket.gethostname()
