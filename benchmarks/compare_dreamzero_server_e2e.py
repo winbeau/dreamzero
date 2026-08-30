@@ -29,6 +29,8 @@ def _paired_latencies(
     for dense_record, sparse_record in zip(dense_records, sparse_records, strict=True):
         if dense_record["request_index"] != sparse_record["request_index"]:
             raise ValueError("dense and sparse measured request indices do not align")
+        if dense_record.get("request_key") != sparse_record.get("request_key"):
+            raise ValueError("dense and sparse measured request keys do not align")
         if dense_record.get("action_shape") != sparse_record.get("action_shape"):
             raise ValueError("dense and sparse action shapes do not align")
 
@@ -138,6 +140,7 @@ def compare_reports(
         ) / np.maximum(dense_norm, 1e-12)
         worst_index = int(np.argmax(relative_l2))
         measured = _measured_records(dense)
+        worst_record = measured[worst_index]
         comparison.update(
             {
                 "action_cosine_mean": float(cosine.mean()),
@@ -145,8 +148,9 @@ def compare_reports(
                 "action_relative_l2_mean": float(relative_l2.mean()),
                 "action_relative_l2_max": float(relative_l2.max()),
                 "worst_action_request_index": int(
-                    measured[worst_index]["request_index"]
+                    worst_record["request_index"]
                 ),
+                "worst_action_request_key": worst_record.get("request_key"),
                 "action_cosine_per_request": cosine.tolist(),
                 "action_relative_l2_per_request": relative_l2.tolist(),
             }

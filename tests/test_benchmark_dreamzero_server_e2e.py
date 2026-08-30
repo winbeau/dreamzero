@@ -2,6 +2,11 @@ import numpy as np
 import pytest
 
 from benchmarks.benchmark_dreamzero_server_e2e import make_request, summarize
+from benchmarks.benchmark_dreamzero_server_droid import (
+    build_request_plan,
+    history_frame_groups,
+    split_state,
+)
 from benchmarks.compare_dreamzero_server_e2e import compare_reports
 from benchmarks.summarize_dreamzero_server_log import summarize_log
 
@@ -89,6 +94,40 @@ def test_compare_reports_includes_paired_action_quality_and_worst_request():
     assert result["action_relative_l2_mean"] == pytest.approx(0.14142136)
     assert result["action_relative_l2_max"] == pytest.approx(0.28284271)
     assert result["worst_action_request_index"] == 3
+
+
+def test_droid_request_plan_and_history_match_oracle_protocol():
+    manifest = {
+        "selections": [
+            {
+                "split": "test",
+                "subset_episode_index": 2,
+                "source_episode_index": 17,
+                "length": 100,
+                "tasks": ["first", "second", "third"],
+                "trajectory_stages": [
+                    {"name": "early", "fraction": 0.1},
+                    {"name": "middle", "fraction": 0.5},
+                ],
+            }
+        ]
+    }
+    plan = build_request_plan(
+        manifest, splits={"test"}, stages={"middle"}, max_requests=None
+    )
+    assert [request["request_key"] for request in plan] == [
+        "test_subset002_source000017_middle"
+    ]
+    assert history_frame_groups(
+        base_step=50, trajectory_length=100, history_blocks=3
+    ) == [[38], [39, 40, 41, 42], [43, 44, 45, 46], [47, 48, 49, 50]]
+
+
+def test_split_droid_state_uses_modality_slices():
+    joint, cartesian, gripper = split_state(np.arange(14, dtype=np.float64))
+    np.testing.assert_array_equal(joint, np.arange(7, 14))
+    np.testing.assert_array_equal(cartesian, np.arange(6))
+    np.testing.assert_array_equal(gripper, np.asarray([6.0]))
 
 
 def test_summarize_log_uses_latest_run_and_drops_warmup():

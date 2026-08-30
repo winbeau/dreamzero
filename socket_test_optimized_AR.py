@@ -66,6 +66,7 @@ class Args:
     dynamic_oracle_layer_indices: tuple[int, ...] = ()
     dynamic_oracle_task_id: str | None = None
     dynamic_oracle_trajectory_stage: str | None = None
+    save_video_on_reset: bool = True
 
 
 class ARDroidRoboarenaPolicy:
@@ -86,10 +87,12 @@ class ARDroidRoboarenaPolicy:
         groot_policy: GrootSimPolicy,
         signal_group: dist.ProcessGroup,
         output_dir: str | None = None,
+        save_video_on_reset: bool = True,
     ) -> None:
         self._policy = groot_policy
         self._signal_group = signal_group
         self._output_dir = output_dir
+        self._save_video_on_reset = save_video_on_reset
         
         # Frame buffers for accumulation (per camera view)
         self._frame_buffers: dict[str, list[np.ndarray]] = {
@@ -284,7 +287,7 @@ class ARDroidRoboarenaPolicy:
             if self._current_session_id is not None:
                 logger.info(f"Session changed from '{self._current_session_id}' to '{session_id}', resetting state")
                 # Reset state for new session
-                self._reset_state()
+                self._reset_state(save_video=self._save_video_on_reset)
             else:
                 logger.info(f"New session started: '{session_id}'")
             self._current_session_id = session_id
@@ -417,7 +420,7 @@ class ARDroidRoboarenaPolicy:
         
         Clears frame buffers and resets call count.
         """
-        self._reset_state(save_video=True)
+        self._reset_state(save_video=self._save_video_on_reset)
 
 
 class WebsocketPolicyServer:
@@ -987,6 +990,7 @@ def main(args: Args) -> None:
         groot_policy=policy,
         signal_group=signal_group,
         output_dir=output_dir,
+        save_video_on_reset=args.save_video_on_reset,
     )
     
     # Configure server for AR_droid (2 external cameras, wrist camera, joint position actions)
