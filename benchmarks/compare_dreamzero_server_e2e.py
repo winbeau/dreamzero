@@ -43,6 +43,31 @@ def _paired_latencies(
     return dense_latency, sparse_latency
 
 
+def _paired_actions(
+    dense: dict[str, Any],
+    sparse: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray] | None:
+    dense_records = _measured_records(dense)
+    sparse_records = _measured_records(sparse)
+    dense_present = ["action" in record for record in dense_records]
+    sparse_present = ["action" in record for record in sparse_records]
+    if not any(dense_present) and not any(sparse_present):
+        return None
+    if not all(dense_present) or not all(sparse_present):
+        raise ValueError("dense and sparse reports must both contain every action")
+    dense_actions = np.asarray(
+        [record["action"] for record in dense_records], dtype=np.float64
+    )
+    sparse_actions = np.asarray(
+        [record["action"] for record in sparse_records], dtype=np.float64
+    )
+    if dense_actions.shape != sparse_actions.shape:
+        raise ValueError("dense and sparse action arrays do not align")
+    return dense_actions.reshape(len(dense_records), -1), sparse_actions.reshape(
+        len(sparse_records), -1
+    )
+
+
 def compare_reports(
     dense: dict[str, Any],
     sparse: dict[str, Any],
@@ -67,7 +92,7 @@ def compare_reports(
     bootstrap_geomeans = np.exp(log_speedups[bootstrap_indices].mean(axis=1))
     ci_low, ci_high = np.quantile(bootstrap_geomeans, [0.025, 0.975])
 
-    return {
+    comparison = {
         "dense_label": dense.get("label"),
         "sparse_label": sparse.get("label"),
         "seed": dense.get("seed"),
@@ -94,6 +119,39 @@ def compare_reports(
         "bootstrap_samples": bootstrap_samples,
         "bootstrap_seed": bootstrap_seed,
     }
+    paired_actions = _paired_actions(dense, sparse)
+    if paired_actions is not None:
+        dense_actions, sparse_actions = paired_actions
+        dense_norm = np.linalg.norm(dense_actions, axis=1)
+        sparse_norm = np.linalg.norm(sparse_actions, axis=1)
+        denominator = dense_norm * sparse_norm
+        cosine = np.divide(
+            np.sum(dense_actions * sparse_actions, axis=1),
+            denominator,
+            out=np.zeros_like(denominator),
+            where=denominator > 1e-12,
+        )
+        both_zero = (dense_norm <= 1e-12) & (sparse_norm <= 1e-12)
+        cosine[both_zero] = 1.0
+        relative_l2 = np.linalg.norm(
+            sparse_actions - dense_actions, axis=1
+        ) / np.maximum(dense_norm, 1e-12)
+        worst_index = int(np.argmax(relative_l2))
+        measured = _measured_records(dense)
+        comparison.update(
+            {
+                "action_cosine_mean": float(cosine.mean()),
+                "action_cosine_min": float(cosine.min()),
+                "action_relative_l2_mean": float(relative_l2.mean()),
+                "action_relative_l2_max": float(relative_l2.max()),
+                "worst_action_request_index": int(
+                    measured[worst_index]["request_index"]
+                ),
+                "action_cosine_per_request": cosine.tolist(),
+                "action_relative_l2_per_request": relative_l2.tolist(),
+            }
+        )
+    return comparison
 
 
 def main() -> None:

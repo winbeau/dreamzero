@@ -91,6 +91,7 @@ def main() -> None:
                 "latency_seconds": latency,
                 "action_shape": list(action.shape),
                 "action_dtype": str(action.dtype),
+                "action": action.tolist(),
             }
             records.append(record)
             if phase == "measured":

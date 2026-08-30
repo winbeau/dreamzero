@@ -74,6 +74,23 @@ def test_compare_reports_rejects_mismatched_seed():
         compare_reports(dense, sparse, bootstrap_samples=10)
 
 
+def test_compare_reports_includes_paired_action_quality_and_worst_request():
+    dense = _report("dense", 7, [2.0, 2.0])
+    sparse = _report("sparse", 7, [1.0, 1.0])
+    dense["records"][0]["action"] = [[1.0, 0.0]]
+    dense["records"][1]["action"] = [[1.0, 0.0]]
+    sparse["records"][0]["action"] = [[1.0, 0.0]]
+    sparse["records"][1]["action"] = [[0.8, 0.2]]
+
+    result = compare_reports(dense, sparse, bootstrap_samples=10)
+
+    assert result["action_cosine_mean"] < 1.0
+    assert result["action_cosine_min"] == pytest.approx(0.9701425)
+    assert result["action_relative_l2_mean"] == pytest.approx(0.14142136)
+    assert result["action_relative_l2_max"] == pytest.approx(0.28284271)
+    assert result["worst_action_request_index"] == 3
+
+
 def test_summarize_log_uses_latest_run_and_drops_warmup():
     rows = []
     for value in (9.0, 8.0, 3.0, 1.0, 2.0):
