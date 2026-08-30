@@ -18,6 +18,18 @@ ERROR_MSG = "Error: unexpected input/output"
 N_COLOR_CHANNELS = 3
 
 
+def _mark_full_checkpoint_component_loading(action_head_cfg: dict) -> None:
+    """Skip redundant base-component downloads for a full VLA checkpoint."""
+
+    if not isinstance(action_head_cfg, dict):
+        return
+    nested_config = action_head_cfg.get("config")
+    if isinstance(nested_config, dict):
+        nested_config["skip_component_loading"] = True
+    else:
+        action_head_cfg["skip_component_loading"] = True
+
+
 @dataclass
 class VLAConfig(PretrainedConfig):
     model_type = "vla"
@@ -374,6 +386,7 @@ class VLA(PreTrainedModel):
         with open(config_path, "r") as f:
             config_dict = json.load(f)
         config = VLAConfig(**config_dict)
+        _mark_full_checkpoint_component_loading(config.action_head_cfg)
         print("loading model")
 
         # Disable defer_lora_injection so LoRA layers are created during init,
@@ -537,6 +550,7 @@ class VLA(PreTrainedModel):
         with open(config_path, "r") as f:
             config_dict = json.load(f)
         config = VLAConfig(**config_dict)
+        _mark_full_checkpoint_component_loading(config.action_head_cfg)
         print("loading model")
         print("config.action_head_cfg", config.action_head_cfg)
         # Always disable defer_lora_injection
@@ -551,7 +565,7 @@ class VLA(PreTrainedModel):
 
         # Instantiate model
         model = cls(config)
-        print("model", model)
+        print("model", model.__class__.__name__)
         # Remove .base_layer from keys (e.g., 'action_head.model.base_model.model.blocks.19.self_attn.v.base_layer.bias' -> 'action_head.model.base_model.model.blocks.19.self_attn.v.bias')
         has_base_layer = any(".base_layer." in key for key in state_dict.keys())
         if has_base_layer:

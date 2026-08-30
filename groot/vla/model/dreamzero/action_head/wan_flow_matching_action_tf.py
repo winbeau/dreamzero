@@ -239,29 +239,41 @@ class WANPolicyHead(ActionHead):
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
         
-        text_enc_path = ensure_file(
-            self.text_encoder.text_encoder_pretrained_path,
-            "models_t5_umt5-xxl-enc-bf16.pth",
-        )
-        self.text_encoder.load_state_dict(torch.load(text_enc_path, map_location='cpu'))
-
-        img_enc_path = ensure_file(
-            self.image_encoder.image_encoder_pretrained_path,
-            "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-        )
-        self.image_encoder.model.load_state_dict(torch.load(img_enc_path, map_location='cpu'), strict=False)
-
-        # Wan2.2 (WanVideoVAE38, z_dim=48) uses Wan2.2_VAE.pth; Wan2.1 uses Wan2.1_VAE.pth
-        vae_hf_filename = "Wan2.2_VAE.pth" if getattr(self.vae, "z_dim", 16) == 48 else "Wan2.1_VAE.pth"
-        vae_repo_id = WAN22_HF_REPO_ID if getattr(self.vae, "z_dim", 16) == 48 else WAN_HF_REPO_ID
-        vae_path = ensure_file(
-            self.vae.vae_pretrained_path,
-            vae_hf_filename,
-            repo_id=vae_repo_id,
-        )
-        self.vae.model.load_state_dict(torch.load(vae_path, map_location='cpu'))
-
         if not config.skip_component_loading:
+            text_enc_path = ensure_file(
+                self.text_encoder.text_encoder_pretrained_path,
+                "models_t5_umt5-xxl-enc-bf16.pth",
+            )
+            self.text_encoder.load_state_dict(
+                torch.load(text_enc_path, map_location='cpu')
+            )
+
+            img_enc_path = ensure_file(
+                self.image_encoder.image_encoder_pretrained_path,
+                "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+            )
+            self.image_encoder.model.load_state_dict(
+                torch.load(img_enc_path, map_location='cpu'), strict=False
+            )
+
+            # Wan2.2 (WanVideoVAE38, z_dim=48) uses Wan2.2_VAE.pth; Wan2.1 uses Wan2.1_VAE.pth
+            vae_hf_filename = (
+                "Wan2.2_VAE.pth"
+                if getattr(self.vae, "z_dim", 16) == 48
+                else "Wan2.1_VAE.pth"
+            )
+            vae_repo_id = (
+                WAN22_HF_REPO_ID
+                if getattr(self.vae, "z_dim", 16) == 48
+                else WAN_HF_REPO_ID
+            )
+            vae_path = ensure_file(
+                self.vae.vae_pretrained_path,
+                vae_hf_filename,
+                repo_id=vae_repo_id,
+            )
+            self.vae.model.load_state_dict(torch.load(vae_path, map_location='cpu'))
+
             dit_dir = self.model.diffusion_model_pretrained_path
             # Wan2.2 (in_dim=48) uses Wan2.2-TI2V-5B repo; Wan2.1 uses Wan2.1-I2V-14B-480P
             dit_repo_id = WAN22_HF_REPO_ID if getattr(self.model, "in_dim", 16) == 48 else WAN_HF_REPO_ID
@@ -1357,11 +1369,14 @@ class WANPolicyHead(ActionHead):
         self.vae.to(device=self._device, dtype=torch.bfloat16)
         import os
         ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
+        DISABLE_TORCH_COMPILE = os.getenv(
+            "DREAMZERO_DISABLE_TORCH_COMPILE", "False"
+        ).lower() == "true"
         LOAD_TRT_ENGINE = os.getenv("LOAD_TRT_ENGINE", None)
 
         # Torch compile the modules. Skip _forward_blocks: Dynamo with fullgraph can fail on
         # shape variation (e.g. x [1,50,C] vs e [1,200,C]); the block aligns e to x at runtime.
-        if not ENABLE_TENSORRT:
+        if not ENABLE_TENSORRT and not DISABLE_TORCH_COMPILE:
             print("Torch compiling the TextEncoder, ImageEncoder, and VAE modules (Wan _forward_blocks not compiled).")
 
             self.text_encoder.forward = torch.compile(
@@ -1375,6 +1390,8 @@ class WANPolicyHead(ActionHead):
             self.vae.model.encode = torch.compile(
                 mode="reduce-overhead", fullgraph=True, dynamic=False,
             )(self.vae.model.encode)
+        elif DISABLE_TORCH_COMPILE:
+            print("Skipping torch.compile because DREAMZERO_DISABLE_TORCH_COMPILE=true.")
         
         self.trt_engine = None
         if LOAD_TRT_ENGINE is not None:
@@ -1385,12 +1402,17 @@ class WANPolicyHead(ActionHead):
 
     def parallelize(self, device_mesh: DeviceMesh) -> None:
         ip_mesh = device_mesh["ip"]
-        self.ip_rank = ip_mesh.get_local_rank()
-        self.ip_size = ip_mesh.size()
-        self.ip_group = ip_mesh.get_group()
+        ip_rank = ip_mesh.get_local_rank()
+        ip_size = ip_mesh.size()
+        assert ip_size == 1 or ip_size == 2, "ip_size must be 1 or 2"
+        assert ip_rank >= 0 and ip_rank < ip_size, "ip_rank must be in [0, ip_size)"
 
-        assert self.ip_size == 1 or self.ip_size == 2, "ip_size must be 1 or 2"
-        assert self.ip_rank >= 0 and self.ip_rank < self.ip_size, "ip_rank must be in [0, ip_size)"
+        # Commit the distributed state only after validation. Otherwise the broad
+        # compatibility fallback in GrootSimPolicy can leave a partially configured
+        # head whose two-peer exchange protocol deadlocks for larger world sizes.
+        self.ip_rank = ip_rank
+        self.ip_size = ip_size
+        self.ip_group = ip_mesh.get_group()
 
     @property
     def device(self):

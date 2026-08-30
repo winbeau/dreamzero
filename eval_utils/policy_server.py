@@ -48,7 +48,7 @@ class WebsocketPolicyServer:
         - observation/cartesian_position: (6,)
         - observation/gripper_position: (1,)
         - prompt: str, the natural language task instruction for the policy
-    
+
       Action:
         - action: (N, 8,) or (N, 7,): either 7 movement actions (for joint action spaces) or 6 (for cartesian) plus one dimension for gripper position
                            --> all N actions will get executed on the robot before the server is queried again
@@ -118,8 +118,17 @@ if __name__ == "__main__":
 
     class DummyPolicy(BasePolicy):
         def infer(self, obs):
-            return np.zeros((1, 8), dtype=np.float32)
-        
+            joint_position = np.asarray(
+                obs.get("observation/joint_position", np.zeros((7,))),
+                dtype=np.float32,
+            ).reshape(7)
+            gripper_position = np.asarray(
+                obs.get("observation/gripper_position", np.zeros((1,))),
+                dtype=np.float32,
+            ).reshape(1)
+            hold_action = np.concatenate([joint_position, gripper_position])
+            return np.repeat(hold_action[None], 8, axis=0)
+
         def reset(self, reset_info):
             pass
     
@@ -127,4 +136,3 @@ if __name__ == "__main__":
     policy = DummyPolicy()
     server = WebsocketPolicyServer(policy, PolicyServerConfig())
     server.serve_forever()
-        

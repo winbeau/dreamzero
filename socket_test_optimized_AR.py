@@ -39,6 +39,20 @@ class Args:
     enable_dit_cache: bool = False
     index: int = 0
     max_chunk_size: int | None = None  # If None, use config value. Otherwise override max_chunk_size for inference.
+    attention_backend: str = "FA2"
+    anchor_sparse_enabled: bool = False
+    anchor_sparse_keep_ratio: float = 0.25
+    anchor_sparse_recent_dense_frames: int = 2
+    anchor_sparse_probe_dim: int = 16
+    anchor_sparse_num_router_heads: int = 4
+    anchor_sparse_smooth_radius: int = 1
+    anchor_sparse_current_keep_ratio: float = 1.0
+    anchor_sparse_dense_prefix_layers: int = 1
+    anchor_sparse_dense_suffix_layers: int = 1
+    anchor_sparse_propagate_radius: int = 0
+    anchor_sparse_propagate_every: int = 1
+    anchor_sparse_reuse_denoise: bool = True
+    anchor_sparse_record_diagnostics: bool = False
 
 
 class ARDroidRoboarenaPolicy:
@@ -283,6 +297,8 @@ class ARDroidRoboarenaPolicy:
         with torch.no_grad():
             result_batch, video_pred = self._policy.lazy_joint_forward_causal(batch)
         dist.barrier()
+
+        self._save_anchor_diagnostics()
         
         # Store video predictions for potential saving
         self.video_across_time.append(video_pred)
@@ -303,6 +319,35 @@ class ARDroidRoboarenaPolicy:
             self._is_first_call = False
         
         return action
+
+    def _save_anchor_diagnostics(self) -> None:
+        """Persist the optional layer-0 route for later RGB overlays."""
+
+        if self._output_dir is None:
+            return
+        diffusion_model = self._policy.trained_model.action_head.model
+        get_route = getattr(diffusion_model, "get_last_anchor_route", None)
+        if get_route is None:
+            return
+        route = get_route()
+        if route is None:
+            return
+
+        diagnostics_dir = os.path.join(self._output_dir, "anchor_diagnostics")
+        os.makedirs(diagnostics_dir, exist_ok=True)
+        output_path = os.path.join(diagnostics_dir, f"route_{self._msg_index:06d}.npz")
+        np.savez_compressed(
+            output_path,
+            video_indices=route.video_indices.cpu().numpy(),
+            scores=route.scores.float().cpu().numpy(),
+            num_video_frames=np.int64(route.num_video_frames),
+            num_dense_frames=np.int64(route.num_dense_frames),
+            anchor_tokens_per_sparse_frame=np.int64(route.anchor_tokens_per_sparse_frame),
+            grid_height=np.int64(22),
+            grid_width=np.int64(40),
+            image_height=np.int64(352),
+            image_width=np.int64(640),
+        )
     
     def _reset_state(self, save_video: bool = True) -> None:
         """Internal method to reset policy state.
@@ -349,6 +394,10 @@ class ARDroidRoboarenaPolicy:
         self._call_count = 0
         self._is_first_call = True
         self.video_across_time = []
+        diffusion_model = self._policy.trained_model.action_head.model
+        clear_route_cache = getattr(diffusion_model, "clear_anchor_sparse_route_cache", None)
+        if clear_route_cache is not None:
+            clear_route_cache()
     
     def reset(self, reset_info: dict) -> None:
         """Reset the policy state for a new episode.
@@ -716,6 +765,12 @@ def init_mesh() -> DeviceMesh:
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    if world_size not in (1, 2):
+        raise ValueError(
+            "DreamZero inference parallelism supports only 1 or 2 ranks; "
+            f"got world_size={world_size}. Run separate 2-rank server replicas "
+            "instead of one larger process group."
+        )
     print(f"Rank {rank}/{world_size} (PID: {os.getpid()}) setting device to {rank}")
 
     torch.cuda.set_device(rank)
@@ -741,8 +796,13 @@ def main(args: Args) -> None:
     # Set environment variable for DIT cache.
     os.environ["ENABLE_DIT_CACHE"] = "true" if args.enable_dit_cache else "false"
 
-    # Use TE cuDNN backend for attention.
-    os.environ["ATTENTION_BACKEND"] = "TE"
+    valid_attention_backends = {"FA2", "FA3", "TE", "torch", "torch_onnx"}
+    if args.attention_backend not in valid_attention_backends:
+        raise ValueError(
+            f"attention_backend must be one of {sorted(valid_attention_backends)}, "
+            f"got {args.attention_backend!r}"
+        )
+    os.environ["ATTENTION_BACKEND"] = args.attention_backend
 
     # Increase the recompile limit to 100 for inference due
     # to autoregressive nature of the model (several possible shapes).
@@ -768,6 +828,47 @@ def main(args: Args) -> None:
         model_path=model_path,
         device="cuda" if torch.cuda.is_available() else "cpu",
         device_mesh=device_mesh,
+    )
+
+    diffusion_model = policy.trained_model.action_head.model
+    configure_anchor_sparse = getattr(
+        diffusion_model,
+        "configure_anchor_sparse_attention",
+        None,
+    )
+    if configure_anchor_sparse is None and args.anchor_sparse_enabled:
+        raise RuntimeError("Loaded diffusion model does not support embodied anchor routing")
+    if configure_anchor_sparse is not None:
+        configure_anchor_sparse(
+            enabled=args.anchor_sparse_enabled,
+            keep_ratio=args.anchor_sparse_keep_ratio,
+            recent_dense_frames=args.anchor_sparse_recent_dense_frames,
+            probe_dim=args.anchor_sparse_probe_dim,
+            num_router_heads=args.anchor_sparse_num_router_heads,
+            smooth_radius=args.anchor_sparse_smooth_radius,
+            current_keep_ratio=args.anchor_sparse_current_keep_ratio,
+            dense_prefix_layers=args.anchor_sparse_dense_prefix_layers,
+            dense_suffix_layers=args.anchor_sparse_dense_suffix_layers,
+            propagate_radius=args.anchor_sparse_propagate_radius,
+            propagate_every=args.anchor_sparse_propagate_every,
+            reuse_denoise=args.anchor_sparse_reuse_denoise,
+            record_diagnostics=args.anchor_sparse_record_diagnostics,
+        )
+    logger.info(
+        "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
+        "current_keep=%.3f dense_prefix=%d dense_suffix=%d "
+        "propagate_radius=%d propagate_every=%d recent_dense_frames=%d "
+        "diagnostics=%s backend=%s",
+        args.anchor_sparse_enabled,
+        args.anchor_sparse_keep_ratio,
+        args.anchor_sparse_current_keep_ratio,
+        args.anchor_sparse_dense_prefix_layers,
+        args.anchor_sparse_dense_suffix_layers,
+        args.anchor_sparse_propagate_radius,
+        args.anchor_sparse_propagate_every,
+        args.anchor_sparse_recent_dense_frames,
+        args.anchor_sparse_record_diagnostics,
+        args.attention_backend,
     )
 
     # Create server for all ranks - rank 0 handles websocket, others run worker loop
