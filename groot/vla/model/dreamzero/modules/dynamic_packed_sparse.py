@@ -227,7 +227,7 @@ class PackedMiddleState:
 
     frozen_full_x: torch.Tensor
     packed_x: torch.Tensor
-    packed_e: tuple[torch.Tensor, ...]
+    packed_e0: torch.Tensor
     original_indices: torch.Tensor
     register_tokens: int
     maximum_video_tokens: int
@@ -240,9 +240,8 @@ class PackedMiddleState:
     def active_x(self, video_tokens: int) -> torch.Tensor:
         return self.packed_x[:, : self.active_length(video_tokens)]
 
-    def active_e(self, video_tokens: int) -> tuple[torch.Tensor, ...]:
-        length = self.active_length(video_tokens)
-        return tuple(part[:, :length] for part in self.packed_e)
+    def active_e0(self, video_tokens: int) -> torch.Tensor:
+        return self.packed_e0[:, : self.active_length(video_tokens)]
 
     def update_active(self, updated: torch.Tensor, video_tokens: int) -> None:
         length = self.active_length(video_tokens)
@@ -261,7 +260,7 @@ class PackedMiddleState:
 
 def pack_middle_state(
     x: torch.Tensor,
-    e: tuple[torch.Tensor, ...],
+    e0: torch.Tensor,
     profile: NestedAnchorProfile,
     *,
     maximum_keep_ratio: float,
@@ -271,6 +270,8 @@ def pack_middle_state(
 
     if action_register_length <= 0 or action_register_length >= x.shape[1]:
         raise ValueError("action_register_length must identify a non-empty suffix")
+    if e0.shape[:2] != x.shape[:2] or e0.ndim != 4 or e0.shape[2] != 6:
+        raise ValueError("e0 must have shape [B, L, 6, C]")
     video_seq_len = x.shape[1] - action_register_length
     video_indices = profile.indices_for_ratio(maximum_keep_ratio)
     if torch.any(video_indices >= video_seq_len):
@@ -285,14 +286,13 @@ def pack_middle_state(
     # therefore represented by one contiguous effective prefix length.
     original_indices = torch.cat((register_indices, video_indices), dim=1)
     packed_x = gather_sequence_by_index(x, original_indices, validate_indices=False)
-    packed_e = tuple(
-        gather_sequence_by_index(part, original_indices, validate_indices=False)
-        for part in e
+    packed_e0 = gather_sequence_by_index(
+        e0, original_indices, validate_indices=False
     )
     return PackedMiddleState(
         frozen_full_x=x,
         packed_x=packed_x,
-        packed_e=packed_e,
+        packed_e0=packed_e0,
         original_indices=original_indices,
         register_tokens=action_register_length,
         maximum_video_tokens=video_indices.shape[1],

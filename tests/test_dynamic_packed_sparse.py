@@ -83,11 +83,11 @@ def test_full_budget_pack_and_recover_are_exact():
     scores = torch.randn(2, 2, 8)
     profile = build_nested_current_profile(scores, config)
     x = torch.randn(2, 20, 6)
-    e = tuple(torch.randn_like(x) for _ in range(6))
+    e0 = torch.randn(2, 20, 6, 6)
 
     packed = pack_middle_state(
         x,
-        e,
+        e0,
         profile,
         maximum_keep_ratio=1.0,
         action_register_length=4,
@@ -98,16 +98,17 @@ def test_full_budget_pack_and_recover_are_exact():
     assert torch.equal(packed.original_indices[:, :4], torch.arange(16, 20).expand(2, -1))
     assert torch.equal(packed.recover_full(), x)
     assert torch.equal(packed.active_x(16), packed.packed_x)
+    assert torch.equal(packed.active_e0(16), packed.packed_e0)
 
 
 def test_active_update_changes_only_registers_and_requested_video_prefix():
     config = small_config()
     profile = build_nested_current_profile(torch.randn(1, 2, 8), config)
     x = torch.zeros(1, 20, 3)
-    e = tuple(torch.zeros_like(x) for _ in range(6))
+    e0 = torch.zeros(1, 20, 6, 3)
     packed = pack_middle_state(
         x,
-        e,
+        e0,
         profile,
         maximum_keep_ratio=0.5,
         action_register_length=4,
