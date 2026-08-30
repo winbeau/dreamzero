@@ -344,6 +344,18 @@ def main() -> None:
             args.output_dir / f"segment_floor_{suffix}.json",
             table,
         )
+        for history_ratio in args.history_floor_ratios:
+            history_floor = canonical_budget(history_ratio)
+            history_suffix = str(int(round(history_floor * 100)))
+            history_table = build_history_floor_table(
+                table, history_floor=history_floor
+            )
+            record_table(
+                f"segment_floor_{suffix}_history_floor_{history_suffix}",
+                args.output_dir
+                / f"segment_floor_{suffix}_history_floor_{history_suffix}.json",
+                history_table,
+            )
 
     group_floor = canonical_budget(args.segment_group_floor_ratio)
     for raw_group in args.segment_floor_groups:
