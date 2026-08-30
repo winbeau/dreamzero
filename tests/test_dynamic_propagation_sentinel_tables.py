@@ -4,6 +4,7 @@ from benchmarks.build_dynamic_propagation_sentinel_tables import (
     build_segment_group_floor_table,
     build_segment_max_table,
     build_sentinel_table,
+    build_timestep_segment_policy,
     propagation_boundary_layers,
     propagation_segments,
 )
@@ -126,4 +127,28 @@ def test_segment_group_floor_promotes_only_selected_stable_segments() -> None:
 
     assert table.current_keep_ratios == (
         (0.20, 0.50, 0.50, 0.50, 0.50, 0.75, 0.75, 0.75, 0.75, 0.50, 0.50, 0.20),
+    )
+
+
+def test_timestep_segment_policy_changes_only_selected_dit_and_segment() -> None:
+    base = DynamicPackedBudgetTable.constant(
+        num_dit_steps=3,
+        num_layers=8,
+        history_keep_ratio=0.20,
+        current_keep_ratio=0.35,
+    )
+    table = build_timestep_segment_policy(
+        base,
+        promotions=(((0, 1), (0,), 0.75), ((1,), (1,), 0.50)),
+        name="tiny_policy",
+        dense_prefix_layers=1,
+        dense_suffix_layers=1,
+        propagate_every=3,
+    )
+
+    assert table.history_keep_ratios == base.history_keep_ratios
+    assert table.current_keep_ratios == (
+        (0.35, 0.75, 0.75, 0.75, 0.35, 0.35, 0.35, 0.35),
+        (0.35, 0.75, 0.75, 0.75, 0.50, 0.50, 0.50, 0.35),
+        (0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35),
     )
