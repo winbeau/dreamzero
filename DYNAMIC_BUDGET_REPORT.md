@@ -34,11 +34,14 @@ Implementation commits:
 - `71b1a58`: reproducible per-rank propagation sweep and boundary accounting;
 - `870be76`: compare per-rank dynamic budget tables in one checkpoint load;
 - `4610143`: build propagation-boundary current-token sentinel ablations;
-- `d839b08`: stabilize mutable current budgets within propagation segments.
+- `d839b08`: stabilize mutable current budgets within propagation segments;
+- `39f0515`: localize conservative current compute by propagation segment;
+- `ca0dce6`: enforce segment-stable current budgets inside Packed M2;
+- `72a4c4d`: build fixed timestep-aware packed-segment policies.
 
 All listed commits are pushed to
 `origin/codex/dreamzero-anchor-sparse-opt`, and the H200 checkout is
-fast-forwarded through `d839b08`.
+fast-forwarded through `72a4c4d`.
 
 ## Runtime contract
 
@@ -269,6 +272,13 @@ K/V remains the original aggressive timestep/layer table.
 | segment maximum | 59.87% | 190.48 ms | 122.76 ms | 1.552x | 0.999910 | 1.346% | 0.9749 | 22.57% |
 | segment floor 75% | 75.00% | 187.61 ms | 136.15 ms | 1.378x | 0.999820 | 1.914% | 0.9970 | 7.75% |
 
+The invariant is now enforced inside M2 rather than relying only on generated
+tables. Whenever packed propagation is active, the executor replaces current
+budgets inside each segment by that segment's maximum and logs those effective
+ratios. M1 may still predict per-layer history KV budgets, but it cannot
+reactivate stale mutable current state. Commit `ca0dce6` passes 24 focused tests
+and a real 14B checkpoint path.
+
 This is a much larger quality recovery than making only the Dense suffix
 deeper. With the same radius-two/every-five propagation, four Dense suffix
 layers reach 0.9058 video cosine at 1.687x, while eight Dense suffix layers
@@ -291,6 +301,78 @@ Artifacts:
     20260830_prop_r2_segmentmax_floor75_early_gpu01/
 ```
 
+## Early-segment localization
+
+Equal-compute gates then localized the four early propagation segments that
+the 75% floor changes at DiT 0. The last four segments already use 75% in the
+Oracle-ordered early table.
+
+| Current segments promoted to 75% | Layers | Sparse p50 | Speedup | Action cosine | Video cosine | Video rel-L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| segment 0 | 1--5 | 122.77 ms | 1.529x | 0.999901 | 0.9841 | 17.81% |
+| segment 1 | 6--10 | 122.84 ms | 1.525x | 0.999901 | 0.9820 | 19.06% |
+| segment 2 | 11--15 | 127.76 ms | 1.490x | 0.999879 | 0.9818 | 19.15% |
+| segment 3 | 16--20 | 122.76 ms | 1.528x | 0.999894 | 0.9728 | 23.48% |
+| segments 0 + 1 | 1--10 | 126.58 ms | 1.482x | 0.999880 | 0.9887 | 15.03% |
+| segments 2 + 3 | 11--20 | 128.33 ms | 1.457x | 0.999859 | 0.9805 | 19.81% |
+| segments 0 + 1 + 2 | 1--15 | 132.60 ms | 1.417x | 0.999832 | 0.9962 | 8.76% |
+| segments 0 + 1 + 3 | 1--10, 16--20 | 130.06 ms | 1.443x | 0.999861 | 0.9894 | 14.55% |
+
+The first 15 layers are the best early allocation: they recover nearly all of
+the full 75% floor's video cosine (0.9962 versus 0.9970) at a higher speedup
+(1.417x versus 1.378x). Segment 3 is weak alone and inferior to segment 2 in
+the equal-size composite. This supports the proposed story that early visual
+anchors and their first representation refinements are disproportionately
+important; it does not support a generic monotonic layer-depth rule.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/dynamic_budgets/
+    20260830_prop_r2_segment_groups_early_gpu01/
+    20260830_prop_r2_segment0_vs1_early_gpu01/
+    20260830_prop_r2_segment2_vs3_early_gpu01/
+    20260830_prop_r2_segment012_vs013_early_gpu01/
+```
+
+## Timestep-aware packed-segment policies
+
+Two fixed eight-DiT profiles combine the supported timestep ordering with the
+segment evidence. Both keep the exact scheduler/DiT contract and use the same
+nested route ordering:
+
+- `timestep_segment_balanced`: effective current means 71.71% early, 61.84%
+  middle, and 36.97% late;
+- `timestep_segment_quality`: the same early policy, 65.13% middle, and 50.00%
+  late.
+
+The historical-KV row remains the aggressive Oracle-ordered table and falls
+with timestep independently of current Q/O/FFN compute.
+
+| Policy | DiT / timestep | History mean | Current mean | Sparse p50 | Speedup | Action cosine | Video cosine | Video rel-L2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| balanced | middle / 892 | 39.87% | 61.84% | 119.20 ms | 1.577x | 0.999795 | 0.9834 | 18.18% |
+| balanced | final / 249 | 20.79% | 36.97% | 96.60 ms | 1.966x | 0.999767 | 0.8830 | 50.84% |
+| quality | late / 535 | 28.29% | 50.00% | 107.09 ms | 1.775x | 0.999789 | 0.9649 | 26.76% |
+| quality | final / 249 | 20.79% | 50.00% | 101.26 ms | 1.853x | 0.999659 | 0.9228 | 40.61% |
+
+The middle balanced gate is promising. Both late gates retain the local action
+threshold but have substantial isolated video error, so neither profile is
+promoted solely from these rows. Late-step state is produced by the preceding
+denoise trajectory, and the required next decision must therefore come from a
+paired full eight-DiT replay. The aggressive 36.97% late row remains a speed
+ablation until that replay passes final video/action quality.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/dynamic_budgets/
+    20260830_timestep_balanced_middle_late_gpu01/
+    20260830_timestep_quality_late_gpu01/
+```
+
 ## Interpretation and next gate
 
 The timestep hypothesis is useful for compute allocation: the Oracle-supported
@@ -311,8 +393,8 @@ The next gate is therefore:
 
 1. enforce segment-stable current budgets in M2 and retain radius-two/every-five
    propagation as the current candidate;
-2. localize which early propagation segments require the 75% floor, then use
-   timestep-dependent floors to recover speed without stale-token re-entry;
+2. replay the balanced and, if needed, quality policy through all eight real
+   DiT evaluations on paired held-out requests before selecting late budgets;
 3. map calibrated per-request M1 confidence to a small number of shared groups
    or a single promoted group shape, avoiding 3--4 FA2 launches in every layer;
 4. keep critical and confidence-uncertain routes Dense and log every fallback;
