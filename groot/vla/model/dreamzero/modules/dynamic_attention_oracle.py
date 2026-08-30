@@ -165,6 +165,11 @@ def analyze_dense_attention(
         device=query.device,
         dtype=torch.float32,
     )
+    output_signature_sum = torch.zeros(
+        (num_heads, value.shape[-1]),
+        device=query.device,
+        dtype=torch.float32,
+    )
 
     for start in range(0, qh.shape[2], query_chunk_size):
         stop = min(start + query_chunk_size, qh.shape[2])
@@ -173,6 +178,7 @@ def analyze_dense_attention(
         probability = logits.softmax(dim=-1)
         dense_output = torch.matmul(probability, vh)
         key_importance.add_(probability.sum(dim=2))
+        output_signature_sum.add_(dense_output.sum(dim=(0, 2)))
 
         sorted_probability, sorted_indices = probability.sort(
             dim=-1,
@@ -233,6 +239,7 @@ def analyze_dense_attention(
 
     normalized_importance = key_importance / float(batch * query_indices.numel())
     mean_key_importance = normalized_importance.mean(dim=0)
+    output_signature = output_signature_sum / float(batch * query_indices.numel())
     support_length = max(1, min(key_length, round(key_length * support_ratio)))
     ranked_key_indices = mean_key_importance.topk(
         k=support_length,
@@ -260,6 +267,7 @@ def analyze_dense_attention(
         "max_attention_mass_mean": max_mass_observations.mean(dim=-1),
         "key_importance": mean_key_importance,
         "ranked_key_indices": ranked_key_indices,
+        "output_signature": output_signature,
     }
 
 
@@ -384,7 +392,12 @@ def _attention_statistics_record(
 ) -> dict[str, object]:
     record: dict[str, object] = {}
     for key, value in statistics.items():
-        if key in {"key_importance", "ranked_key_indices", "query_indices"}:
+        if key in {
+            "key_importance",
+            "ranked_key_indices",
+            "query_indices",
+            "output_signature",
+        }:
             continue
         if isinstance(value, torch.Tensor):
             record[key] = _tensor_json(value)
@@ -399,7 +412,7 @@ def _attention_statistics_record(
 class DenseAttentionOracleCollector:
     """Collect per-step/layer/head Oracle features without changing outputs."""
 
-    schema_version = 2
+    schema_version = 3
 
     def __init__(self, config: DenseAttentionOracleConfig) -> None:
         self.config = config
@@ -421,6 +434,9 @@ class DenseAttentionOracleCollector:
         self.records: list[dict[str, object]] = []
         self.support_profiles: dict[str, torch.Tensor] = {}
         self.previous_support: dict[tuple[int, str, str], torch.Tensor] = {}
+        self.previous_output_signatures: dict[
+            tuple[int, str, str], torch.Tensor
+        ] = {}
         self.cfg_branch: str | None = None
         self.last_flush_paths: tuple[Path, Path] | None = None
 
@@ -483,6 +499,7 @@ class DenseAttentionOracleCollector:
         }
         self.step_context = None
         self.previous_support.clear()
+        self.previous_output_signatures.clear()
         self.cfg_branch = None
 
     def set_cfg_branch(self, branch: str | None) -> None:
@@ -528,6 +545,28 @@ class DenseAttentionOracleCollector:
             turnover = support_turnover(previous, support, num_keys=num_keys)
         self.previous_support[cache_key] = support.detach()
         return turnover
+
+    def _output_change(
+        self,
+        layer_index: int,
+        query_kind: str,
+        signature: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = (layer_index, query_kind, self.cfg_branch or "single")
+        previous = self.previous_output_signatures.get(cache_key)
+        if previous is None:
+            cosine = torch.ones(
+                signature.shape[0], device=signature.device, dtype=torch.float32
+            )
+            relative_l2 = torch.zeros_like(cosine)
+        else:
+            cosine = F.cosine_similarity(signature.float(), previous.float(), dim=-1)
+            relative_l2 = (
+                torch.linalg.vector_norm(signature.float() - previous.float(), dim=-1)
+                / torch.linalg.vector_norm(previous.float(), dim=-1).clamp_min(1e-12)
+            )
+        self.previous_output_signatures[cache_key] = signature.detach()
+        return cosine, relative_l2
 
     @torch.inference_mode()
     def observe(
@@ -579,10 +618,14 @@ class DenseAttentionOracleCollector:
         action_support = action_statistics["ranked_key_indices"]
         video_importance = video_statistics["key_importance"]
         action_importance = action_statistics["key_importance"]
+        video_output_signature = video_statistics["output_signature"]
+        action_output_signature = action_statistics["output_signature"]
         assert isinstance(video_support, torch.Tensor)
         assert isinstance(action_support, torch.Tensor)
         assert isinstance(video_importance, torch.Tensor)
         assert isinstance(action_importance, torch.Tensor)
+        assert isinstance(video_output_signature, torch.Tensor)
+        assert isinstance(action_output_signature, torch.Tensor)
 
         video_turnover = self._turnover(
             layer_index,
@@ -595,6 +638,16 @@ class DenseAttentionOracleCollector:
             "action",
             action_support,
             video_key.shape[1],
+        )
+        video_output_change_cosine, video_output_change_relative_l2 = self._output_change(
+            layer_index,
+            "video",
+            video_output_signature,
+        )
+        action_output_change_cosine, action_output_change_relative_l2 = self._output_change(
+            layer_index,
+            "action",
+            action_output_signature,
         )
         cfg_branch = self.cfg_branch or "single"
         branch_suffix = "" if cfg_branch == "single" else f"_b{cfg_branch}"
@@ -610,6 +663,12 @@ class DenseAttentionOracleCollector:
         )
         self.support_profiles[f"{profile_prefix}_action"] = (
             action_support.detach().to(device="cpu", dtype=support_dtype)
+        )
+        self.support_profiles[f"{profile_prefix}_video_vv"] = (
+            video_output_signature.detach().to(device="cpu", dtype=torch.float16)
+        )
+        self.support_profiles[f"{profile_prefix}_action_vv"] = (
+            action_output_signature.detach().to(device="cpu", dtype=torch.float16)
         )
 
         self.records.append(
@@ -632,6 +691,18 @@ class DenseAttentionOracleCollector:
                 "action_oracle_min_keep_ratio": _tensor_json(action_budget),
                 "video_support_turnover": _tensor_json(video_turnover),
                 "action_support_turnover": _tensor_json(action_turnover),
+                "video_vv_output_change_cosine": _tensor_json(
+                    video_output_change_cosine
+                ),
+                "video_vv_output_change_relative_l2": _tensor_json(
+                    video_output_change_relative_l2
+                ),
+                "action_vv_output_change_cosine": _tensor_json(
+                    action_output_change_cosine
+                ),
+                "action_vv_output_change_relative_l2": _tensor_json(
+                    action_output_change_relative_l2
+                ),
                 "qa_qv_key_importance_correlation": _tensor_json(
                     head_importance_correlation(action_importance, video_importance)
                 ),
@@ -654,6 +725,7 @@ class DenseAttentionOracleCollector:
         self.records.clear()
         self.support_profiles.clear()
         self.previous_support.clear()
+        self.previous_output_signatures.clear()
         self.step_context = None
         self.request_metadata = {}
         self.cfg_branch = None

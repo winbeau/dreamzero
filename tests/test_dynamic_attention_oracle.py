@@ -53,6 +53,7 @@ def test_dense_attention_full_budget_is_exact_and_profiles_are_nested() -> None:
         torch.zeros(2),
     )
     assert statistics["ranked_key_indices"].shape == (2, 4)
+    assert statistics["output_signature"].shape == (2, 3)
     assert torch.all(statistics["mass_mean"][0] >= statistics["mass_mean"][1])
     assert torch.all(statistics["mass_mean"][1] >= statistics["mass_mean"][2])
 
@@ -122,8 +123,13 @@ def test_collector_writes_one_request_with_step_layer_and_profiles(tmp_path) -> 
     assert set(profiles) == {
         "r0_req000000_d03_l04_video",
         "r0_req000000_d03_l04_action",
+        "r0_req000000_d03_l04_video_vv",
+        "r0_req000000_d03_l04_action_vv",
     }
-    assert all(profile.shape == (2, 3) for profile in profiles.values())
+    assert profiles["r0_req000000_d03_l04_video"].shape == (2, 3)
+    assert profiles["r0_req000000_d03_l04_action"].shape == (2, 3)
+    assert profiles["r0_req000000_d03_l04_video_vv"].shape == (2, 4)
+    assert profiles["r0_req000000_d03_l04_action_vv"].shape == (2, 4)
 
 
 def test_cfg_branches_keep_profiles_and_turnover_independent(tmp_path) -> None:
@@ -175,9 +181,15 @@ def test_cfg_branches_keep_profiles_and_turnover_independent(tmp_path) -> None:
         record["video_support_turnover"] == [0.0, 0.0]
         for record in records
     )
-    assert len(profiles) == 8
+    assert len(profiles) == 16
     assert any("_bconditional_" in key for key in profiles)
     assert any("_bunconditional_" in key for key in profiles)
+    first_step_records = [record for record in records if record["dit_index"] == 0]
+    assert all(
+        record["video_vv_output_change_cosine"] == [1.0, 1.0]
+        and record["video_vv_output_change_relative_l2"] == [0.0, 0.0]
+        for record in first_step_records
+    )
 
 
 def test_collector_layer_filter_skips_unselected_layers(tmp_path) -> None:

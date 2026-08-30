@@ -175,7 +175,7 @@ def main() -> None:
             result["all_heads_recorded"],
             result["all_keep_ratios_recorded"],
             actual_layers == expected_layers,
-            len(profiles) == 2 * len(expected_layers),
+            len(profiles) == 4 * len(expected_layers),
         ]
     )
     output_path = args.output_dir / "summary.json"

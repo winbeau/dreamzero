@@ -199,6 +199,14 @@ def _capture_gate(jsonl_path: Path, expected_layers: list[int]) -> dict[str, obj
             and record["action"]["keep_ratios"] == list(KEEP_RATIOS)
             for record in records
         ),
+        "all_vv_features": all(
+            record["schema_version"] == 3
+            and len(record["video_vv_output_change_cosine"]) == 40
+            and len(record["video_vv_output_change_relative_l2"]) == 40
+            and len(record["action_vv_output_change_cosine"]) == 40
+            and len(record["action_vv_output_change_relative_l2"]) == 40
+            for record in records
+        ),
     }
     gate["passed"] = all(
         (
@@ -210,6 +218,7 @@ def _capture_gate(jsonl_path: Path, expected_layers: list[int]) -> dict[str, obj
             gate["all_40_heads"],
             gate["all_16_scheduler_steps"],
             gate["all_keep_ratios"],
+            gate["all_vv_features"],
         )
     )
     return gate

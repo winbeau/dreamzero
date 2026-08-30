@@ -169,6 +169,12 @@ def _head_row(record: dict, query_kind: str, head: int) -> dict:
         "num_sampled_queries": record[f"num_sampled_{query_kind}_queries"],
         "oracle_min_keep_ratio": record[f"{query_kind}_oracle_min_keep_ratio"][head],
         "support_turnover": record[f"{query_kind}_support_turnover"][head],
+        "vv_output_change_cosine": record[
+            f"{query_kind}_vv_output_change_cosine"
+        ][head],
+        "vv_output_change_relative_l2": record[
+            f"{query_kind}_vv_output_change_relative_l2"
+        ][head],
         "qa_qv_key_importance_correlation": record[
             "qa_qv_key_importance_correlation"
         ][head],
