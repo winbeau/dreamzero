@@ -1,9 +1,12 @@
+import json
+
 import numpy as np
 import pytest
 
 from benchmarks.analyze_dynamic_attention_oracle_dataset import (
     _compact_m1_rows,
     bootstrap_law_summary,
+    discover_passed_requests,
 )
 
 
@@ -69,3 +72,25 @@ def test_compact_m1_rows_use_conservative_label_and_temporal_lags():
     assert second_timestep["previous_oracle_min_keep_ratio"] == 0.75
     assert second_timestep["previous_vv_output_change_relative_l2_max"] == pytest.approx(0.3)
     assert np.isnan(second_timestep["previous_two_vv_output_change_relative_l2_max"])
+
+
+def test_condition_backfill_is_merged_without_changing_capture(tmp_path):
+    oracle_root = tmp_path / "oracle"
+    oracle_root.mkdir()
+    request = {"request_key": "request", "passed": True}
+    (oracle_root / "request_results.jsonl").write_text(json.dumps(request) + "\n")
+    condition = {
+        "request_key": "request",
+        "state_l2": 1.0,
+        "state_abs_mean": 2.0,
+        "action_l2": 3.0,
+        "action_std": 4.0,
+        "action_temporal_delta_l2": 5.0,
+    }
+    condition_path = tmp_path / "conditions.jsonl"
+    condition_path.write_text(json.dumps(condition) + "\n")
+
+    [merged] = discover_passed_requests(oracle_root, condition_path)
+
+    assert merged["state_l2"] == 1.0
+    assert json.loads((oracle_root / "request_results.jsonl").read_text()) == request

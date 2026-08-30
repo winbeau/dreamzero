@@ -29,7 +29,21 @@ def _read_jsonl(path: Path) -> Iterator[dict]:
                 yield json.loads(line)
 
 
-def discover_passed_requests(root: Path) -> list[dict]:
+def _load_condition_backfill(path: Path | None) -> dict[str, dict]:
+    if path is None:
+        return {}
+    conditions = {}
+    for record in _read_jsonl(path):
+        request_key = record["request_key"]
+        if request_key in conditions:
+            raise ValueError(f"Duplicate condition backfill: {request_key}")
+        conditions[request_key] = record
+    return conditions
+
+
+def discover_passed_requests(
+    root: Path, condition_backfill: Path | None = None
+) -> list[dict]:
     requests = []
     for results_path in sorted(root.rglob("request_results.jsonl")):
         requests.extend(record for record in _read_jsonl(results_path) if record.get("passed"))
@@ -39,7 +53,31 @@ def discover_passed_requests(root: Path) -> list[dict]:
         if key in unique:
             raise ValueError(f"Duplicate completed request: {key}")
         unique[key] = request
-    return [unique[key] for key in sorted(unique)]
+    conditions = _load_condition_backfill(condition_backfill)
+    unknown = sorted(set(conditions) - set(unique))
+    if unknown:
+        raise ValueError(f"Condition backfill contains unknown requests: {unknown[:3]}")
+    required_conditions = (
+        "state_l2",
+        "state_abs_mean",
+        "action_l2",
+        "action_std",
+        "action_temporal_delta_l2",
+    )
+    merged = []
+    for key in sorted(unique):
+        request = dict(unique[key])
+        if key in conditions:
+            request.update(
+                {name: conditions[key][name] for name in required_conditions}
+            )
+        missing = [name for name in required_conditions if name not in request]
+        if missing:
+            raise ValueError(
+                f"{key} lacks condition metadata {missing}; provide --condition-backfill"
+            )
+        merged.append(request)
+    return merged
 
 
 def bootstrap_law_summary(
@@ -144,7 +182,9 @@ class HeadTableWriter:
             self.writer.close()
 
 
-def _head_row(record: dict, query_kind: str, head: int) -> dict:
+def _head_row(
+    record: dict, query_kind: str, head: int, request_metadata: dict
+) -> dict:
     query = record[query_kind]
     metadata = record["sample_metadata"]
     row = {
@@ -159,11 +199,13 @@ def _head_row(record: dict, query_kind: str, head: int) -> dict:
         "trajectory_length": metadata["trajectory_length"],
         "length_bucket": metadata["length_bucket"],
         "instruction_index": metadata["instruction_index"],
-        "state_l2": metadata["state_l2"],
-        "state_abs_mean": metadata["state_abs_mean"],
-        "action_l2": metadata["action_l2"],
-        "action_std": metadata["action_std"],
-        "action_temporal_delta_l2": metadata["action_temporal_delta_l2"],
+        "state_l2": request_metadata["state_l2"],
+        "state_abs_mean": request_metadata["state_abs_mean"],
+        "action_l2": request_metadata["action_l2"],
+        "action_std": request_metadata["action_std"],
+        "action_temporal_delta_l2": request_metadata[
+            "action_temporal_delta_l2"
+        ],
         "scheduler_index": record["scheduler_index"],
         "dit_index": record["dit_index"],
         "timestep": record["timestep"],
@@ -397,8 +439,14 @@ def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> It
                 yield row
 
 
-def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repeats: int) -> dict:
-    requests = discover_passed_requests(root)
+def analyze(
+    root: Path,
+    output_dir: Path,
+    expected_requests: int,
+    bootstrap_repeats: int,
+    condition_backfill: Path | None = None,
+) -> dict:
+    requests = discover_passed_requests(root, condition_backfill)
     if len(requests) != expected_requests:
         raise ValueError(f"Expected {expected_requests} requests, found {len(requests)}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -496,7 +544,9 @@ def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repe
                         record[query_kind]["output_relative_l2_p95"], dtype=np.float32
                     ).T
                     for head in range(40):
-                        writer.append(_head_row(record, query_kind, head))
+                        writer.append(
+                            _head_row(record, query_kind, head, request)
+                        )
                 request_arrays["correlation"][
                     branch_index, dit_index, layer_index
                 ] = np.asarray(
@@ -668,12 +718,14 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-requests", type=int, default=108)
     parser.add_argument("--bootstrap-repeats", type=int, default=200)
+    parser.add_argument("--condition-backfill", type=Path)
     args = parser.parse_args()
     summary = analyze(
         args.oracle_root,
         args.output_dir,
         args.expected_requests,
         args.bootstrap_repeats,
+        args.condition_backfill,
     )
     print(json.dumps(summary, indent=2))
     if not summary["passed"]:

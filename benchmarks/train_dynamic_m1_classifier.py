@@ -562,6 +562,7 @@ def route_semantics(frame: pd.DataFrame, result: dict[str, np.ndarray]) -> dict[
 
 def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
     frame = pd.read_parquet(args.input_table, columns=required_columns())
+    frame["split"] = frame["split"].replace({"validation": "val"})
     split_frames = {
         split: frame.loc[frame["split"] == split].reset_index(drop=True)
         for split in ("train", "val", "test")

@@ -34,3 +34,16 @@ def test_condition_summary_uses_real_state_and_action_values():
     assert summary["action_l2"] == 5.0
     assert summary["action_temporal_delta_l2"] == 5.0
     assert summary["action_std"] > 0.0
+
+
+def test_condition_summary_can_be_attached_to_request_metadata():
+    metadata = {"request_key": "request"}
+    data_point = {
+        "state.joint_position": np.asarray([[3.0, 4.0]]),
+        "action.joint_position": np.asarray([[0.0, 0.0], [3.0, 4.0]]),
+    }
+
+    metadata.update(_condition_summary(data_point))
+
+    assert metadata["request_key"] == "request"
+    assert metadata["state_l2"] == 5.0

@@ -326,7 +326,6 @@ def _warmup_history(
             video_offsets=(-3, -2, -1, 0),
             instruction_index=instruction_index,
         )
-        sample_metadata.update(_condition_summary(data_point))
         return task
 
     action_head = policy.trained_model.action_head
@@ -451,6 +450,7 @@ def main() -> None:
             video_offsets=(-3, -2, -1, 0),
             instruction_index=instruction_index,
         )
+        sample_metadata.update(_condition_summary(data_point))
         model.configure_dynamic_attention_oracle(
             output_dir=str(capture_dir),
             rank=args.physical_gpu,
