@@ -19,6 +19,7 @@ QUERY_KINDS = ("video", "action")
 CFG_BRANCHES = ("conditional", "unconditional")
 KEEP_RATIOS = (1.0, 0.75, 0.50, 0.35, 0.25, 0.20, 0.10)
 TOP_P_THRESHOLDS = (0.50, 0.75, 0.90, 0.95)
+SCHEDULER_INDICES = (0, 1, 2, 6, 10, 13, 14, 15)
 
 
 def _read_jsonl(path: Path) -> Iterator[dict]:
@@ -248,12 +249,149 @@ def _save_head_panels(cube: np.ndarray, path: Path, title: str) -> None:
     plt.close(figure)
 
 
+def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> Iterator[dict]:
+    budget = record_arrays["budget"]
+    turnover = record_arrays["turnover"]
+    vv_cosine = record_arrays["vv_cosine"]
+    vv_relative_l2 = record_arrays["vv_relative_l2"]
+    entropy = record_arrays["entropy"]
+    max_mass = record_arrays["max_mass"]
+    correlation = record_arrays["correlation"]
+    mass_p05 = record_arrays["mass_p05"]
+    cosine_p05 = record_arrays["cosine_p05"]
+    relative_l2_p95 = record_arrays["relative_l2_p95"]
+    for dit_index in range(8):
+        previous_index = max(0, dit_index - 1)
+        previous_two_index = max(0, dit_index - 2)
+        for layer_index in range(40):
+            for head_index in range(40):
+                current = (slice(None), slice(None), dit_index, layer_index, head_index)
+                previous = (
+                    slice(None),
+                    slice(None),
+                    previous_index,
+                    layer_index,
+                    head_index,
+                )
+                previous_two = (
+                    slice(None),
+                    slice(None),
+                    previous_two_index,
+                    layer_index,
+                    head_index,
+                )
+                row = {
+                    **metadata,
+                    "dit_index": dit_index,
+                    "scheduler_index": SCHEDULER_INDICES[dit_index],
+                    "diffusion_timestep": int(
+                        record_arrays["diffusion_timestep"][dit_index]
+                    ),
+                    "layer_index": layer_index,
+                    "head_index": head_index,
+                    "timestep_position": dit_index / 7.0,
+                    "layer_depth": layer_index / 39.0,
+                    "oracle_min_keep_ratio": float(np.nanmax(budget[current])),
+                    "video_oracle_min_keep_ratio": float(
+                        np.nanmax(budget[0, :, dit_index, layer_index, head_index])
+                    ),
+                    "action_oracle_min_keep_ratio": float(
+                        np.nanmax(budget[1, :, dit_index, layer_index, head_index])
+                    ),
+                    "previous_oracle_min_keep_ratio": float(
+                        np.nanmax(budget[previous])
+                    ),
+                    "previous_two_oracle_min_keep_ratio": float(
+                        np.nanmax(budget[previous_two])
+                    ),
+                    "support_turnover_mean": float(np.nanmean(turnover[current])),
+                    "support_turnover_max": float(np.nanmax(turnover[current])),
+                    "previous_support_turnover_max": float(
+                        np.nanmax(turnover[previous])
+                    ),
+                    "video_support_turnover_max": float(
+                        np.nanmax(turnover[0, :, dit_index, layer_index, head_index])
+                    ),
+                    "action_support_turnover_max": float(
+                        np.nanmax(turnover[1, :, dit_index, layer_index, head_index])
+                    ),
+                    "vv_output_change_cosine_min": float(
+                        np.nanmin(vv_cosine[current])
+                    ),
+                    "vv_output_change_relative_l2_max": float(
+                        np.nanmax(vv_relative_l2[current])
+                    ),
+                    "previous_vv_output_change_relative_l2_max": float(
+                        np.nanmax(vv_relative_l2[previous])
+                    ),
+                    "previous_two_vv_output_change_relative_l2_max": float(
+                        np.nanmax(vv_relative_l2[previous_two])
+                    ),
+                    "normalized_entropy_mean": float(np.nanmean(entropy[current])),
+                    "normalized_entropy_max": float(np.nanmax(entropy[current])),
+                    "previous_normalized_entropy_mean": float(
+                        np.nanmean(entropy[previous])
+                    ),
+                    "max_attention_mass_mean": float(np.nanmean(max_mass[current])),
+                    "max_attention_mass_max": float(np.nanmax(max_mass[current])),
+                    "previous_max_attention_mass_mean": float(
+                        np.nanmean(max_mass[previous])
+                    ),
+                    "qa_qv_key_importance_correlation_mean": float(
+                        np.nanmean(correlation[:, dit_index, layer_index, head_index])
+                    ),
+                    "qa_qv_key_importance_correlation_min": float(
+                        np.nanmin(correlation[:, dit_index, layer_index, head_index])
+                    ),
+                    "previous_qa_qv_key_importance_correlation_mean": float(
+                        np.nanmean(
+                            correlation[:, previous_index, layer_index, head_index]
+                        )
+                    ),
+                }
+                for ratio_index, ratio in enumerate(KEEP_RATIOS):
+                    suffix = f"r{int(round(ratio * 100)):03d}"
+                    quality_index = (
+                        slice(None),
+                        slice(None),
+                        dit_index,
+                        layer_index,
+                        head_index,
+                        ratio_index,
+                    )
+                    row[f"worst_mass_p05_{suffix}"] = float(
+                        np.nanmin(mass_p05[quality_index])
+                    )
+                    row[f"worst_output_cosine_p05_{suffix}"] = float(
+                        np.nanmin(cosine_p05[quality_index])
+                    )
+                    row[f"worst_output_relative_l2_p95_{suffix}"] = float(
+                        np.nanmax(relative_l2_p95[quality_index])
+                    )
+                    row[f"video_mass_p05_{suffix}"] = float(
+                        np.nanmin(
+                            mass_p05[
+                                0, :, dit_index, layer_index, head_index, ratio_index
+                            ]
+                        )
+                    )
+                    row[f"action_mass_p05_{suffix}"] = float(
+                        np.nanmin(
+                            mass_p05[
+                                1, :, dit_index, layer_index, head_index, ratio_index
+                            ]
+                        )
+                    )
+                yield row
+
+
 def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repeats: int) -> dict:
     requests = discover_passed_requests(root)
     if len(requests) != expected_requests:
         raise ValueError(f"Expected {expected_requests} requests, found {len(requests)}")
     output_dir.mkdir(parents=True, exist_ok=True)
     writer = HeadTableWriter(output_dir / "m1_oracle_heads.parquet")
+    compact_writer = HeadTableWriter(output_dir / "m1_dynamic_samples.parquet")
 
     shape = (len(QUERY_KINDS), len(CFG_BRANCHES), 8, 40, 40)
     budget_sum = np.zeros(shape, dtype=np.float64)
@@ -276,12 +414,34 @@ def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repe
             )
             matrix_sum = np.zeros((len(QUERY_KINDS), 8, 40), dtype=np.float64)
             matrix_count = np.zeros_like(matrix_sum, dtype=np.int64)
+            request_shape = (len(QUERY_KINDS), len(CFG_BRANCHES), 8, 40, 40)
+            request_arrays = {
+                name: np.full(request_shape, np.nan, dtype=np.float32)
+                for name in (
+                    "budget",
+                    "turnover",
+                    "vv_cosine",
+                    "vv_relative_l2",
+                    "entropy",
+                    "max_mass",
+                )
+            }
+            request_arrays["correlation"] = np.full(
+                (len(CFG_BRANCHES), 8, 40, 40), np.nan, dtype=np.float32
+            )
+            request_arrays["diffusion_timestep"] = np.full(8, -1, dtype=np.int32)
+            quality_shape = (*request_shape, len(KEEP_RATIOS))
+            for name in ("mass_p05", "cosine_p05", "relative_l2_p95"):
+                request_arrays[name] = np.full(quality_shape, np.nan, dtype=np.float32)
             record_count = 0
             for record in _read_jsonl(capture_path):
                 record_count += 1
                 branch_index = CFG_BRANCHES.index(record["cfg_branch"])
                 dit_index = int(record["dit_index"])
                 layer_index = int(record["layer_index"])
+                request_arrays["diffusion_timestep"][dit_index] = int(
+                    record["timestep"]
+                )
                 for query_index, query_kind in enumerate(QUERY_KINDS):
                     budgets = np.asarray(
                         record[f"{query_kind}_oracle_min_keep_ratio"], dtype=np.float64
@@ -299,10 +459,59 @@ def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repe
                     count[target] += 1
                     matrix_sum[query_index, dit_index, layer_index] += budgets.sum()
                     matrix_count[query_index, dit_index, layer_index] += budgets.size
+                    request_arrays["budget"][target] = budgets
+                    request_arrays["turnover"][target] = turnover
+                    request_arrays["vv_cosine"][target] = np.asarray(
+                        record[f"{query_kind}_vv_output_change_cosine"], dtype=np.float32
+                    )
+                    request_arrays["vv_relative_l2"][target] = np.asarray(
+                        record[f"{query_kind}_vv_output_change_relative_l2"],
+                        dtype=np.float32,
+                    )
+                    request_arrays["entropy"][target] = np.asarray(
+                        record[query_kind]["normalized_entropy_mean"], dtype=np.float32
+                    )
+                    request_arrays["max_mass"][target] = np.asarray(
+                        record[query_kind]["max_attention_mass_mean"], dtype=np.float32
+                    )
+                    request_arrays["mass_p05"][target] = np.asarray(
+                        record[query_kind]["mass_p05"], dtype=np.float32
+                    ).T
+                    request_arrays["cosine_p05"][target] = np.asarray(
+                        record[query_kind]["output_cosine_p05"], dtype=np.float32
+                    ).T
+                    request_arrays["relative_l2_p95"][target] = np.asarray(
+                        record[query_kind]["output_relative_l2_p95"], dtype=np.float32
+                    ).T
                     for head in range(40):
                         writer.append(_head_row(record, query_kind, head))
+                request_arrays["correlation"][
+                    branch_index, dit_index, layer_index
+                ] = np.asarray(
+                    record["qa_qv_key_importance_correlation"], dtype=np.float32
+                )
             if record_count != 640:
                 raise ValueError(f"{request['request_key']} has {record_count} records")
+            compact_metadata = {
+                "request_key": request["request_key"],
+                "task_id": next(_read_jsonl(capture_path))["task_id"],
+                "split": request["split"],
+                "source_episode_index": request["source_episode_index"],
+                "subset_episode_index": request["subset_episode_index"],
+                "trajectory_stage": trajectory_stage,
+                "trajectory_fraction": request["trajectory_fraction"],
+                "trajectory_step": request["trajectory_step"],
+                "trajectory_length": request["trajectory_length"],
+                "length_bucket": request["length_bucket"],
+                "instruction_index": request["instruction_index"],
+                "state_l2": request["state_l2"],
+                "state_abs_mean": request["state_abs_mean"],
+                "action_l2": request["action_l2"],
+                "action_std": request["action_std"],
+                "action_temporal_delta_l2": request["action_temporal_delta_l2"],
+            }
+            for compact_row in _compact_m1_rows(request_arrays, compact_metadata):
+                compact_writer.append(compact_row)
             request_matrix = np.divide(
                 matrix_sum,
                 matrix_count,
@@ -325,6 +534,7 @@ def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repe
             )
     finally:
         writer.close()
+        compact_writer.close()
 
     mean_budget = np.divide(
         budget_sum,
@@ -426,9 +636,15 @@ def analyze(root: Path, output_dir: Path, expected_requests: int, bootstrap_repe
         "head_row_count": writer.row_count,
         "expected_head_row_count": len(requests) * 640 * 2 * 40,
         "m1_head_table": str(output_dir / "m1_oracle_heads.parquet"),
+        "m1_dynamic_samples": str(output_dir / "m1_dynamic_samples.parquet"),
         "budget_cube": str(output_dir / "oracle_budget_cube.npz"),
         "law_summary": str(output_dir / "oracle_law_summary.json"),
-        "passed": writer.row_count == len(requests) * 640 * 2 * 40,
+        "compact_row_count": compact_writer.row_count,
+        "expected_compact_row_count": len(requests) * 8 * 40 * 40,
+        "passed": (
+            writer.row_count == len(requests) * 640 * 2 * 40
+            and compact_writer.row_count == len(requests) * 8 * 40 * 40
+        ),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
