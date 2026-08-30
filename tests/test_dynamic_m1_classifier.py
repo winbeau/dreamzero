@@ -3,6 +3,7 @@ from argparse import Namespace
 import numpy as np
 import pandas as pd
 import pytest
+import joblib
 
 from benchmarks.train_dynamic_m1_classifier import (
     BASE_COLUMNS,
@@ -61,7 +62,7 @@ def test_train_priors_leave_source_episode_out():
         }
     )
 
-    augmented_train, [augmented_validation] = add_train_only_priors(
+    augmented_train, [augmented_validation], prior_table = add_train_only_priors(
         train, [validation]
     )
 
@@ -69,6 +70,7 @@ def test_train_priors_leave_source_episode_out():
         [0.8, 0.2]
     )
     assert augmented_validation["prior_budget_mean_tlh"].item() == pytest.approx(0.5)
+    assert prior_table["prior_budget_mean_tlh"].item() == pytest.approx(0.5)
 
 
 def test_mapped_gmm_exposes_seven_budget_probabilities():
@@ -225,3 +227,6 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
     assert summary["statistical_gates_passed"]
     assert not summary["passed"]
     assert (output_dir / "selected_m1_bundle.joblib").is_file()
+    bundle = joblib.load(output_dir / "selected_m1_bundle.joblib")
+    assert len(bundle["prior_table"]) == 8 * 2 * 2
+    assert (output_dir / "m1_prior_table.parquet").is_file()

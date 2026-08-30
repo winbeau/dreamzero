@@ -121,7 +121,7 @@ def budget_indices(values) -> np.ndarray:
 
 def add_train_only_priors(
     train: pd.DataFrame, evaluation_frames: list[pd.DataFrame]
-) -> tuple[pd.DataFrame, list[pd.DataFrame]]:
+) -> tuple[pd.DataFrame, list[pd.DataFrame], pd.DataFrame]:
     """Add cross-task Oracle priors without leaking a train row into its own prior."""
 
     train = train.copy()
@@ -139,6 +139,15 @@ def add_train_only_priors(
         train.groupby(["source_episode_index", *PRIOR_KEYS], sort=False)
         .agg(**aggregations)
         .reset_index()
+    )
+    prior_table = global_stats[list(PRIOR_KEYS)].copy()
+    prior_count = global_stats["prior_count"].clip(lower=1.0)
+    prior_mean = global_stats["prior_sum"] / prior_count
+    prior_variance = global_stats["prior_square_sum"] / prior_count - prior_mean**2
+    prior_table["prior_budget_mean_tlh"] = prior_mean
+    prior_table["prior_budget_std_tlh"] = np.sqrt(prior_variance.clip(lower=0.0))
+    prior_table["prior_critical_rate_tlh"] = (
+        global_stats["prior_critical_sum"] / prior_count
     )
 
     def finalize(frame: pd.DataFrame, leave_episode_out: bool) -> pd.DataFrame:
@@ -185,7 +194,11 @@ def add_train_only_priors(
         frame.reset_index(drop=True, inplace=True)
         return frame
 
-    return finalize(train, True), [finalize(frame, False) for frame in evaluation_frames]
+    return (
+        finalize(train, True),
+        [finalize(frame, False) for frame in evaluation_frames],
+        prior_table,
+    )
 
 
 def add_deployment_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -569,7 +582,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
     }
     if any(part.empty for part in split_frames.values()):
         raise ValueError("Expected non-empty task-disjoint train/val/test splits")
-    split_frames["train"], evaluations = add_train_only_priors(
+    split_frames["train"], evaluations, prior_table = add_train_only_priors(
         split_frames["train"], [split_frames["val"], split_frames["test"]]
     )
     split_frames["val"], split_frames["test"] = evaluations
@@ -666,9 +679,11 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         "policy": best_policy,
         "feature_columns": FEATURE_COLUMNS,
         "budget_buckets": BUDGET_BUCKETS,
+        "prior_table": prior_table,
         "schema_version": 1,
     }
     joblib.dump(bundle, args.output_dir / "selected_m1_bundle.joblib", compress=3)
+    prior_table.to_parquet(args.output_dir / "m1_prior_table.parquet", index=False)
     test_metrics = model_results[best_name]["test"]
     statistical_gates = (
         test_metrics["false_sparse_rate"] < args.false_sparse_limit
@@ -692,6 +707,8 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         },
         "models": model_results,
         "selected_model": best_name,
+        "prior_table": str(args.output_dir / "m1_prior_table.parquet"),
+        "prior_table_rows": len(prior_table),
         "statistical_gates_passed": bool(statistical_gates),
         "final_action_cosine_gate": "pending actual DreamZero policy replay",
         "passed": False,
