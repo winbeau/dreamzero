@@ -1,6 +1,13 @@
 from typing import Any, TypeAlias
 
 from groot.vla.model.dreamzero.modules.wan2_1_attention import AttentionModule
+from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
+    AnchorRoute,
+    AnchorSparseConfig,
+    droid_composite_view_regions,
+    gather_sequence_by_index,
+    route_action_conditioned_video_keys,
+)
 from groot.vla.model.n1_5.modules.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
@@ -197,7 +204,9 @@ class CausalWanSelfAttention(nn.Module):
                  qk_norm=True,
                  eps=1e-6,
                  num_action_per_block=32,
-                 num_state_per_block=1):
+                 num_state_per_block=1,
+                 anchor_sparse_config: AnchorSparseConfig | None = None,
+                 record_anchor_diagnostics: bool = False):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -212,6 +221,9 @@ class CausalWanSelfAttention(nn.Module):
         self.frame_seqlen = frame_seqlen
         self.num_action_per_block = num_action_per_block
         self.num_state_per_block = num_state_per_block
+        self.anchor_sparse_config = anchor_sparse_config
+        self.record_anchor_diagnostics = record_anchor_diagnostics
+        self.last_anchor_route: AnchorRoute | None = None
         # layers
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -793,7 +805,8 @@ class CausalWanSelfAttention(nn.Module):
         kv_cache: torch.Tensor | None = None,
         current_start_frame: int = 0,
         is_tf: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        anchor_route_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -812,6 +825,7 @@ class CausalWanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
 
         updated_kv_cache: torch.Tensor | None = None
+        updated_anchor_route_indices = anchor_route_indices
 
         if kv_cache is None:
             if is_tf:
@@ -1073,10 +1087,56 @@ class CausalWanSelfAttention(nn.Module):
             new_v = new_v[:, -self.max_attention_size:]
 
             if action_register_length is not None:
+                attention_k = new_k
+                attention_v = new_v
+                sparse_config = self.anchor_sparse_config
+                if sparse_config is not None and sparse_config.keep_ratio < 1.0:
+                    if new_k.shape[1] % sparse_config.frame_seqlen != 0:
+                        raise ValueError(
+                            "Embodied anchor routing requires complete video frames, got "
+                            f"{new_k.shape[1]} keys for frame_seqlen={sparse_config.frame_seqlen}"
+                        )
+                    num_video_frames = new_k.shape[1] // sparse_config.frame_seqlen
+                    expected_route_length = sparse_config.selected_video_tokens(num_video_frames)
+                    route_is_valid = (
+                        updated_anchor_route_indices is not None
+                        and updated_anchor_route_indices.shape
+                        == (new_k.shape[0], expected_route_length)
+                        and updated_anchor_route_indices.device == new_k.device
+                    )
+                    if not route_is_valid:
+                        tokens_per_block = self.num_action_per_block + self.num_state_per_block
+                        if roped_action_query.shape[1] % tokens_per_block != 0:
+                            raise ValueError(
+                                "Action/state register length is incompatible with the anchor router: "
+                                f"{roped_action_query.shape[1]} vs block size {tokens_per_block}"
+                            )
+                        num_register_blocks = roped_action_query.shape[1] // tokens_per_block
+                        action_query = roped_action_query[
+                            :, :num_register_blocks * self.num_action_per_block
+                        ]
+                        route = route_action_conditioned_video_keys(
+                            action_query=action_query,
+                            video_key=new_k,
+                            config=sparse_config,
+                        )
+                        updated_anchor_route_indices = route.video_indices.detach()
+                        if self.record_anchor_diagnostics:
+                            self.last_anchor_route = route.detached()
+                    attention_k = gather_sequence_by_index(
+                        new_k,
+                        updated_anchor_route_indices,
+                        validate_indices=False,
+                    )
+                    attention_v = gather_sequence_by_index(
+                        new_v,
+                        updated_anchor_route_indices,
+                        validate_indices=False,
+                    )
                 x = self.attn(
                     torch.cat([roped_query, roped_action_query], dim=1),
-                    torch.cat([new_k, roped_action_key], dim=1),
-                    torch.cat([new_v, action_v], dim=1),
+                    torch.cat([attention_k, roped_action_key], dim=1),
+                    torch.cat([attention_v, action_v], dim=1),
                 )
             else:
                 x = self.attn(
@@ -1090,7 +1150,7 @@ class CausalWanSelfAttention(nn.Module):
         # output
         x = x.flatten(2)
         x = self.o(x)
-        return x, updated_kv_cache
+        return x, updated_kv_cache, updated_anchor_route_indices
 
 
 class CausalWanAttentionBlock(nn.Module):
@@ -1108,7 +1168,9 @@ class CausalWanAttentionBlock(nn.Module):
                  cross_attn_norm=False,
                  eps=1e-6,
                  num_action_per_block=32,
-                 num_state_per_block=1):
+                 num_state_per_block=1,
+                 anchor_sparse_config: AnchorSparseConfig | None = None,
+                 record_anchor_diagnostics: bool = False):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -1131,6 +1193,8 @@ class CausalWanAttentionBlock(nn.Module):
             eps=eps,
             num_action_per_block=num_action_per_block,
             num_state_per_block=num_state_per_block,
+            anchor_sparse_config=anchor_sparse_config,
+            record_anchor_diagnostics=record_anchor_diagnostics,
         )
         self.norm3 = WanLayerNorm(
             dim, eps,
@@ -1161,7 +1225,8 @@ class CausalWanAttentionBlock(nn.Module):
         crossattn_cache: torch.Tensor | None = None,
         current_start_frame: int = 0,
         is_tf: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        anchor_route_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
@@ -1185,7 +1250,7 @@ class CausalWanAttentionBlock(nn.Module):
         e = tuple(aligned)
 
         # self-attention
-        y, updated_kv_cache = self.self_attn(
+        y, updated_kv_cache, updated_anchor_route_indices = self.self_attn(
             x=(self.norm1(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)),
             freqs=freqs,
             freqs_action=freqs_action,
@@ -1194,6 +1259,7 @@ class CausalWanAttentionBlock(nn.Module):
             kv_cache=kv_cache,
             is_tf=is_tf,
             current_start_frame=current_start_frame,
+            anchor_route_indices=anchor_route_indices,
         )
         x = x + (y * e[2].squeeze(2))
 
@@ -1207,7 +1273,7 @@ class CausalWanAttentionBlock(nn.Module):
             return x
 
         x = cross_attn_ffn(x, context, e)
-        return x, updated_kv_cache
+        return x, updated_kv_cache, updated_anchor_route_indices
 
 
 class CausalHead(nn.Module):
@@ -1290,7 +1356,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  diffusion_model_pretrained_path=None,
                  num_action_per_block=32,
                  num_state_per_block=1,
-                 concat_first_frame_latent=True):
+                 concat_first_frame_latent=True,
+                 anchor_sparse_enabled=False,
+                 anchor_sparse_keep_ratio=0.25,
+                 anchor_sparse_recent_dense_frames=2,
+                 anchor_sparse_probe_dim=16,
+                 anchor_sparse_num_router_heads=4,
+                 anchor_sparse_smooth_radius=1,
+                 anchor_sparse_reuse_denoise=True,
+                 anchor_sparse_record_diagnostics=False):
         r"""
         Initialize the diffusion model backbone.
 
@@ -1361,6 +1435,36 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.num_action_per_block = num_action_per_block
         self.num_state_per_block = num_state_per_block
         self.concat_first_frame_latent = concat_first_frame_latent
+        self.anchor_sparse_enabled = anchor_sparse_enabled
+        self.anchor_sparse_reuse_denoise = anchor_sparse_reuse_denoise
+        self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
+
+        if anchor_sparse_enabled and frame_seqlen != 880:
+            raise ValueError(
+                "The initial embodied anchor router supports the released DreamZero-DROID "
+                f"22x40 token layout (frame_seqlen=880), got {frame_seqlen}."
+            )
+        self.anchor_sparse_config = None
+        if anchor_sparse_enabled:
+            self.anchor_sparse_config = AnchorSparseConfig(
+                frame_seqlen=frame_seqlen,
+                grid_height=22,
+                grid_width=40,
+                keep_ratio=anchor_sparse_keep_ratio,
+                recent_dense_frames=anchor_sparse_recent_dense_frames,
+                probe_dim=anchor_sparse_probe_dim,
+                num_router_heads=anchor_sparse_num_router_heads,
+                smooth_radius=anchor_sparse_smooth_radius,
+                views=droid_composite_view_regions(),
+            )
+
+        # A route contains only stable token positions, not activations.  It is
+        # shared across heads/layers and optionally across denoising calls for
+        # the same causal control block.  These are intentionally plain Python
+        # attributes rather than state-dict buffers.
+        self._anchor_sparse_route_cache: torch.Tensor | None = None
+        self._anchor_sparse_route_cache_key: tuple[Any, ...] | None = None
+        self._anchor_sparse_last_start_frame: int | None = None
 
         max_num_embodiments = 1
 
@@ -1397,10 +1501,24 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-            CausalWanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads, frame_seqlen,
-                                    self.local_attn_size, sink_size, num_frame_per_block, qk_norm, cross_attn_norm, eps,
-                                    num_action_per_block, num_state_per_block)
-            for _ in range(num_layers)
+            CausalWanAttentionBlock(
+                cross_attn_type,
+                dim,
+                ffn_dim,
+                num_heads,
+                frame_seqlen,
+                self.local_attn_size,
+                sink_size,
+                num_frame_per_block,
+                qk_norm,
+                cross_attn_norm,
+                eps,
+                num_action_per_block,
+                num_state_per_block,
+                self.anchor_sparse_config,
+                anchor_sparse_record_diagnostics and block_index == 0,
+            )
+            for block_index in range(num_layers)
         ])
 
         # head
@@ -1425,6 +1543,73 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         self.gradient_checkpointing = True
         self.independent_first_frame = False if self.num_frame_per_block == 1 else True
+
+
+    def clear_anchor_sparse_route_cache(self) -> None:
+        """Clear per-control-block anchor indices, e.g. at an episode reset."""
+
+        self._anchor_sparse_route_cache = None
+        self._anchor_sparse_route_cache_key = None
+        self._anchor_sparse_last_start_frame = None
+        for block in self.blocks:
+            block.self_attn.last_anchor_route = None
+
+    def configure_anchor_sparse_attention(
+        self,
+        *,
+        enabled: bool,
+        keep_ratio: float = 0.25,
+        recent_dense_frames: int = 2,
+        probe_dim: int = 16,
+        num_router_heads: int = 4,
+        smooth_radius: int = 1,
+        reuse_denoise: bool = True,
+        record_diagnostics: bool = False,
+    ) -> None:
+        """Configure sparse routing after loading an upstream checkpoint.
+
+        DreamZero nests the diffusion model inside the action-head config, so a
+        post-load API is substantially less brittle than rewriting checkpoint
+        JSON.  It also guarantees that every existing transformer block receives
+        the same immutable route configuration.
+        """
+
+        if enabled and self.frame_seqlen != 880:
+            raise ValueError(
+                "Embodied anchor routing currently supports only the released "
+                f"DreamZero-DROID 22x40 layout, got frame_seqlen={self.frame_seqlen}."
+            )
+        config = None
+        if enabled:
+            config = AnchorSparseConfig(
+                frame_seqlen=self.frame_seqlen,
+                grid_height=22,
+                grid_width=40,
+                keep_ratio=keep_ratio,
+                recent_dense_frames=recent_dense_frames,
+                probe_dim=probe_dim,
+                num_router_heads=num_router_heads,
+                smooth_radius=smooth_radius,
+                views=droid_composite_view_regions(),
+            )
+
+        self.anchor_sparse_enabled = enabled
+        self.anchor_sparse_config = config
+        self.anchor_sparse_reuse_denoise = reuse_denoise
+        self.anchor_sparse_record_diagnostics = record_diagnostics
+        for block_index, block in enumerate(self.blocks):
+            block.self_attn.anchor_sparse_config = config
+            block.self_attn.record_anchor_diagnostics = (
+                enabled and record_diagnostics and block_index == 0
+            )
+        self.clear_anchor_sparse_route_cache()
+
+    def get_last_anchor_route(self) -> AnchorRoute | None:
+        """Return the last recorded layer-0 route for heatmap diagnostics."""
+
+        if not self.blocks:
+            return None
+        return self.blocks[0].self_attn.last_anchor_route
 
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -1750,6 +1935,46 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         B = x.shape[0]
         F = timestep.shape[1]
+        video_seq_len = x.shape[1]
+
+        anchor_route_indices: torch.Tensor | None = None
+        anchor_route_cache_key: tuple[Any, ...] | None = None
+        if self.anchor_sparse_config is not None and action is not None:
+            if (
+                self._anchor_sparse_last_start_frame is not None
+                and current_start_frame < self._anchor_sparse_last_start_frame
+            ):
+                # A rewind denotes a new causal rollout/episode.  Do not carry
+                # semantic anchors from the previous scene into the new one.
+                self.clear_anchor_sparse_route_cache()
+            self._anchor_sparse_last_start_frame = current_start_frame
+
+            first_cache = kv_cache[0] if kv_cache else None
+            if first_cache is not None:
+                cached_video_tokens = first_cache[0].shape[1]
+                routed_video_tokens = min(
+                    cached_video_tokens + video_seq_len,
+                    self.blocks[0].self_attn.max_attention_size,
+                )
+                if routed_video_tokens % self.frame_seqlen != 0:
+                    raise ValueError(
+                        "Anchor route cache requires frame-aligned video KV length, got "
+                        f"{routed_video_tokens} tokens."
+                    )
+                anchor_route_cache_key = (
+                    current_start_frame,
+                    cached_video_tokens,
+                    video_seq_len,
+                    B,
+                    x.device.type,
+                    x.device.index,
+                    x.dtype,
+                )
+                if (
+                    self.anchor_sparse_reuse_denoise
+                    and self._anchor_sparse_route_cache_key == anchor_route_cache_key
+                ):
+                    anchor_route_indices = self._anchor_sparse_route_cache
 
         if action is not None:
             embodiment_id = torch.tensor([0], device=x.device).repeat(x.shape[0])
@@ -1795,7 +2020,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         updated_kv_caches: list[torch.Tensor] = []
         for block_index, block in enumerate(self.blocks):
-            x, updated_kv_cache = block(
+            x, updated_kv_cache, anchor_route_indices = block(
                 x=x,
                 e=e0,
                 freqs=freqs,
@@ -1805,8 +2030,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 action_register_length=action_register_length,
                 kv_cache=kv_cache[block_index],
                 current_start_frame=current_start_frame,
+                anchor_route_indices=anchor_route_indices,
             )
             updated_kv_caches.append(updated_kv_cache)
+
+        if (
+            self.anchor_sparse_reuse_denoise
+            and anchor_route_cache_key is not None
+            and anchor_route_indices is not None
+        ):
+            self._anchor_sparse_route_cache = anchor_route_indices.detach()
+            self._anchor_sparse_route_cache_key = anchor_route_cache_key
 
         if action is not None:
             action_noise_pred = x[:, seq_len: seq_len + action_length]
@@ -2127,8 +2361,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         def create_custom_forward(module):
             def custom_forward(*inputs, **kwargs):
-                outputs, updated_kv_cache = module(*inputs, **kwargs)
+                outputs, updated_kv_cache, anchor_route_indices = module(*inputs, **kwargs)
                 assert updated_kv_cache is None
+                assert anchor_route_indices is None
                 return outputs
             return custom_forward
 
@@ -2140,7 +2375,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     use_reentrant=False,
                 )
             else:
-                x = block(x, **kwargs)
+                x, updated_kv_cache, anchor_route_indices = block(x, **kwargs)
+                assert updated_kv_cache is None
+                assert anchor_route_indices is None
 
         if clean_x is not None:
             x = x[:, clean_x.shape[1]:]
