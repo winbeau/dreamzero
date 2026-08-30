@@ -3,6 +3,7 @@ import pytest
 
 from benchmarks.benchmark_dreamzero_server_e2e import make_request, summarize
 from benchmarks.compare_dreamzero_server_e2e import compare_reports
+from benchmarks.summarize_dreamzero_server_log import summarize_log
 
 
 def test_make_request_is_deterministic_and_has_server_shapes():
@@ -71,3 +72,27 @@ def test_compare_reports_rejects_mismatched_seed():
 
     with pytest.raises(ValueError, match="different request seeds"):
         compare_reports(dense, sparse, bootstrap_samples=10)
+
+
+def test_summarize_log_uses_latest_run_and_drops_warmup():
+    rows = []
+    for value in (9.0, 8.0, 3.0, 1.0, 2.0):
+        rows.append(
+            "Time taken: Total "
+            f"{value:.2f} seconds, Text Encoder 0.10 seconds, "
+            "Image Encoder 0.20 seconds, VAE 0.30 seconds, "
+            "KV Cache Creation 0.40 seconds, Diffusion 0.50 seconds, "
+            "DIT Compute Steps 8 steps, Scheduler 0.60 seconds"
+        )
+        rows.append(
+            "Inference Time: Total "
+            f"{value + 0.1:.2f} seconds, Transform: 0.01 seconds, "
+            f"Model: {value:.2f} seconds, Untransform: 0.09 seconds"
+        )
+
+    result = summarize_log("\n".join(rows), total_requests=3, warmup_requests=1)
+
+    assert result["measured_requests"] == 2
+    assert result["dit_steps"] == [8]
+    assert result["stage_mean_seconds"]["total"] == pytest.approx(1.5)
+    assert result["inference_mean_seconds"]["model"] == pytest.approx(1.5)
