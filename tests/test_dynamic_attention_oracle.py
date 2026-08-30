@@ -202,3 +202,48 @@ def test_collector_layer_filter_skips_unselected_layers(tmp_path) -> None:
     )
     assert collector.records == []
     assert collector.flush_request() is None
+
+
+def test_request_metadata_and_resume_index_are_preserved(tmp_path) -> None:
+    (tmp_path / "rank3_request000004.jsonl").write_text("{}\n")
+    collector = DenseAttentionOracleCollector(
+        DenseAttentionOracleConfig(
+            output_dir=tmp_path,
+            rank=3,
+            keep_ratios=(1.0,),
+            max_video_queries=1,
+            max_action_queries=1,
+        )
+    )
+    collector.set_next_request_metadata(
+        task_id="close drawer",
+        trajectory_stage="late",
+        sample_metadata={"split": "test", "source_episode_index": 17},
+    )
+    collector.begin_request(current_start_frame=0, instruction="close drawer")
+    collector.set_step(
+        scheduler_index=0,
+        dit_index=0,
+        scheduler_steps=16,
+        timestep=999,
+    )
+    tensor = torch.randn(1, 2, 1, 2)
+    collector.observe(
+        layer_index=0,
+        video_query=tensor,
+        action_query=tensor[:, :1],
+        video_key=tensor,
+        video_value=tensor,
+    )
+    outputs = collector.flush_request()
+    assert outputs is not None
+    jsonl_path, _ = outputs
+    assert jsonl_path.name == "rank3_request000005.jsonl"
+    record = json.loads(jsonl_path.read_text())
+    assert record["task_id"] == "close drawer"
+    assert record["trajectory_stage"] == "late"
+    assert record["sample_metadata"] == {
+        "split": "test",
+        "source_episode_index": 17,
+    }
+    assert collector.last_flush_paths == outputs

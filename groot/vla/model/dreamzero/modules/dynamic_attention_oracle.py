@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 from typing import Sequence
 
 import torch
@@ -403,13 +404,40 @@ class DenseAttentionOracleCollector:
     def __init__(self, config: DenseAttentionOracleConfig) -> None:
         self.config = config
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
-        self.request_index = -1
+        request_pattern = re.compile(
+            rf"^rank{re.escape(str(self.config.rank))}_request(\d+)\.jsonl$"
+        )
+        existing_request_indices = [
+            int(match.group(1))
+            for path in self.config.output_dir.glob(
+                f"rank{self.config.rank}_request*.jsonl"
+            )
+            if (match := request_pattern.match(path.name)) is not None
+        ]
+        self.request_index = max(existing_request_indices, default=-1)
         self.request_metadata: dict[str, object] = {}
+        self.next_request_metadata: dict[str, object] = {}
         self.step_context: dict[str, int] | None = None
         self.records: list[dict[str, object]] = []
         self.support_profiles: dict[str, torch.Tensor] = {}
         self.previous_support: dict[tuple[int, str, str], torch.Tensor] = {}
         self.cfg_branch: str | None = None
+        self.last_flush_paths: tuple[Path, Path] | None = None
+
+    def set_next_request_metadata(
+        self,
+        *,
+        task_id: str | None = None,
+        trajectory_stage: str | None = None,
+        sample_metadata: dict[str, object] | None = None,
+    ) -> None:
+        if self.records or self.step_context is not None:
+            raise RuntimeError("cannot change Oracle metadata during an active request")
+        self.next_request_metadata = {
+            "task_id": task_id,
+            "trajectory_stage": trajectory_stage,
+            "sample_metadata": dict(sample_metadata or {}),
+        }
 
     @property
     def active(self) -> bool:
@@ -426,6 +454,8 @@ class DenseAttentionOracleCollector:
         if self.records:
             raise RuntimeError("flush the previous Oracle request before starting another")
         self.request_index += 1
+        next_metadata = self.next_request_metadata
+        self.next_request_metadata = {}
         instruction_digest = None
         if instruction is not None:
             if isinstance(instruction, torch.Tensor):
@@ -437,12 +467,19 @@ class DenseAttentionOracleCollector:
             "request_index": self.request_index,
             "current_start_frame": int(current_start_frame),
             "instruction_sha256": instruction_digest,
-            "task_id": task_id if task_id is not None else self.config.task_id,
+            "task_id": (
+                task_id
+                if task_id is not None
+                else next_metadata.get("task_id", self.config.task_id)
+            ),
             "trajectory_stage": (
                 trajectory_stage
                 if trajectory_stage is not None
-                else self.config.trajectory_stage
+                else next_metadata.get(
+                    "trajectory_stage", self.config.trajectory_stage
+                )
             ),
+            "sample_metadata": next_metadata.get("sample_metadata", {}),
         }
         self.step_context = None
         self.previous_support.clear()
@@ -608,6 +645,8 @@ class DenseAttentionOracleCollector:
         stem = f"rank{self.config.rank}_request{self.request_index:06d}"
         jsonl_path = self.config.output_dir / f"{stem}.jsonl"
         profiles_path = self.config.output_dir / f"{stem}_profiles.pt"
+        if jsonl_path.exists() or profiles_path.exists():
+            raise FileExistsError(f"refusing to overwrite Oracle request {stem}")
         jsonl_path.write_text(
             "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in self.records)
         )
@@ -618,4 +657,5 @@ class DenseAttentionOracleCollector:
         self.step_context = None
         self.request_metadata = {}
         self.cfg_branch = None
-        return jsonl_path, profiles_path
+        self.last_flush_paths = (jsonl_path, profiles_path)
+        return self.last_flush_paths

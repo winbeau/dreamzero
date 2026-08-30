@@ -1987,6 +1987,21 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             block.self_attn.layer_index = block_index
             block.self_attn.dynamic_oracle_collector = collector
 
+    def set_dynamic_attention_oracle_request_metadata(
+        self,
+        *,
+        task_id: str | None = None,
+        trajectory_stage: str | None = None,
+        sample_metadata: dict[str, object] | None = None,
+    ) -> None:
+        collector = self._dynamic_attention_oracle_collector
+        if collector is not None:
+            collector.set_next_request_metadata(
+                task_id=task_id,
+                trajectory_stage=trajectory_stage,
+                sample_metadata=sample_metadata,
+            )
+
     def begin_dynamic_attention_oracle_request(
         self,
         *,
@@ -2031,6 +2046,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if collector is None:
             return None
         return collector.flush_request()
+
+    def get_dynamic_attention_oracle_last_flush_paths(self):
+        collector = self._dynamic_attention_oracle_collector
+        if collector is None:
+            return None
+        return collector.last_flush_paths
 
     def configure_anchor_sparse_attention(
         self,
