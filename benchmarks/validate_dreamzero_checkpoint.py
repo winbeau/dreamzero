@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--current-keep-ratios", type=float, nargs="+", default=[0.20, 0.25]
     )
+    parser.add_argument(
+        "--attention-query-keep-ratios",
+        type=float,
+        nargs="+",
+        help="Per-rank self-attention Q keep ratios; defaults to current-keep-ratios.",
+    )
     parser.add_argument("--dense-prefix-layers", type=int, default=1)
     parser.add_argument("--dense-suffix-layers", type=int, default=1)
     parser.add_argument("--propagate-radius", type=int, default=0)
@@ -257,6 +263,12 @@ def main() -> None:
         raise ValueError("keep-ratios must contain at least one candidate")
     if len(args.current_keep_ratios) != len(args.keep_ratios):
         raise ValueError("current-keep-ratios must align one-to-one with keep-ratios")
+    if args.attention_query_keep_ratios is None:
+        args.attention_query_keep_ratios = args.current_keep_ratios
+    if len(args.attention_query_keep_ratios) != len(args.keep_ratios):
+        raise ValueError(
+            "attention-query-keep-ratios must align one-to-one with keep-ratios"
+        )
     physical_gpu = args.physical_gpus[local_rank]
 
     load_start = time.perf_counter()
@@ -288,6 +300,9 @@ def main() -> None:
     candidate_index = rank % len(args.keep_ratios)
     candidate_keep_ratio = args.keep_ratios[candidate_index]
     candidate_current_keep_ratio = args.current_keep_ratios[candidate_index]
+    candidate_attention_query_keep_ratio = args.attention_query_keep_ratios[
+        candidate_index
+    ]
 
     with torch.inference_mode():
         diffusion_model.configure_anchor_sparse_attention(enabled=False)
@@ -353,6 +368,7 @@ def main() -> None:
             keep_ratio=candidate_keep_ratio,
             recent_dense_frames=2,
             current_keep_ratio=candidate_current_keep_ratio,
+            attention_query_keep_ratio=candidate_attention_query_keep_ratio,
             dense_prefix_layers=args.dense_prefix_layers,
             dense_suffix_layers=args.dense_suffix_layers,
             propagate_radius=args.propagate_radius,
@@ -421,6 +437,7 @@ def main() -> None:
         "current_frames": 2,
         "keep_ratio": candidate_keep_ratio,
         "current_keep_ratio": candidate_current_keep_ratio,
+        "attention_query_keep_ratio": candidate_attention_query_keep_ratio,
         "recent_dense_frames": 2,
         "dense_prefix_layers": args.dense_prefix_layers,
         "dense_suffix_layers": args.dense_suffix_layers,
@@ -444,6 +461,11 @@ def main() -> None:
         "sparse_video_relative_l2": relative_l2(dense_video, sparse_video),
         "sparse_action_relative_l2": relative_l2(dense_action, sparse_action),
         "selected_video_tokens": route.selected_video_tokens if route is not None else None,
+        "selected_current_query_tokens": (
+            2 * max(1, round(880 * candidate_attention_query_keep_ratio))
+            if args.current_attention and candidate_attention_query_keep_ratio < 1.0
+            else 1760
+        ),
         "num_video_frames": route.num_video_frames if route is not None else None,
         "max_memory_allocated_gib": torch.cuda.max_memory_allocated(device) / 1024**3,
     }

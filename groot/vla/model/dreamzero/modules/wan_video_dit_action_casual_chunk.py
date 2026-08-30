@@ -1473,6 +1473,7 @@ class CausalWanAttentionBlock(nn.Module):
         is_tf: bool = True,
         anchor_route_indices: torch.Tensor | None = None,
         current_video_indices: torch.Tensor | None = None,
+        current_attention_query_indices: torch.Tensor | None = None,
         update_kv_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         r"""
@@ -1500,7 +1501,7 @@ class CausalWanAttentionBlock(nn.Module):
         # self-attention
         sparse_self_attention = (
             self.sparse_current_attention
-            and current_video_indices is not None
+            and current_attention_query_indices is not None
             and action_conditioned_causal_routing_is_eligible(
                 current_start_frame,
                 action_register_length,
@@ -1517,7 +1518,7 @@ class CausalWanAttentionBlock(nn.Module):
             current_start_frame=current_start_frame,
             anchor_route_indices=anchor_route_indices,
             current_video_indices=(
-                current_video_indices if sparse_self_attention else None
+                current_attention_query_indices if sparse_self_attention else None
             ),
             update_kv_cache=update_kv_cache,
         )
@@ -1644,6 +1645,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  anchor_sparse_num_router_heads=4,
                  anchor_sparse_smooth_radius=1,
                  anchor_sparse_current_keep_ratio=1.0,
+                 anchor_sparse_attention_query_keep_ratio=None,
                  anchor_sparse_dense_prefix_layers=1,
                  anchor_sparse_dense_suffix_layers=1,
                  anchor_sparse_propagate_radius=0,
@@ -1723,6 +1725,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.concat_first_frame_latent = concat_first_frame_latent
         self.anchor_sparse_enabled = anchor_sparse_enabled
         self.anchor_sparse_current_keep_ratio = anchor_sparse_current_keep_ratio
+        if anchor_sparse_attention_query_keep_ratio is None:
+            anchor_sparse_attention_query_keep_ratio = anchor_sparse_current_keep_ratio
+        self.anchor_sparse_attention_query_keep_ratio = (
+            anchor_sparse_attention_query_keep_ratio
+        )
         self.anchor_sparse_dense_prefix_layers = anchor_sparse_dense_prefix_layers
         self.anchor_sparse_dense_suffix_layers = anchor_sparse_dense_suffix_layers
         self.anchor_sparse_propagate_radius = anchor_sparse_propagate_radius
@@ -1733,9 +1740,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         if not 0.0 < anchor_sparse_current_keep_ratio <= 1.0:
             raise ValueError("anchor_sparse_current_keep_ratio must lie in (0, 1]")
+        if not 0.0 < anchor_sparse_attention_query_keep_ratio <= 1.0:
+            raise ValueError(
+                "anchor_sparse_attention_query_keep_ratio must lie in (0, 1]"
+            )
         if anchor_sparse_dense_prefix_layers < 0 or anchor_sparse_dense_suffix_layers < 0:
             raise ValueError("Dense prefix/suffix layer counts must be non-negative")
-        if anchor_sparse_current_keep_ratio < 1.0 and anchor_sparse_dense_prefix_layers < 1:
+        needs_current_route = anchor_sparse_current_keep_ratio < 1.0 or (
+            anchor_sparse_current_attention
+            and anchor_sparse_attention_query_keep_ratio < 1.0
+        )
+        if needs_current_route and anchor_sparse_dense_prefix_layers < 1:
             raise ValueError("Current-token routing requires at least one dense prefix layer")
         if anchor_sparse_dense_prefix_layers + anchor_sparse_dense_suffix_layers > num_layers:
             raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
@@ -1769,6 +1784,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # attributes rather than state-dict buffers.
         self._anchor_sparse_route_cache: torch.Tensor | None = None
         self._anchor_sparse_current_route_cache: torch.Tensor | None = None
+        self._anchor_sparse_current_attention_route_cache: torch.Tensor | None = None
         self._anchor_sparse_route_cache_key: tuple[Any, ...] | None = None
         self._anchor_sparse_last_start_frame: int | None = None
 
@@ -1825,6 +1841,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 (
                     anchor_sparse_record_diagnostics
                     or anchor_sparse_current_keep_ratio < 1.0
+                    or (
+                        anchor_sparse_current_attention
+                        and anchor_sparse_attention_query_keep_ratio < 1.0
+                    )
                 ) and block_index == 0,
             )
             for block_index in range(num_layers)
@@ -1837,7 +1857,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
             )
             block.sparse_current_attention = (
-                block.sparse_current_compute and anchor_sparse_current_attention
+                anchor_sparse_enabled
+                and anchor_sparse_current_attention
+                and anchor_sparse_attention_query_keep_ratio < 1.0
+                and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
             )
             sparse_offset = block_index - anchor_sparse_dense_prefix_layers + 1
             should_propagate = (
@@ -1881,6 +1904,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         self._anchor_sparse_route_cache = None
         self._anchor_sparse_current_route_cache = None
+        self._anchor_sparse_current_attention_route_cache = None
         self._anchor_sparse_route_cache_key = None
         self._anchor_sparse_last_start_frame = None
         for block in self.blocks:
@@ -1897,6 +1921,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         num_router_heads: int = 4,
         smooth_radius: int = 1,
         current_keep_ratio: float = 1.0,
+        attention_query_keep_ratio: float | None = None,
         dense_prefix_layers: int = 1,
         dense_suffix_layers: int = 1,
         propagate_radius: int = 0,
@@ -1920,9 +1945,16 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             )
         if not 0.0 < current_keep_ratio <= 1.0:
             raise ValueError("current_keep_ratio must lie in (0, 1]")
+        if attention_query_keep_ratio is None:
+            attention_query_keep_ratio = current_keep_ratio
+        if not 0.0 < attention_query_keep_ratio <= 1.0:
+            raise ValueError("attention_query_keep_ratio must lie in (0, 1]")
         if dense_prefix_layers < 0 or dense_suffix_layers < 0:
             raise ValueError("Dense prefix/suffix layer counts must be non-negative")
-        if current_keep_ratio < 1.0 and dense_prefix_layers < 1:
+        needs_current_route = current_keep_ratio < 1.0 or (
+            current_attention and attention_query_keep_ratio < 1.0
+        )
+        if needs_current_route and dense_prefix_layers < 1:
             raise ValueError("Current-token routing requires at least one dense prefix layer")
         if dense_prefix_layers + dense_suffix_layers > len(self.blocks):
             raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
@@ -1947,6 +1979,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_enabled = enabled
         self.anchor_sparse_config = config
         self.anchor_sparse_current_keep_ratio = current_keep_ratio
+        self.anchor_sparse_attention_query_keep_ratio = attention_query_keep_ratio
         self.anchor_sparse_dense_prefix_layers = dense_prefix_layers
         self.anchor_sparse_dense_suffix_layers = dense_suffix_layers
         self.anchor_sparse_propagate_radius = propagate_radius
@@ -1959,7 +1992,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             block.self_attn.anchor_sparse_config = config
             block.self_attn.record_anchor_diagnostics = (
                 enabled
-                and (record_diagnostics or current_keep_ratio < 1.0)
+                and (
+                    record_diagnostics
+                    or current_keep_ratio < 1.0
+                    or (current_attention and attention_query_keep_ratio < 1.0)
+                )
                 and block_index == 0
             )
             block.sparse_current_compute = (
@@ -1968,7 +2005,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and dense_prefix_layers <= block_index < sparse_end
             )
             block.sparse_current_attention = (
-                block.sparse_current_compute and current_attention
+                enabled
+                and current_attention
+                and attention_query_keep_ratio < 1.0
+                and dense_prefix_layers <= block_index < sparse_end
             )
             sparse_offset = block_index - dense_prefix_layers + 1
             should_propagate = (
@@ -2320,6 +2360,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         anchor_route_indices: torch.Tensor | None = None
         current_video_indices: torch.Tensor | None = None
+        current_attention_query_indices: torch.Tensor | None = None
         anchor_route_cache_key: tuple[Any, ...] | None = None
         if self.anchor_sparse_config is not None and action is not None:
             if (
@@ -2358,6 +2399,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 ):
                     anchor_route_indices = self._anchor_sparse_route_cache
                     current_video_indices = self._anchor_sparse_current_route_cache
+                    current_attention_query_indices = (
+                        self._anchor_sparse_current_attention_route_cache
+                    )
 
         if action is not None:
             embodiment_id = torch.tensor([0], device=x.device).repeat(x.shape[0])
@@ -2415,6 +2459,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 current_start_frame=current_start_frame,
                 anchor_route_indices=anchor_route_indices,
                 current_video_indices=current_video_indices,
+                current_attention_query_indices=current_attention_query_indices,
                 update_kv_cache=update_kv_cache,
             )
             if update_kv_cache:
@@ -2435,8 +2480,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 # not carry action/state registers. Their KV update stays dense;
                 # the following WAM call builds the action-conditioned route.
                 and self.anchor_sparse_config is not None
-                and self.anchor_sparse_current_keep_ratio < 1.0
-                and current_video_indices is None
+                and (
+                    (
+                        self.anchor_sparse_current_keep_ratio < 1.0
+                        and current_video_indices is None
+                    )
+                    or (
+                        self.anchor_sparse_current_attention
+                        and self.anchor_sparse_attention_query_keep_ratio < 1.0
+                        and current_attention_query_indices is None
+                    )
+                )
             ):
                 route = block.self_attn.last_anchor_route
                 if route is None:
@@ -2449,11 +2503,33 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         f"{video_seq_len} tokens for frame_seqlen={self.frame_seqlen}"
                     )
                 current_frames = video_seq_len // self.frame_seqlen
-                current_video_indices = build_current_video_query_route(
-                    route.scores[:, -current_frames:],
-                    self.anchor_sparse_config,
-                    keep_ratio=self.anchor_sparse_current_keep_ratio,
-                ).detach()
+                current_scores = route.scores[:, -current_frames:]
+                if (
+                    self.anchor_sparse_current_keep_ratio < 1.0
+                    and current_video_indices is None
+                ):
+                    current_video_indices = build_current_video_query_route(
+                        current_scores,
+                        self.anchor_sparse_config,
+                        keep_ratio=self.anchor_sparse_current_keep_ratio,
+                    ).detach()
+                if (
+                    self.anchor_sparse_current_attention
+                    and self.anchor_sparse_attention_query_keep_ratio < 1.0
+                    and current_attention_query_indices is None
+                ):
+                    if (
+                        current_video_indices is not None
+                        and self.anchor_sparse_attention_query_keep_ratio
+                        == self.anchor_sparse_current_keep_ratio
+                    ):
+                        current_attention_query_indices = current_video_indices
+                    else:
+                        current_attention_query_indices = build_current_video_query_route(
+                            current_scores,
+                            self.anchor_sparse_config,
+                            keep_ratio=self.anchor_sparse_attention_query_keep_ratio,
+                        ).detach()
 
         if (
             self.anchor_sparse_reuse_denoise
@@ -2464,6 +2540,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             self._anchor_sparse_current_route_cache = (
                 current_video_indices.detach()
                 if current_video_indices is not None
+                else None
+            )
+            self._anchor_sparse_current_attention_route_cache = (
+                current_attention_query_indices.detach()
+                if current_attention_query_indices is not None
                 else None
             )
             self._anchor_sparse_route_cache_key = anchor_route_cache_key

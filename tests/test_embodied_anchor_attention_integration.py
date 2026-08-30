@@ -382,6 +382,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         enabled=True,
         keep_ratio=0.2,
         current_keep_ratio=0.25,
+        attention_query_keep_ratio=0.125,
         dense_prefix_layers=1,
         dense_suffix_layers=0,
         propagate_radius=1,
@@ -397,6 +398,8 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model.anchor_sparse_config is not None
     assert model.anchor_sparse_config.anchor_tokens_per_frame == 176
     assert model.anchor_sparse_config.recent_dense_frames == 2
+    assert model.anchor_sparse_current_keep_ratio == 0.25
+    assert model.anchor_sparse_attention_query_keep_ratio == 0.125
     assert all(
         block.self_attn.anchor_sparse_config is model.anchor_sparse_config
         for block in model.blocks

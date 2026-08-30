@@ -47,6 +47,7 @@ class Args:
     anchor_sparse_num_router_heads: int = 4
     anchor_sparse_smooth_radius: int = 1
     anchor_sparse_current_keep_ratio: float = 1.0
+    anchor_sparse_attention_query_keep_ratio: float | None = None
     anchor_sparse_dense_prefix_layers: int = 1
     anchor_sparse_dense_suffix_layers: int = 1
     anchor_sparse_propagate_radius: int = 0
@@ -848,6 +849,7 @@ def main(args: Args) -> None:
             num_router_heads=args.anchor_sparse_num_router_heads,
             smooth_radius=args.anchor_sparse_smooth_radius,
             current_keep_ratio=args.anchor_sparse_current_keep_ratio,
+            attention_query_keep_ratio=args.anchor_sparse_attention_query_keep_ratio,
             dense_prefix_layers=args.anchor_sparse_dense_prefix_layers,
             dense_suffix_layers=args.anchor_sparse_dense_suffix_layers,
             propagate_radius=args.anchor_sparse_propagate_radius,
@@ -858,13 +860,14 @@ def main(args: Args) -> None:
         )
     logger.info(
         "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
-        "current_keep=%.3f dense_prefix=%d dense_suffix=%d "
+        "current_keep=%.3f attention_query_keep=%s dense_prefix=%d dense_suffix=%d "
         "propagate_radius=%d propagate_every=%d current_attention=%s "
         "recent_dense_frames=%d "
         "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
         args.anchor_sparse_keep_ratio,
         args.anchor_sparse_current_keep_ratio,
+        args.anchor_sparse_attention_query_keep_ratio,
         args.anchor_sparse_dense_prefix_layers,
         args.anchor_sparse_dense_suffix_layers,
         args.anchor_sparse_propagate_radius,
