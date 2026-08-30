@@ -261,7 +261,7 @@ def candidate_estimators() -> dict[str, tuple[object, bool]]:
                 LogisticRegression(
                     C=0.5,
                     class_weight="balanced",
-                    max_iter=250,
+                    max_iter=500,
                     random_state=SEED,
                 ),
             ),
@@ -661,12 +661,18 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         < args.false_sparse_limit
         and model_results[name]["validation"]["mass_p05_at_least_0_9_rate"]
         >= args.mass_gate_rate
+        and model_results[name]["validation"]["macro_f1"] >= args.minimum_macro_f1
+        and (
+            not args.require_confidence_fallback
+            or model_results[name]["validation"]["confidence_fallback_rate"] > 0.0
+        )
     ]
     if not feasible:
         raise RuntimeError("No M1 candidate passed validation routing gates")
     best_name = min(
         feasible,
         key=lambda name: (
+            model_results[name]["validation"]["false_sparse_rate"],
             model_results[name]["validation"]["mean_keep_ratio"],
             -model_results[name]["validation"]["macro_f1"],
         ),
@@ -688,6 +694,11 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
     statistical_gates = (
         test_metrics["false_sparse_rate"] < args.false_sparse_limit
         and test_metrics["mass_p05_at_least_0_9_rate"] >= args.mass_gate_rate
+        and test_metrics["macro_f1"] >= args.minimum_macro_f1
+        and (
+            not args.require_confidence_fallback
+            or test_metrics["confidence_fallback_rate"] > 0.0
+        )
     )
     summary = {
         "input_table": str(args.input_table),
@@ -707,6 +718,13 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         },
         "models": model_results,
         "selected_model": best_name,
+        "selection_gates": {
+            "false_sparse_limit": args.false_sparse_limit,
+            "mass_gate_rate": args.mass_gate_rate,
+            "minimum_macro_f1": args.minimum_macro_f1,
+            "require_confidence_fallback": args.require_confidence_fallback,
+            "ordering": "validation false-sparse, mean keep ratio, macro-F1",
+        },
         "prior_table": str(args.output_dir / "m1_prior_table.parquet"),
         "prior_table_rows": len(prior_table),
         "statistical_gates_passed": bool(statistical_gates),
@@ -736,6 +754,12 @@ def main() -> None:
     parser.add_argument("--underprediction-cost", type=float, default=20.0)
     parser.add_argument("--false-sparse-limit", type=float, default=0.01)
     parser.add_argument("--mass-gate-rate", type=float, default=0.95)
+    parser.add_argument("--minimum-macro-f1", type=float, default=0.50)
+    parser.add_argument(
+        "--require-confidence-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--bootstrap-repeats", type=int, default=200)
     args = parser.parse_args()
     summary = train_and_evaluate(args)

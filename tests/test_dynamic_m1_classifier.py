@@ -219,6 +219,8 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
             underprediction_cost=20.0,
             false_sparse_limit=0.01,
             mass_gate_rate=0.95,
+            minimum_macro_f1=0.0,
+            require_confidence_fallback=False,
             bootstrap_repeats=5,
         )
     )
