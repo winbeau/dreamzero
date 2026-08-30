@@ -15,11 +15,12 @@ shared budget for all 40 heads, even when the early-DiT middle-stack budget is
 raised to 87.5%. A four-bucket M1 head-group executor is now implemented, but
 its extra 3--4 FA2 calls per layer recover neither video quality nor enough
 latency; this is retained as a negative ablation. Segmented spatial propagation
-inside the packed stack is substantially more effective. The current best
-early-DiT gate uses radius two every five layers, reaches 0.8987 video cosine at
-1.742x DiT speedup, and preserves the action gate. Confidence-controlled M1
-runtime routing and a full eight-DiT policy replay are still required before
-this phase can pass its quality gate.
+inside the packed stack is substantially more effective. The follow-up sweep
+also identifies a required executor invariant: mutable current-token budgets
+must stay fixed within a propagation segment. Segment-max budgets reach 0.9749
+video cosine at 1.552x early-DiT speedup, while a 75% segment floor reaches
+0.9970 at 1.378x. Confidence-controlled M1 runtime routing and a full eight-DiT
+policy replay are still required before this phase can pass its quality gate.
 
 Implementation commits:
 
@@ -30,11 +31,14 @@ Implementation commits:
 - `dff03a7`: first fixed-membership dynamic packed head-group executor;
 - `0aa67eb`: group heads per `(timestep, layer)` by shared M1 budget bucket;
 - `45db7d4`: segmented packed spatial propagation without per-layer full scatter;
-- `71b1a58`: reproducible per-rank propagation sweep and boundary accounting.
+- `71b1a58`: reproducible per-rank propagation sweep and boundary accounting;
+- `870be76`: compare per-rank dynamic budget tables in one checkpoint load;
+- `4610143`: build propagation-boundary current-token sentinel ablations;
+- `d839b08`: stabilize mutable current budgets within propagation segments.
 
 All listed commits are pushed to
 `origin/codex/dreamzero-anchor-sparse-opt`, and the H200 checkout is
-fast-forwarded through `71b1a58`.
+fast-forwarded through `d839b08`.
 
 ## Runtime contract
 
@@ -237,6 +241,56 @@ Artifacts:
     20260830_aggressive_tl_prop_sweep_early_gpu01/
 ```
 
+## Propagation-aligned current-budget invariant
+
+The initial dynamic table allowed current/Q budget to shrink and later expand
+inside one five-layer packed segment. This is invalid for mutable hidden state:
+a token removed at one layer skips that Transformer update, then re-enters a
+later layer with a stale representation. Historical K/V budget may still vary
+per layer because those gathered cache entries are immutable inputs; current
+Q/O/FFN state may change only at a propagation/repack boundary.
+
+A boundary-only sentinel first exposed the failure mode. Promoting more current
+tokens only in the final layer of each segment made the output worse, because
+the newly activated tokens had skipped all preceding layers in that segment:
+
+| Boundary-only current sentinel | Early current mean | Dense p50 | Sparse p50 | Speedup | Action cosine | Video cosine | Video rel-L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 75% | 53.42% | 187.92 ms | 112.13 ms | 1.676x | 0.999794 | 0.8344 | 60.37% |
+| 100% | 58.68% | 187.16 ms | 118.64 ms | 1.578x | 0.999764 | 0.7133 | 86.61% |
+
+The corrected table holds current budget constant at the maximum requested
+ratio within each propagation segment. This prevents stale-token re-entry while
+retaining timestep-dependent and segment-dependent fixed buckets. Historical
+K/V remains the original aggressive timestep/layer table.
+
+| Segment-stable current policy | Early current mean | Dense p50 | Sparse p50 | Speedup | Action cosine | Action rel-L2 | Video cosine | Video rel-L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| segment maximum | 59.87% | 190.48 ms | 122.76 ms | 1.552x | 0.999910 | 1.346% | 0.9749 | 22.57% |
+| segment floor 75% | 75.00% | 187.61 ms | 136.15 ms | 1.378x | 0.999820 | 1.914% | 0.9970 | 7.75% |
+
+This is a much larger quality recovery than making only the Dense suffix
+deeper. With the same radius-two/every-five propagation, four Dense suffix
+layers reach 0.9058 video cosine at 1.687x, while eight Dense suffix layers
+reach 0.9179 at 1.535x. The remaining error is accumulated across packed
+segments, not confined to the output layers.
+
+All rows use the real early timestep 999 and do not change the service-level
+contract of eight actual DiT evaluations. Each row independently passes exact
+full-budget video, action, and cache checks. These remain single-timestep
+released-checkpoint gates rather than held-out task or closed-loop claims.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/dynamic_budgets/
+    20260830_aggressive_tl_prop_r2_suffix_sweep_early_gpu01/
+    20260830_propagation_sentinels/
+    20260830_prop_r2_sentinel75_100_early_gpu01/
+    20260830_prop_r2_segmentmax_floor75_early_gpu01/
+```
+
 ## Interpretation and next gate
 
 The timestep hypothesis is useful for compute allocation: the Oracle-supported
@@ -250,12 +304,15 @@ without recovering video. Historical-KV-only head grouping is also not the
 answer: it keeps current-token starvation unchanged and introduces too many
 small attention launches. Spatial propagation demonstrates that restoring
 information to unselected current tokens is the higher-leverage direction.
+The segment-stability sweep further shows that arbitrary layer-by-layer Q
+budgets are mathematically unsafe even when their shapes are nested.
 
 The next gate is therefore:
 
-1. retain radius-two/every-five segmented propagation as the current candidate;
-2. test a quality/aggressive hybrid current-token schedule, especially the
-   Oracle-sensitive late-layer recovery region;
+1. enforce segment-stable current budgets in M2 and retain radius-two/every-five
+   propagation as the current candidate;
+2. localize which early propagation segments require the 75% floor, then use
+   timestep-dependent floors to recover speed without stale-token re-entry;
 3. map calibrated per-request M1 confidence to a small number of shared groups
    or a single promoted group shape, avoiding 3--4 FA2 launches in every layer;
 4. keep critical and confidence-uncertain routes Dense and log every fallback;
