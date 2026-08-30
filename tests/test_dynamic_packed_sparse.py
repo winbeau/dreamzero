@@ -135,12 +135,12 @@ def test_packed_rope_matches_dense_original_positions():
         torch.randn(video_tokens, 1, head_dim // 2, dtype=torch.float64),
     )
     action_freqs = torch.polar(
-        torch.ones(6, 1, head_dim // 2, dtype=torch.float64),
-        torch.randn(6, 1, head_dim // 2, dtype=torch.float64),
+        torch.ones(6, head_dim // 2, dtype=torch.float64),
+        torch.randn(6, head_dim // 2, dtype=torch.float64),
     )
     state_freqs = torch.polar(
-        torch.ones(2, 1, head_dim // 2, dtype=torch.float64),
-        torch.randn(2, 1, head_dim // 2, dtype=torch.float64),
+        torch.ones(2, head_dim // 2, dtype=torch.float64),
+        torch.randn(2, head_dim // 2, dtype=torch.float64),
     )
     original_indices = torch.tensor([[8, 9, 10, 11, 0, 3, 7], [8, 9, 10, 11, 1, 4, 6]])
     packed_x = gather_sequence_by_index(x, original_indices)

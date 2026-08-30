@@ -325,6 +325,14 @@ def gather_packed_rope_frequencies(
         ),
         dim=0,
     )
+    # Released DreamZero stores action/state polar frequencies as ``[L, D]``
+    # while the video frequencies passed to attention are ``[L, 1, D]``.
+    # Match the exact Dense RoPE view before concatenating modalities.  Tests
+    # also exercise the already-expanded representation.
+    register_freqs = register_freqs.reshape(
+        num_action_tokens + num_state_tokens,
+        *video_freqs.shape[1:],
+    )
     full_freqs = torch.cat((video_freqs, register_freqs), dim=0)
     if full_freqs.shape[0] != video_seq_len + num_action_tokens + num_state_tokens:
         raise ValueError("RoPE frequency lengths do not match the packed token layout")
