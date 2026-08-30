@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dense-prefix-layers", type=int, default=1)
     parser.add_argument("--dense-suffix-layers", type=int, default=1)
     parser.add_argument("--propagate-radius", type=int, default=0)
+    parser.add_argument("--propagate-every", type=int, default=1)
     parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
 
@@ -231,6 +232,7 @@ def main() -> None:
             dense_prefix_layers=args.dense_prefix_layers,
             dense_suffix_layers=args.dense_suffix_layers,
             propagate_radius=args.propagate_radius,
+            propagate_every=args.propagate_every,
             reuse_denoise=args.reuse_denoise,
             record_diagnostics=True,
         )
@@ -260,6 +262,7 @@ def main() -> None:
         "dense_prefix_layers": args.dense_prefix_layers,
         "dense_suffix_layers": args.dense_suffix_layers,
         "propagate_radius": args.propagate_radius,
+        "propagate_every": args.propagate_every,
         "reuse_denoise": args.reuse_denoise,
         "dense_samples_ms": dense_samples,
         "sparse_samples_ms": sparse_samples,

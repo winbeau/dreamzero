@@ -226,6 +226,8 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         current_keep_ratio=0.25,
         dense_prefix_layers=1,
         dense_suffix_layers=0,
+        propagate_radius=1,
+        propagate_every=1,
         probe_dim=2,
         num_router_heads=1,
         smooth_radius=0,
@@ -244,11 +246,14 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert not model.blocks[1].self_attn.record_anchor_diagnostics
     assert not model.blocks[0].sparse_current_compute
     assert model.blocks[1].sparse_current_compute
+    assert model.blocks[0].current_propagate_radius == 0
+    assert model.blocks[1].current_propagate_radius == 1
 
     model.configure_anchor_sparse_attention(enabled=False)
     assert model.anchor_sparse_config is None
     assert all(block.self_attn.anchor_sparse_config is None for block in model.blocks)
     assert not any(block.sparse_current_compute for block in model.blocks)
+    assert not any(block.current_propagate_radius for block in model.blocks)
 
 
 def test_sparse_current_update_keeps_unselected_video_tokens_and_updates_registers() -> None:

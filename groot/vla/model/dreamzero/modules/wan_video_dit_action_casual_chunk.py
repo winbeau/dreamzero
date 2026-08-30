@@ -1457,6 +1457,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  anchor_sparse_dense_prefix_layers=1,
                  anchor_sparse_dense_suffix_layers=1,
                  anchor_sparse_propagate_radius=0,
+                 anchor_sparse_propagate_every=1,
                  anchor_sparse_reuse_denoise=True,
                  anchor_sparse_record_diagnostics=False):
         r"""
@@ -1534,6 +1535,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_dense_prefix_layers = anchor_sparse_dense_prefix_layers
         self.anchor_sparse_dense_suffix_layers = anchor_sparse_dense_suffix_layers
         self.anchor_sparse_propagate_radius = anchor_sparse_propagate_radius
+        self.anchor_sparse_propagate_every = anchor_sparse_propagate_every
         self.anchor_sparse_reuse_denoise = anchor_sparse_reuse_denoise
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
 
@@ -1547,6 +1549,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
         if anchor_sparse_propagate_radius < 0:
             raise ValueError("anchor_sparse_propagate_radius must be non-negative")
+        if anchor_sparse_propagate_radius > 0 and anchor_sparse_propagate_every <= 0:
+            raise ValueError("anchor_sparse_propagate_every must be positive when propagation is enabled")
 
         if anchor_sparse_enabled and frame_seqlen != 880:
             raise ValueError(
@@ -1640,7 +1644,18 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and anchor_sparse_current_keep_ratio < 1.0
                 and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
             )
-            block.current_propagate_radius = anchor_sparse_propagate_radius
+            sparse_offset = block_index - anchor_sparse_dense_prefix_layers + 1
+            should_propagate = (
+                block.sparse_current_compute
+                and anchor_sparse_propagate_radius > 0
+                and (
+                    sparse_offset % anchor_sparse_propagate_every == 0
+                    or block_index == sparse_end - 1
+                )
+            )
+            block.current_propagate_radius = (
+                anchor_sparse_propagate_radius if should_propagate else 0
+            )
 
         # head
         self.head = CausalHead(dim, out_dim, patch_size, eps)
@@ -1689,6 +1704,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         dense_prefix_layers: int = 1,
         dense_suffix_layers: int = 1,
         propagate_radius: int = 0,
+        propagate_every: int = 1,
         reuse_denoise: bool = True,
         record_diagnostics: bool = False,
     ) -> None:
@@ -1715,6 +1731,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
         if propagate_radius < 0:
             raise ValueError("propagate_radius must be non-negative")
+        if propagate_radius > 0 and propagate_every <= 0:
+            raise ValueError("propagate_every must be positive when propagation is enabled")
         config = None
         if enabled:
             config = AnchorSparseConfig(
@@ -1735,6 +1753,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_dense_prefix_layers = dense_prefix_layers
         self.anchor_sparse_dense_suffix_layers = dense_suffix_layers
         self.anchor_sparse_propagate_radius = propagate_radius
+        self.anchor_sparse_propagate_every = propagate_every
         self.anchor_sparse_reuse_denoise = reuse_denoise
         self.anchor_sparse_record_diagnostics = record_diagnostics
         sparse_end = len(self.blocks) - dense_suffix_layers
@@ -1750,7 +1769,18 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and current_keep_ratio < 1.0
                 and dense_prefix_layers <= block_index < sparse_end
             )
-            block.current_propagate_radius = propagate_radius
+            sparse_offset = block_index - dense_prefix_layers + 1
+            should_propagate = (
+                block.sparse_current_compute
+                and propagate_radius > 0
+                and (
+                    sparse_offset % propagate_every == 0
+                    or block_index == sparse_end - 1
+                )
+            )
+            block.current_propagate_radius = (
+                propagate_radius if should_propagate else 0
+            )
         self.clear_anchor_sparse_route_cache()
 
     def get_last_anchor_route(self) -> AnchorRoute | None:
