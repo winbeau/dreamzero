@@ -1,0 +1,261 @@
+"""Four-GPU real-checkpoint gate for embodied anchor sparse attention.
+
+Each rank loads the released full DreamZero checkpoint, releases the temporary
+GPU reservation only after every rank is ready to move the DiT to CUDA, checks
+the exact full-budget invariant, and measures a paired dense/sparse DiT forward
+at the released DROID geometry.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import statistics
+import time
+
+import torch
+import torch.distributed as dist
+
+from groot.vla.model.dreamzero.base_vla import VLA
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-path", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--physical-gpus", type=int, nargs="+", required=True)
+    parser.add_argument("--release-pids", type=int, nargs="*", default=[])
+    parser.add_argument("--history-frames", type=int, default=7)
+    parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--keep-ratios", type=float, nargs="+", default=[0.20, 0.25])
+    parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
+    return parser.parse_args()
+
+
+def release_reservation_processes(pids: list[int]) -> None:
+    """Terminate only the explicitly supplied task-owned reservation PIDs."""
+
+    for pid in pids:
+        if pid <= 1 or not Path(f"/proc/{pid}").exists():
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def wait_for_gpu_headroom(device: torch.device, required_free_gib: float = 80.0) -> None:
+    deadline = time.monotonic() + 60.0
+    required_bytes = int(required_free_gib * 1024**3)
+    while time.monotonic() < deadline:
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+        if free_bytes >= required_bytes:
+            return
+        time.sleep(0.25)
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    raise RuntimeError(
+        "GPU reservation did not release enough memory: "
+        f"free={free_bytes / 1024**3:.1f} GiB, total={total_bytes / 1024**3:.1f} GiB"
+    )
+
+
+def make_inputs(
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    history_frames: int,
+) -> dict[str, object]:
+    generator = torch.Generator(device=device).manual_seed(20260830)
+    dtype = torch.bfloat16
+    batch = 1
+    current_frames = 2
+    latent_height, latent_width = 44, 80
+    action_tokens, action_dim = model.num_action_per_block, model.action_dim
+    state_tokens, state_dim = model.num_state_per_block, model.max_state_dim
+    head_dim = model.dim // model.num_heads
+
+    def randn(*shape: int) -> torch.Tensor:
+        return torch.randn(*shape, generator=generator, device=device, dtype=dtype)
+
+    kv_cache = [
+        randn(2, batch, history_frames * model.frame_seqlen, model.num_heads, head_dim)
+        for _ in range(model.num_layers)
+    ]
+    return {
+        "x": randn(batch, model.out_dim, current_frames, latent_height, latent_width),
+        "timestep": torch.full(
+            (batch, current_frames), 750, device=device, dtype=torch.int64
+        ),
+        "context": randn(batch, model.text_len, model.text_dim),
+        "seq_len": current_frames * model.frame_seqlen,
+        "kv_cache": kv_cache,
+        "crossattn_cache": [],
+        "current_start_frame": history_frames,
+        "y": randn(batch, model.in_dim - model.out_dim, current_frames, latent_height, latent_width),
+        "clip_feature": randn(batch, 257, 1280),
+        "action": randn(batch, action_tokens, action_dim),
+        "timestep_action": torch.full(
+            (batch, action_tokens), 750, device=device, dtype=torch.int64
+        ),
+        "state": randn(batch, state_tokens, state_dim),
+        "embodiment_id": torch.zeros(batch, device=device, dtype=torch.long),
+    }
+
+
+def invoke(model: torch.nn.Module, inputs: dict[str, object]):
+    return model(**inputs)
+
+
+def timed_forwards(
+    model: torch.nn.Module,
+    inputs: dict[str, object],
+    *,
+    warmup: int,
+    repeats: int,
+) -> tuple[list[float], tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]]:
+    last_output = None
+    for _ in range(warmup):
+        last_output = invoke(model, inputs)
+    torch.cuda.synchronize()
+
+    samples = []
+    for _ in range(repeats):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        last_output = invoke(model, inputs)
+        end.record()
+        end.synchronize()
+        samples.append(float(start.elapsed_time(end)))
+    assert last_output is not None
+    return samples, last_output
+
+
+def relative_l2(reference: torch.Tensor, candidate: torch.Tensor) -> float:
+    numerator = torch.linalg.vector_norm((candidate.float() - reference.float()).reshape(-1))
+    denominator = torch.linalg.vector_norm(reference.float().reshape(-1)).clamp_min(1e-12)
+    return float((numerator / denominator).item())
+
+
+def main() -> None:
+    args = parse_args()
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    physical_gpu = args.physical_gpus[local_rank]
+
+    load_start = time.perf_counter()
+    vla = VLA.from_pretrained(str(args.model_path))
+    vla.eval().requires_grad_(False)
+    diffusion_model = vla.action_head.model
+    load_cpu_seconds = time.perf_counter() - load_start
+
+    dist.barrier()
+    if rank == 0:
+        release_reservation_processes(args.release_pids)
+    dist.barrier()
+    wait_for_gpu_headroom(device)
+
+    move_start = time.perf_counter()
+    diffusion_model.to(device=device, dtype=torch.bfloat16)
+    diffusion_model.eval().requires_grad_(False)
+    move_gpu_seconds = time.perf_counter() - move_start
+    del vla
+    torch.cuda.empty_cache()
+
+    inputs = make_inputs(
+        diffusion_model,
+        device=device,
+        history_frames=args.history_frames,
+    )
+    candidate_keep_ratio = args.keep_ratios[rank % len(args.keep_ratios)]
+
+    with torch.inference_mode():
+        diffusion_model.configure_anchor_sparse_attention(enabled=False)
+        dense_samples, dense_output = timed_forwards(
+            diffusion_model,
+            inputs,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+
+        diffusion_model.configure_anchor_sparse_attention(
+            enabled=True,
+            keep_ratio=1.0,
+            recent_dense_frames=2,
+            reuse_denoise=False,
+        )
+        full_video, full_action, full_caches = invoke(diffusion_model, inputs)
+        dense_video, dense_action, dense_caches = dense_output
+        full_budget_video_exact = torch.equal(full_video, dense_video)
+        full_budget_action_exact = torch.equal(full_action, dense_action)
+        full_budget_cache_exact = all(
+            torch.equal(full_cache, dense_cache)
+            for full_cache, dense_cache in zip(full_caches, dense_caches)
+        )
+        dense_video = dense_video.clone()
+        dense_action = dense_action.clone()
+        del full_video, full_action, full_caches, dense_caches, dense_output
+        torch.cuda.empty_cache()
+
+        diffusion_model.configure_anchor_sparse_attention(
+            enabled=True,
+            keep_ratio=candidate_keep_ratio,
+            recent_dense_frames=2,
+            reuse_denoise=args.reuse_denoise,
+            record_diagnostics=True,
+        )
+        sparse_samples, sparse_output = timed_forwards(
+            diffusion_model,
+            inputs,
+            warmup=args.warmup,
+            repeats=args.repeats,
+        )
+        sparse_video, sparse_action, _ = sparse_output
+        route = diffusion_model.get_last_anchor_route()
+
+    dense_p50 = statistics.median(dense_samples)
+    sparse_p50 = statistics.median(sparse_samples)
+    result = {
+        "rank": rank,
+        "physical_gpu": physical_gpu,
+        "device": torch.cuda.get_device_name(device),
+        "checkpoint": str(args.model_path),
+        "load_cpu_seconds": load_cpu_seconds,
+        "move_gpu_seconds": move_gpu_seconds,
+        "history_frames": args.history_frames,
+        "current_frames": 2,
+        "keep_ratio": candidate_keep_ratio,
+        "recent_dense_frames": 2,
+        "reuse_denoise": args.reuse_denoise,
+        "dense_samples_ms": dense_samples,
+        "sparse_samples_ms": sparse_samples,
+        "dense_p50_ms": dense_p50,
+        "sparse_p50_ms": sparse_p50,
+        "paired_dit_speedup_p50": dense_p50 / sparse_p50,
+        "full_budget_video_exact": full_budget_video_exact,
+        "full_budget_action_exact": full_budget_action_exact,
+        "full_budget_cache_exact": full_budget_cache_exact,
+        "sparse_video_relative_l2": relative_l2(dense_video, sparse_video),
+        "sparse_action_relative_l2": relative_l2(dense_action, sparse_action),
+        "selected_video_tokens": route.selected_video_tokens if route is not None else None,
+        "num_video_frames": route.num_video_frames if route is not None else None,
+        "max_memory_allocated_gib": torch.cuda.max_memory_allocated(device) / 1024**3,
+    }
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = args.output_dir / f"rank{rank}_gpu{physical_gpu}.json"
+    output_path.write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2), flush=True)
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

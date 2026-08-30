@@ -564,7 +564,7 @@ class VLA(PreTrainedModel):
 
         # Instantiate model
         model = cls(config)
-        print("model", model)
+        print("model", model.__class__.__name__)
         # Remove .base_layer from keys (e.g., 'action_head.model.base_model.model.blocks.19.self_attn.v.base_layer.bias' -> 'action_head.model.base_model.model.blocks.19.self_attn.v.bias')
         has_base_layer = any(".base_layer." in key for key in state_dict.keys())
         if has_base_layer:
