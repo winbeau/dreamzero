@@ -79,6 +79,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument("--dynamic-budget-table", type=Path)
+    parser.add_argument(
+        "--dynamic-budget-table-candidates",
+        type=Path,
+        nargs="+",
+        help=(
+            "Optional per-rank budget tables aligned with keep-ratios. "
+            "This compares policies at the same checkpoint/timestep in one load."
+        ),
+    )
     parser.add_argument("--dynamic-head-group-budget-table", type=Path)
     parser.add_argument("--dynamic-budget-dit-index", type=int, default=0)
     parser.add_argument(
@@ -322,6 +331,22 @@ def main() -> None:
         raise ValueError("Packed Middle Stack timing requires --no-update-kv-cache")
     if args.dynamic_budget_table is not None and not args.packed_middle:
         raise ValueError("Dynamic budget tables require --packed-middle")
+    if args.dynamic_budget_table_candidates is not None and not args.packed_middle:
+        raise ValueError("Dynamic budget table candidates require --packed-middle")
+    if (
+        args.dynamic_budget_table is not None
+        and args.dynamic_budget_table_candidates is not None
+    ):
+        raise ValueError(
+            "Use either dynamic-budget-table or dynamic-budget-table-candidates"
+        )
+    if (
+        args.dynamic_budget_table_candidates is not None
+        and len(args.dynamic_budget_table_candidates) != len(args.keep_ratios)
+    ):
+        raise ValueError(
+            "dynamic-budget-table-candidates must align one-to-one with keep-ratios"
+        )
     if args.dynamic_head_group_budget_table is not None and not args.packed_middle:
         raise ValueError("Dynamic head-group budget tables require --packed-middle")
     if not 0 <= args.dynamic_budget_dit_index < 8:
@@ -329,6 +354,7 @@ def main() -> None:
     if (
         args.dynamic_budget_dit_indices is not None
         and args.dynamic_budget_table is None
+        and args.dynamic_budget_table_candidates is None
         and args.dynamic_head_group_budget_table is None
     ):
         raise ValueError(
@@ -409,9 +435,14 @@ def main() -> None:
         if args.propagate_every_candidates is not None
         else args.propagate_every
     )
+    candidate_dynamic_budget_table_path = (
+        args.dynamic_budget_table_candidates[candidate_index]
+        if args.dynamic_budget_table_candidates is not None
+        else args.dynamic_budget_table
+    )
     dynamic_budget_table = (
-        DynamicPackedBudgetTable.from_json(args.dynamic_budget_table)
-        if args.dynamic_budget_table is not None
+        DynamicPackedBudgetTable.from_json(candidate_dynamic_budget_table_path)
+        if candidate_dynamic_budget_table_path is not None
         else None
     )
     dynamic_head_group_budget_table = (
@@ -680,8 +711,8 @@ def main() -> None:
         "current_attention": args.current_attention,
         "packed_middle": args.packed_middle,
         "dynamic_budget_table": (
-            str(args.dynamic_budget_table)
-            if args.dynamic_budget_table is not None
+            str(candidate_dynamic_budget_table_path)
+            if candidate_dynamic_budget_table_path is not None
             else None
         ),
         "dynamic_head_group_budget_table": (
