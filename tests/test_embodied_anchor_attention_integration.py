@@ -244,7 +244,7 @@ def test_packed_attention_does_not_expand_dense_history_window() -> None:
 def test_complete_packed_block_matches_dense_at_full_budget() -> None:
     module = _load_attention_module()
     dense = module.CausalWanAttentionBlock(
-        cross_attn_type="t2v_cross_attn",
+        cross_attn_type="i2v_cross_attn",
         dim=8,
         ffn_dim=16,
         num_heads=2,
@@ -253,7 +253,7 @@ def test_complete_packed_block_matches_dense_at_full_budget() -> None:
         num_state_per_block=1,
     )
     packed = module.CausalWanAttentionBlock(
-        cross_attn_type="t2v_cross_attn",
+        cross_attn_type="i2v_cross_attn",
         dim=8,
         ffn_dim=16,
         num_heads=2,
@@ -264,7 +264,7 @@ def test_complete_packed_block_matches_dense_at_full_budget() -> None:
     packed.load_state_dict(dense.state_dict())
     x, cache, freqs = _inputs()
     e0 = torch.randn(1, x.shape[1], 6, 8)
-    context = torch.randn(1, 5, 8)
+    context = torch.randn(1, 260, 8)
 
     dense_output, dense_cache, _ = dense(
         x,
