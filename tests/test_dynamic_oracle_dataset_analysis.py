@@ -61,7 +61,11 @@ def test_compact_m1_rows_use_conservative_label_and_temporal_lags():
     second_timestep = next(rows)
 
     assert first["oracle_min_keep_ratio"] == 0.75
-    assert first["previous_oracle_min_keep_ratio"] == 0.75
+    assert np.isnan(first["previous_oracle_min_keep_ratio"])
+    assert np.isnan(first["previous_support_turnover_max"])
+    assert np.isnan(first["previous_vv_output_change_relative_l2_max"])
+    assert np.isnan(first["previous_two_vv_output_change_relative_l2_max"])
     assert second_timestep["oracle_min_keep_ratio"] == pytest.approx(0.2)
     assert second_timestep["previous_oracle_min_keep_ratio"] == 0.75
     assert second_timestep["previous_vv_output_change_relative_l2_max"] == pytest.approx(0.3)
+    assert np.isnan(second_timestep["previous_two_vv_output_change_relative_l2_max"])

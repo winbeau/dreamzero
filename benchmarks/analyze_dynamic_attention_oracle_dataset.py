@@ -261,8 +261,8 @@ def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> It
     cosine_p05 = record_arrays["cosine_p05"]
     relative_l2_p95 = record_arrays["relative_l2_p95"]
     for dit_index in range(8):
-        previous_index = max(0, dit_index - 1)
-        previous_two_index = max(0, dit_index - 2)
+        previous_index = dit_index - 1
+        previous_two_index = dit_index - 2
         for layer_index in range(40):
             for head_index in range(40):
                 current = (slice(None), slice(None), dit_index, layer_index, head_index)
@@ -272,14 +272,20 @@ def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> It
                     previous_index,
                     layer_index,
                     head_index,
-                )
+                ) if previous_index >= 0 else None
                 previous_two = (
                     slice(None),
                     slice(None),
                     previous_two_index,
                     layer_index,
                     head_index,
-                )
+                ) if previous_two_index >= 0 else None
+
+                def prior_reduction(array: np.ndarray, index, reduction) -> float:
+                    if index is None:
+                        return float("nan")
+                    return float(reduction(array[index]))
+
                 row = {
                     **metadata,
                     "dit_index": dit_index,
@@ -298,16 +304,16 @@ def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> It
                     "action_oracle_min_keep_ratio": float(
                         np.nanmax(budget[1, :, dit_index, layer_index, head_index])
                     ),
-                    "previous_oracle_min_keep_ratio": float(
-                        np.nanmax(budget[previous])
+                    "previous_oracle_min_keep_ratio": prior_reduction(
+                        budget, previous, np.nanmax
                     ),
-                    "previous_two_oracle_min_keep_ratio": float(
-                        np.nanmax(budget[previous_two])
+                    "previous_two_oracle_min_keep_ratio": prior_reduction(
+                        budget, previous_two, np.nanmax
                     ),
                     "support_turnover_mean": float(np.nanmean(turnover[current])),
                     "support_turnover_max": float(np.nanmax(turnover[current])),
-                    "previous_support_turnover_max": float(
-                        np.nanmax(turnover[previous])
+                    "previous_support_turnover_max": prior_reduction(
+                        turnover, previous, np.nanmax
                     ),
                     "video_support_turnover_max": float(
                         np.nanmax(turnover[0, :, dit_index, layer_index, head_index])
@@ -321,21 +327,21 @@ def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> It
                     "vv_output_change_relative_l2_max": float(
                         np.nanmax(vv_relative_l2[current])
                     ),
-                    "previous_vv_output_change_relative_l2_max": float(
-                        np.nanmax(vv_relative_l2[previous])
+                    "previous_vv_output_change_relative_l2_max": prior_reduction(
+                        vv_relative_l2, previous, np.nanmax
                     ),
-                    "previous_two_vv_output_change_relative_l2_max": float(
-                        np.nanmax(vv_relative_l2[previous_two])
+                    "previous_two_vv_output_change_relative_l2_max": prior_reduction(
+                        vv_relative_l2, previous_two, np.nanmax
                     ),
                     "normalized_entropy_mean": float(np.nanmean(entropy[current])),
                     "normalized_entropy_max": float(np.nanmax(entropy[current])),
-                    "previous_normalized_entropy_mean": float(
-                        np.nanmean(entropy[previous])
+                    "previous_normalized_entropy_mean": prior_reduction(
+                        entropy, previous, np.nanmean
                     ),
                     "max_attention_mass_mean": float(np.nanmean(max_mass[current])),
                     "max_attention_mass_max": float(np.nanmax(max_mass[current])),
-                    "previous_max_attention_mass_mean": float(
-                        np.nanmean(max_mass[previous])
+                    "previous_max_attention_mass_mean": prior_reduction(
+                        max_mass, previous, np.nanmean
                     ),
                     "qa_qv_key_importance_correlation_mean": float(
                         np.nanmean(correlation[:, dit_index, layer_index, head_index])
@@ -343,10 +349,16 @@ def _compact_m1_rows(record_arrays: dict[str, np.ndarray], metadata: dict) -> It
                     "qa_qv_key_importance_correlation_min": float(
                         np.nanmin(correlation[:, dit_index, layer_index, head_index])
                     ),
-                    "previous_qa_qv_key_importance_correlation_mean": float(
-                        np.nanmean(
-                            correlation[:, previous_index, layer_index, head_index]
+                    "previous_qa_qv_key_importance_correlation_mean": (
+                        float(
+                            np.nanmean(
+                                correlation[
+                                    :, previous_index, layer_index, head_index
+                                ]
+                            )
                         )
+                        if previous_index >= 0
+                        else float("nan")
                     ),
                 }
                 for ratio_index, ratio in enumerate(KEEP_RATIOS):
