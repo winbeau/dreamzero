@@ -25,6 +25,10 @@ from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
 )
 
 
+REAL_DIT_SCHEDULER_INDICES = (0, 1, 2, 6, 10, 13, 14, 15)
+REAL_DIT_TIMESTEPS = (999, 986, 972, 892, 749, 535, 416, 249)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=Path, required=True)
@@ -396,6 +400,14 @@ def main() -> None:
         if args.dynamic_budget_dit_indices is not None
         else args.dynamic_budget_dit_index
     )
+    candidate_diffusion_timestep = (
+        REAL_DIT_TIMESTEPS[candidate_dynamic_budget_dit_index]
+        if dynamic_budget_table is not None
+        else 750
+    )
+    if dynamic_budget_table is not None:
+        inputs["timestep"].fill_(candidate_diffusion_timestep)
+        inputs["timestep_action"].fill_(candidate_diffusion_timestep)
 
     with torch.inference_mode():
         diffusion_model.configure_anchor_sparse_attention(enabled=False)
@@ -475,12 +487,12 @@ def main() -> None:
         if dynamic_budget_table is not None:
             diffusion_model.configure_dynamic_packed_budget_table(dynamic_budget_table)
             diffusion_model.set_dynamic_attention_oracle_step(
-                scheduler_index=(0, 1, 2, 6, 10, 13, 14, 15)[
+                scheduler_index=REAL_DIT_SCHEDULER_INDICES[
                     candidate_dynamic_budget_dit_index
                 ],
                 dit_index=candidate_dynamic_budget_dit_index,
                 scheduler_steps=16,
-                timestep=0,
+                timestep=candidate_diffusion_timestep,
             )
         sparse_samples, sparse_output = timed_forwards(
             diffusion_model,
@@ -604,6 +616,11 @@ def main() -> None:
         ),
         "dynamic_budget_dit_index": (
             candidate_dynamic_budget_dit_index
+            if args.dynamic_budget_table is not None
+            else None
+        ),
+        "dynamic_budget_diffusion_timestep": (
+            candidate_diffusion_timestep
             if args.dynamic_budget_table is not None
             else None
         ),
