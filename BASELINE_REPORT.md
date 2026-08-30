@@ -6,10 +6,9 @@ Date: 2026-08-30
 
 The released DreamZero-DROID checkpoint runs the embodied anchor-sparse path
 end to end with BF16 FlashAttention 2 and the same eight real DiT evaluations
-as the dense baseline. The current 12-request baseline is a valid single GPU
-orientation result, but it does **not** meet the paper performance gate and the
-reverse GPU orientation is still pending because an unrelated process twice
-allocated about 95 GiB on physical GPU 4 during the dense warmup request.
+as the dense baseline. A same-hardware control now runs both modes sequentially
+on physical GPUs 5--6 and confirms the original speedup, but the result does
+**not** meet the paper performance gate.
 
 No result from an OOM-affected run is included in the latency comparison.
 
@@ -21,7 +20,9 @@ No result from an OOM-affected run is included in the latency comparison.
 - checkpoint revision: `96ad344138c66e82536422432ad742f015784942`;
 - checkpoint integrity: all ten safetensor shards matched their Hugging Face
   LFS SHA-256 metadata;
-- server: H200 NVL, physical GPUs 2--5 only;
+- server: H200 NVL. Historical runs used physical GPUs 2--5; after GPU 4 became
+  occupied, the user explicitly reassigned the controlled baseline to GPUs
+  5--6. GPU 7 was not used;
 - environment: repository uv `.venv`, PyTorch BF16, FlashAttention 2, eager
   mode with `DREAMZERO_DISABLE_TORCH_COMPILE=true`;
 - inference parallelism: two ranks per server. DreamZero's CFG exchange is a
@@ -89,6 +90,38 @@ updates, the eight real DiT evaluations, scheduler work, action untransform,
 and WebSocket transport. It is an open-loop latency test, not a task-quality
 result.
 
+## Same-hardware control: dense 5--6, sparse 5--6
+
+To remove inter-GPU-group bias after physical GPU 4 became unavailable, dense
+and sparse were run sequentially on the exact same physical pair, GPUs 5--6.
+The table uses the hot repeat from each service; both retain the original two
+warmup plus twelve measured request protocol and seed.
+
+Raw files:
+
+- `e2e_server/20260830_gpu56/dense_gpu56_repeat.json`;
+- `e2e_server/20260830_gpu56_swap/sparse_gpu56_repeat.json`;
+- `e2e_server/20260830_gpu56_same_hardware.json`.
+
+| Metric | Dense | Sparse | Dense / sparse |
+| --- | ---: | ---: | ---: |
+| Mean | 1.8515 s | 1.5963 s | 1.1599x |
+| P50 | 1.8360 s | 1.6096 s | 1.1407x |
+| P90 | 1.9814 s | 1.6539 s | 1.1980x |
+
+Paired request statistics:
+
+- geometric-mean speedup: 1.1592x;
+- paired bootstrap 95% CI: [1.1342x, 1.1832x], 10,000 resamples;
+- sparse faster fraction: 12 / 12 (100%);
+- paired speedup range: 1.0928x--1.2242x.
+
+The first freshly loaded GPU-5--6 dense run contained three approximately
+2.45-second measured outliers and is retained separately rather than selected
+as the headline baseline. Using the hot repeat is consistent with steady-state
+serving and produces essentially the same conclusion as the original GPU-group
+result (1.160x versus 1.154x mean speedup).
+
 ## Reverse-orientation audit: dense 4--5, sparse 2--3
 
 Two reverse-orientation dense attempts were invalid. Immediately before each
@@ -104,6 +137,11 @@ Sparse-only reverse-orientation runs on uncontended GPUs 2--3 completed with
 means of 1.6361 s and 1.6128 s. They are retained as diagnostic artifacts but
 are not paired with dense data and therefore do not satisfy the GPU-swap gate.
 
+A later attempt to swap dense onto GPUs 2--3 was also invalidated when PID
+`1691604` began using 25.7 GiB and about 95% utilization on physical GPU 2.
+That process was not modified. The same-hardware GPU-5--6 control above is the
+authoritative hardware-bias check for this baseline phase.
+
 Artifacts are under
 `e2e_server/20260830_gpu_swap/`. Files with `preliminary` semantics or missing
 a complete dense pair must not be used in tables or claims.
@@ -112,11 +150,11 @@ a complete dense pair must not be used in tables or claims.
 
 | Requirement | Current result | Status |
 | --- | ---: | --- |
-| Mean end-to-end speedup >= 1.30x | 1.1539x | Fail |
-| P50 speedup >= 1.25x | 1.1280x | Fail |
-| Paired 95% CI lower bound > 1.15x | 1.1295x | Fail |
+| Mean end-to-end speedup >= 1.30x | 1.1599x | Fail |
+| P50 speedup >= 1.25x | 1.1407x | Fail |
+| Paired 95% CI lower bound > 1.15x | 1.1342x | Fail |
 | Sparse faster on >= 95% of requests | 100% | Pass |
-| Reverse GPU orientation | no valid dense pair | Pending |
+| Hardware-bias control | same physical GPUs 5--6 | Pass |
 | Full-budget output/cache exactness | exact | Pass |
 
 The baseline establishes a real but insufficient end-to-end gain. The next
