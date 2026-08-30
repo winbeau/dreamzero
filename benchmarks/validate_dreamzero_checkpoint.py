@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--propagate-radius", type=int, default=0)
     parser.add_argument("--propagate-every", type=int, default=1)
+    parser.add_argument("--propagate-radius-candidates", type=int, nargs="+")
+    parser.add_argument("--propagate-every-candidates", type=int, nargs="+")
     parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--current-attention",
@@ -348,6 +350,8 @@ def main() -> None:
     for name, candidates in (
         ("dense-prefix-layer-candidates", args.dense_prefix_layer_candidates),
         ("dense-suffix-layer-candidates", args.dense_suffix_layer_candidates),
+        ("propagate-radius-candidates", args.propagate_radius_candidates),
+        ("propagate-every-candidates", args.propagate_every_candidates),
     ):
         if candidates is not None and len(candidates) != len(args.keep_ratios):
             raise ValueError(f"{name} must align one-to-one with keep-ratios")
@@ -394,6 +398,16 @@ def main() -> None:
         args.dense_suffix_layer_candidates[candidate_index]
         if args.dense_suffix_layer_candidates is not None
         else args.dense_suffix_layers
+    )
+    candidate_propagate_radius = (
+        args.propagate_radius_candidates[candidate_index]
+        if args.propagate_radius_candidates is not None
+        else args.propagate_radius
+    )
+    candidate_propagate_every = (
+        args.propagate_every_candidates[candidate_index]
+        if args.propagate_every_candidates is not None
+        else args.propagate_every
     )
     dynamic_budget_table = (
         DynamicPackedBudgetTable.from_json(args.dynamic_budget_table)
@@ -493,8 +507,8 @@ def main() -> None:
             attention_query_keep_ratio=candidate_attention_query_keep_ratio,
             dense_prefix_layers=candidate_dense_prefix_layers,
             dense_suffix_layers=candidate_dense_suffix_layers,
-            propagate_radius=args.propagate_radius,
-            propagate_every=args.propagate_every,
+            propagate_radius=candidate_propagate_radius,
+            propagate_every=candidate_propagate_every,
             reuse_denoise=args.reuse_denoise,
             current_attention=args.current_attention,
             packed_middle=args.packed_middle,
@@ -520,6 +534,9 @@ def main() -> None:
             timing_inputs,
             warmup=args.warmup,
             repeats=args.repeats,
+        )
+        packed_propagation_boundaries = (
+            diffusion_model._anchor_sparse_last_packed_propagation_count
         )
         sparse_video, sparse_action, _ = sparse_output
         if args.update_kv_cache:
@@ -657,8 +674,8 @@ def main() -> None:
         "recent_dense_frames": recent_dense_frames,
         "dense_prefix_layers": candidate_dense_prefix_layers,
         "dense_suffix_layers": candidate_dense_suffix_layers,
-        "propagate_radius": args.propagate_radius,
-        "propagate_every": args.propagate_every,
+        "propagate_radius": candidate_propagate_radius,
+        "propagate_every": candidate_propagate_every,
         "reuse_denoise": args.reuse_denoise,
         "current_attention": args.current_attention,
         "packed_middle": args.packed_middle,
@@ -733,9 +750,7 @@ def main() -> None:
         "dynamic_head_group_history_ratios": dynamic_head_group_history_ratios,
         "dynamic_head_group_assignments": dynamic_head_group_assignments,
         "packed_propagation_boundaries": (
-            diffusion_model._anchor_sparse_last_packed_propagation_count
-            if args.packed_middle
-            else 0
+            packed_propagation_boundaries if args.packed_middle else 0
         ),
         "update_kv_cache": args.update_kv_cache,
         "dense_samples_ms": dense_samples,
