@@ -40,6 +40,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--propagate-radius", type=int, default=0)
     parser.add_argument("--propagate-every", type=int, default=1)
     parser.add_argument("--reuse-denoise", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        help="Optional artifact directory for dense and sparse CPU/CUDA traces.",
+    )
+    parser.add_argument("--profile-row-limit", type=int, default=200)
+    parser.add_argument(
+        "--profile-record-shapes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     return parser.parse_args()
 
 
@@ -142,6 +153,76 @@ def timed_forwards(
     return samples, last_output
 
 
+def _event_value(event: object, *names: str) -> float:
+    for name in names:
+        value = getattr(event, name, None)
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def profile_forward(
+    model: torch.nn.Module,
+    inputs: dict[str, object],
+    *,
+    output_prefix: Path,
+    row_limit: int,
+    record_shapes: bool,
+):
+    if row_limit <= 0:
+        raise ValueError("profile-row-limit must be positive")
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    torch.cuda.synchronize()
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=record_shapes,
+        profile_memory=False,
+        with_stack=False,
+    ) as profiler:
+        output = invoke(model, inputs)
+    torch.cuda.synchronize()
+
+    profiler.export_chrome_trace(str(output_prefix.with_suffix(".trace.json")))
+    averages = profiler.key_averages(group_by_input_shape=record_shapes)
+    table = averages.table(sort_by="self_cuda_time_total", row_limit=row_limit)
+    output_prefix.with_suffix(".table.txt").write_text(table + "\n")
+
+    events = []
+    for event in averages:
+        events.append(
+            {
+                "key": event.key,
+                "count": int(event.count),
+                "self_cpu_time_total_us": _event_value(event, "self_cpu_time_total"),
+                "cpu_time_total_us": _event_value(event, "cpu_time_total"),
+                "self_cuda_time_total_us": _event_value(
+                    event,
+                    "self_cuda_time_total",
+                    "self_device_time_total",
+                ),
+                "cuda_time_total_us": _event_value(
+                    event,
+                    "cuda_time_total",
+                    "device_time_total",
+                ),
+                "input_shapes": event.input_shapes if record_shapes else None,
+            }
+        )
+    events.sort(key=lambda event: event["self_cuda_time_total_us"], reverse=True)
+    summary = {
+        "sort": "self_cuda_time_total_us",
+        "record_shapes": record_shapes,
+        "events": events[:row_limit],
+    }
+    output_prefix.with_suffix(".summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n"
+    )
+    return output
+
+
 def relative_l2(reference: torch.Tensor, candidate: torch.Tensor) -> float:
     numerator = torch.linalg.vector_norm((candidate.float() - reference.float()).reshape(-1))
     denominator = torch.linalg.vector_norm(reference.float().reshape(-1)).clamp_min(1e-12)
@@ -203,6 +284,14 @@ def main() -> None:
             warmup=args.warmup,
             repeats=args.repeats,
         )
+        if args.profile_dir is not None:
+            profile_forward(
+                diffusion_model,
+                inputs,
+                output_prefix=args.profile_dir / f"rank{rank}_gpu{physical_gpu}_dense",
+                row_limit=args.profile_row_limit,
+                record_shapes=args.profile_record_shapes,
+            )
 
         diffusion_model.configure_anchor_sparse_attention(
             enabled=True,
@@ -242,6 +331,26 @@ def main() -> None:
             warmup=args.warmup,
             repeats=args.repeats,
         )
+        if args.profile_dir is not None:
+            diffusion_model.clear_anchor_sparse_route_cache()
+            profile_forward(
+                diffusion_model,
+                inputs,
+                output_prefix=(
+                    args.profile_dir / f"rank{rank}_gpu{physical_gpu}_sparse_cold_route"
+                ),
+                row_limit=args.profile_row_limit,
+                record_shapes=args.profile_record_shapes,
+            )
+            profile_forward(
+                diffusion_model,
+                inputs,
+                output_prefix=(
+                    args.profile_dir / f"rank{rank}_gpu{physical_gpu}_sparse_cached_route"
+                ),
+                row_limit=args.profile_row_limit,
+                record_shapes=args.profile_record_shapes,
+            )
         sparse_video, sparse_action, _ = sparse_output
         route = diffusion_model.get_last_anchor_route()
 
