@@ -405,3 +405,38 @@ The next gate is therefore:
 
 The aggressive and quality tables remain performance/structure ablations. No
 current dynamic table is promoted as the final M1 policy.
+
+## Full eight-DiT balanced-policy smoke
+
+The balanced table was then replayed through the real WebSocket policy path on
+three paired measured requests plus one warmup. Dense used physical GPUs 2--3
+and Sparse used 5--6. Both services retained all 16 scheduler steps and every
+request log reports exactly eight real DiT evaluations.
+
+| Metric | Dense | Balanced Sparse | Result |
+| --- | ---: | ---: | ---: |
+| client end-to-end mean | 2.0616 s | 1.5078 s | 1.367x |
+| server inference mean | 2.0507 s | 1.4940 s | 1.373x |
+| diffusion mean | 1.4800 s | 1.0767 s | 1.375x |
+| measured requests faster | -- | 3 / 3 | 100% |
+| action cosine | -- | mean 0.999634, min 0.999485 | pass |
+| action relative L2 | -- | mean 2.696%, max 3.292% | pass |
+
+This is the first full-trajectory evidence that the balanced late budget does
+not accumulate enough error to fail the action gate. It is still only a smoke
+test: three requests on one GPU assignment cannot establish the required
+confidence interval, task coverage, video quality, or closed-loop
+non-inferiority. The balanced table is promoted to the candidate for the
+larger paired run, not to the final policy.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/e2e/20260830_balanced_smoke/
+    dense.json
+    sparse.json
+    comparison.json
+    dense_log_summary.json
+    sparse_log_summary.json
+```

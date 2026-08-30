@@ -5,10 +5,10 @@ Date: 2026-08-30
 ## Status
 
 This report freezes the Dense and old per-layer gather/scatter sparse DiT
-baseline required before Dynamic Packed M2 work.  The fixed-budget Packed
-Middle Stack, dynamic M1/M2, 100-request server runs, GPU-group exchange, and
-closed-loop measurements are not complete and no final performance claim is
-made here.
+baseline required before Dynamic Packed M2 work and records the first complete
+eight-DiT Dynamic Packed M2 service smoke. The 100-request runs, GPU-group
+exchange, closed-loop measurements, and final confidence intervals are not
+complete, so no final performance claim is made here.
 
 ## Protocol invariant
 
@@ -84,3 +84,31 @@ CUDA_VISIBLE_DEVICES=2,3,5,6 DREAMZERO_DISABLE_TORCH_COMPILE=true \
 - raw baseline completed on GPUs 2/3/5/6;
 - the fixed Packed M2 row remains pending and must be added before stage 1 is
   considered complete.
+
+## Preliminary Dynamic Packed M2 service result
+
+The `timestep_segment_balanced` candidate was measured through the real
+WebSocket service with one warmup and three paired measured requests. Dense ran
+on GPUs 2--3 and Sparse on GPUs 5--6. The client inputs, seed, scheduler, and
+number of DiT calls were held fixed.
+
+| Metric | Dense | Sparse | Speedup |
+| --- | ---: | ---: | ---: |
+| client end-to-end mean | 2.0616 s | 1.5078 s | 1.367x |
+| client p50 | 1.8456 s | 1.4655 s | 1.259x |
+| client p90 | 2.3995 s | 1.6160 s | 1.485x |
+| server inference mean | 2.0507 s | 1.4940 s | 1.373x |
+| diffusion mean | 1.4800 s | 1.0767 s | 1.375x |
+
+All three measured pairs were faster under Sparse. The paired geometric mean
+speedup was 1.353x, with an intentionally non-claimable three-sample bootstrap
+95% interval of [1.089x, 1.732x]. Server logs record `DIT Compute Steps 8
+steps` for every warmup and measured request in both arms.
+
+The preliminary full-service mean clears the 1.35x target, but the Packed DiT
+target, 100-request sample size, three GPU exchanges, confidence lower bound,
+and 95%-faster-request gate remain open.
+
+Raw artifacts:
+
+`dynamic_m1_m2/e2e/20260830_balanced_smoke/`
