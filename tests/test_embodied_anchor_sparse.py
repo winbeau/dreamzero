@@ -8,6 +8,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     build_video_key_route,
     droid_composite_view_regions,
     gather_sequence_by_index,
+    propagate_spatial_anchor_updates,
     route_indices_to_spatial_mask,
     scatter_sequence_by_index,
     select_view_balanced_anchor_indices,
@@ -170,6 +171,36 @@ def test_batch_scatter_replaces_only_selected_positions() -> None:
                 assert torch.equal(scattered[batch, position], torch.full((3,), -1))
             else:
                 assert torch.equal(scattered[batch, position], sequence[batch, position])
+
+
+def test_anchor_update_propagation_preserves_anchors_and_camera_boundaries() -> None:
+    views = (
+        ViewRegion("left", 0, 2, 0, 2),
+        ViewRegion("right", 0, 2, 2, 4),
+    )
+    config = AnchorSparseConfig(
+        frame_seqlen=8,
+        grid_height=2,
+        grid_width=4,
+        keep_ratio=0.25,
+        recent_dense_frames=0,
+        smooth_radius=0,
+        views=views,
+    )
+    indices = torch.tensor([[0, 7]])
+    updates = torch.tensor([[[2.0], [8.0]]])
+    propagated = propagate_spatial_anchor_updates(
+        updates,
+        indices,
+        video_seq_len=8,
+        config=config,
+        radius=1,
+    )
+    assert propagated.shape == (1, 8, 1)
+    assert propagated[0, 0, 0] == 2.0
+    assert propagated[0, 7, 0] == 8.0
+    assert torch.equal(propagated[0, [0, 1, 4, 5], 0], torch.full((4,), 2.0))
+    assert torch.equal(propagated[0, [2, 3, 6, 7], 0], torch.full((4,), 8.0))
 
 
 def test_route_indices_convert_to_per_frame_spatial_mask() -> None:

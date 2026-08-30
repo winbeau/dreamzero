@@ -520,6 +520,109 @@ def scatter_sequence_by_index(
     return sequence.scatter(dim=1, index=expanded, src=updates)
 
 
+def propagate_spatial_anchor_updates(
+    anchor_updates: torch.Tensor,
+    anchor_indices: torch.Tensor,
+    *,
+    video_seq_len: int,
+    config: AnchorSparseConfig,
+    radius: int,
+) -> torch.Tensor:
+    """Interpolate anchor residuals to nearby patches within each camera view.
+
+    Selected anchors retain their exact update.  Unselected patches receive the
+    normalized mean of selected neighbors in a local window.  Camera regions
+    are processed independently, so residuals never bleed across the composite
+    image boundaries.
+    """
+
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+    if video_seq_len % config.frame_seqlen != 0:
+        raise ValueError("video_seq_len must contain complete frames")
+    if anchor_updates.ndim != 3 or anchor_indices.ndim != 2:
+        raise ValueError("anchor_updates and anchor_indices must be [B, K, C] and [B, K]")
+    if anchor_updates.shape[:2] != anchor_indices.shape:
+        raise ValueError("anchor_updates and anchor_indices shapes do not align")
+
+    batch, _, channels = anchor_updates.shape
+    num_frames = video_seq_len // config.frame_seqlen
+    flat_updates = anchor_updates.new_zeros((batch, video_seq_len, channels))
+    flat_updates = scatter_sequence_by_index(
+        flat_updates,
+        anchor_indices,
+        anchor_updates,
+        validate_indices=False,
+    )
+    flat_mask = anchor_updates.new_zeros((batch, video_seq_len, 1))
+    flat_mask = scatter_sequence_by_index(
+        flat_mask,
+        anchor_indices,
+        anchor_updates.new_ones((*anchor_indices.shape, 1)),
+        validate_indices=False,
+    )
+
+    grid_updates = flat_updates.reshape(
+        batch,
+        num_frames,
+        config.grid_height,
+        config.grid_width,
+        channels,
+    ).permute(0, 1, 4, 2, 3).reshape(
+        batch * num_frames,
+        channels,
+        config.grid_height,
+        config.grid_width,
+    )
+    grid_mask = flat_mask.reshape(
+        batch,
+        num_frames,
+        config.grid_height,
+        config.grid_width,
+        1,
+    ).permute(0, 1, 4, 2, 3).reshape(
+        batch * num_frames,
+        1,
+        config.grid_height,
+        config.grid_width,
+    )
+    propagated = torch.empty_like(grid_updates)
+    kernel = 2 * radius + 1
+    for view in config.resolved_views:
+        update_region = grid_updates[
+            ..., view.row_start : view.row_end, view.col_start : view.col_end
+        ]
+        mask_region = grid_mask[
+            ..., view.row_start : view.row_end, view.col_start : view.col_end
+        ]
+        numerator = F.avg_pool2d(
+            update_region,
+            kernel_size=kernel,
+            stride=1,
+            padding=radius,
+            count_include_pad=False,
+        )
+        denominator = F.avg_pool2d(
+            mask_region,
+            kernel_size=kernel,
+            stride=1,
+            padding=radius,
+            count_include_pad=False,
+        )
+        interpolated = numerator / denominator.clamp_min(1e-6)
+        propagated[
+            ..., view.row_start : view.row_end, view.col_start : view.col_end
+        ] = torch.where(mask_region.bool(), update_region, interpolated)
+
+    return propagated.reshape(
+        batch,
+        num_frames,
+        channels,
+        config.grid_height,
+        config.grid_width,
+    ).permute(0, 1, 3, 4, 2).reshape(batch, video_seq_len, channels)
+
+
 def route_indices_to_spatial_mask(
     video_indices: torch.Tensor,
     *,

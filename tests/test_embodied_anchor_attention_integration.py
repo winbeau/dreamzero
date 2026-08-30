@@ -267,6 +267,15 @@ def test_sparse_current_update_keeps_unselected_video_tokens_and_updates_registe
         e=e,
         current_video_indices=current_video_indices,
         action_register_length=3,
+        anchor_sparse_config=AnchorSparseConfig(
+            frame_seqlen=4,
+            grid_height=2,
+            grid_width=2,
+            keep_ratio=0.5,
+            recent_dense_frames=0,
+            smooth_radius=0,
+        ),
+        propagate_radius=0,
         update_fn=add_ten,
     )
 

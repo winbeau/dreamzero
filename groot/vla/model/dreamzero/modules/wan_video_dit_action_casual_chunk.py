@@ -7,6 +7,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     build_current_video_query_route,
     droid_composite_view_regions,
     gather_sequence_by_index,
+    propagate_spatial_anchor_updates,
     route_action_conditioned_video_keys,
     scatter_sequence_by_index,
 )
@@ -42,6 +43,8 @@ def sparse_current_token_update(
     e: tuple[torch.Tensor, ...],
     current_video_indices: torch.Tensor,
     action_register_length: int,
+    anchor_sparse_config: AnchorSparseConfig,
+    propagate_radius: int,
     update_fn,
 ) -> torch.Tensor:
     """Apply a token-wise block update to anchors plus all action/state tokens.
@@ -68,6 +71,25 @@ def sparse_current_token_update(
         for part in e
     )
     updated = update_fn(selected_x, selected_e)
+    if propagate_radius > 0:
+        selected_delta = updated - selected_x
+        num_anchor_tokens = current_video_indices.shape[1]
+        video_delta = propagate_spatial_anchor_updates(
+            selected_delta[:, :num_anchor_tokens],
+            current_video_indices,
+            video_seq_len=video_seq_len,
+            config=anchor_sparse_config,
+            radius=propagate_radius,
+        )
+        full_delta = x.new_zeros(x.shape)
+        full_delta[:, :video_seq_len] = video_delta
+        full_delta = scatter_sequence_by_index(
+            full_delta,
+            register_indices,
+            selected_delta[:, num_anchor_tokens:],
+            validate_indices=False,
+        )
+        return x + full_delta
     return scatter_sequence_by_index(
         x,
         compute_indices,
@@ -1230,6 +1252,7 @@ class CausalWanAttentionBlock(nn.Module):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.sparse_current_compute = False
+        self.current_propagate_radius = 0
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
@@ -1327,11 +1350,15 @@ class CausalWanAttentionBlock(nn.Module):
         if self.sparse_current_compute and current_video_indices is not None:
             if action_register_length is None:
                 raise ValueError("Sparse current-token compute requires action/state registers")
+            if self.self_attn.anchor_sparse_config is None:
+                raise RuntimeError("Sparse current-token compute requires an anchor config")
             x = sparse_current_token_update(
                 x=x,
                 e=e,
                 current_video_indices=current_video_indices,
                 action_register_length=action_register_length,
+                anchor_sparse_config=self.self_attn.anchor_sparse_config,
+                propagate_radius=self.current_propagate_radius,
                 update_fn=cross_attn_ffn,
             )
         else:
@@ -1429,6 +1456,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  anchor_sparse_current_keep_ratio=1.0,
                  anchor_sparse_dense_prefix_layers=1,
                  anchor_sparse_dense_suffix_layers=1,
+                 anchor_sparse_propagate_radius=0,
                  anchor_sparse_reuse_denoise=True,
                  anchor_sparse_record_diagnostics=False):
         r"""
@@ -1505,6 +1533,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_current_keep_ratio = anchor_sparse_current_keep_ratio
         self.anchor_sparse_dense_prefix_layers = anchor_sparse_dense_prefix_layers
         self.anchor_sparse_dense_suffix_layers = anchor_sparse_dense_suffix_layers
+        self.anchor_sparse_propagate_radius = anchor_sparse_propagate_radius
         self.anchor_sparse_reuse_denoise = anchor_sparse_reuse_denoise
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
 
@@ -1516,6 +1545,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("Current-token routing requires at least one dense prefix layer")
         if anchor_sparse_dense_prefix_layers + anchor_sparse_dense_suffix_layers > num_layers:
             raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
+        if anchor_sparse_propagate_radius < 0:
+            raise ValueError("anchor_sparse_propagate_radius must be non-negative")
 
         if anchor_sparse_enabled and frame_seqlen != 880:
             raise ValueError(
@@ -1609,6 +1640,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and anchor_sparse_current_keep_ratio < 1.0
                 and anchor_sparse_dense_prefix_layers <= block_index < sparse_end
             )
+            block.current_propagate_radius = anchor_sparse_propagate_radius
 
         # head
         self.head = CausalHead(dim, out_dim, patch_size, eps)
@@ -1656,6 +1688,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         current_keep_ratio: float = 1.0,
         dense_prefix_layers: int = 1,
         dense_suffix_layers: int = 1,
+        propagate_radius: int = 0,
         reuse_denoise: bool = True,
         record_diagnostics: bool = False,
     ) -> None:
@@ -1680,6 +1713,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise ValueError("Current-token routing requires at least one dense prefix layer")
         if dense_prefix_layers + dense_suffix_layers > len(self.blocks):
             raise ValueError("Dense prefix/suffix layers exceed the transformer depth")
+        if propagate_radius < 0:
+            raise ValueError("propagate_radius must be non-negative")
         config = None
         if enabled:
             config = AnchorSparseConfig(
@@ -1699,6 +1734,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_current_keep_ratio = current_keep_ratio
         self.anchor_sparse_dense_prefix_layers = dense_prefix_layers
         self.anchor_sparse_dense_suffix_layers = dense_suffix_layers
+        self.anchor_sparse_propagate_radius = propagate_radius
         self.anchor_sparse_reuse_denoise = reuse_denoise
         self.anchor_sparse_record_diagnostics = record_diagnostics
         sparse_end = len(self.blocks) - dense_suffix_layers
@@ -1714,6 +1750,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 and current_keep_ratio < 1.0
                 and dense_prefix_layers <= block_index < sparse_end
             )
+            block.current_propagate_radius = propagate_radius
         self.clear_anchor_sparse_route_cache()
 
     def get_last_anchor_route(self) -> AnchorRoute | None:
