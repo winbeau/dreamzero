@@ -550,6 +550,7 @@ class VLA(PreTrainedModel):
         with open(config_path, "r") as f:
             config_dict = json.load(f)
         config = VLAConfig(**config_dict)
+        _mark_full_checkpoint_component_loading(config.action_head_cfg)
         print("loading model")
         print("config.action_head_cfg", config.action_head_cfg)
         # Always disable defer_lora_injection
