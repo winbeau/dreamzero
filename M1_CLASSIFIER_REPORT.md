@@ -525,3 +525,6 @@ dynamic_m1_m2/request_gate/20260831_shared_h50q50_proxy_v2_episode_cv/
 dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_train72/
 dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_test18/
 ```
+
+Stage report commit: `de92d03` (pushed to
+`origin/codex/dreamzero-anchor-sparse-opt`).
