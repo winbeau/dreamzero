@@ -283,3 +283,34 @@ the required eight DiT evaluations.  Because wider interpolation repairs video
 without repairing the action registers, further M2 recovery must operate on
 action-sensitive packed state within the segment rather than on the final
 spatial field alone.
+
+## Scheduled maximum-current K/V readout
+
+Packed M2 now contains a bounded experiment for action/state queries to read
+the maximum prepacked current-video K/V prefix while all video-token compute
+stays at the active nested prefix. The implementation projects the extra K/V
+only when the scheduled layer has a maximum prefix longer than its active
+prefix. Original-position RoPE is used, head-group execution is rejected for
+this path, and an optional 8-DiT by 40-layer boolean table controls the call.
+Full-budget video, action, and every returned KV cache remain exactly equal to
+Dense on both real H200 ranks. Commit `bd28485` passes 45 focused H200 tests.
+
+The executor experiment also exposes a state-validity limit. Maximum-prefix
+tokens are freshly repacked at layers 1, 6, 11, and subsequent segment
+entries, but tokens outside the active prefix skip the intervening blocks.
+Using those stale tail tokens at segment exits raises checkpoint action
+relative L2 from 1.849% to 1.933%; enabling the readout throughout the packed
+middle raises it to 2.147%. Restricting it to the eight fresh segment entries
+reaches 1.845%, only a 0.21% relative improvement over no readout.
+
+The exchanged entry/exit rounds measure virtually identical geometric-mean
+DiT speedups of 1.26235x and 1.26225x. Timing against a separately loaded
+`none` run is dominated by first-use compilation and run drift, so no speed
+benefit is claimed. The mechanism remains implemented for reproducibility,
+but it is rejected as a recovery path: a maximum packed allocation is not a
+valid hidden-state substitute unless every exposed token has traversed the
+same intervening layers.
+
+Artifact:
+
+`dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/`

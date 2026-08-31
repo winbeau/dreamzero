@@ -40,6 +40,9 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | propagation radius 2/every 3 | checkpoint video L2 8.830%; 1.226x | frequency increase ineffective |
 | propagation radius 3/every 5 | checkpoint video L2 4.233%; 1.272x | strong local video recovery |
 | radius 3/every 5 validation18 | 1.516x; action L2 9.553%; 0/18 safe | reject global propagation |
+| max current K/V at segment entries | action L2 1.849% -> 1.845%; 1.262x exchanged geomean | negligible gain; reject |
+| max current K/V at segment exits | action L2 1.933% | stale inactive state; reject |
+| max current K/V at all packed layers | action L2 2.147% | stale-readout negative ablation |
 
 ## Required remaining ablations
 
@@ -50,7 +53,8 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 - GMM versus supervised M1 on final executor labels;
 - random, uniform, action-anchor, and Oracle routes;
 - no extrapolation versus late-step VV extrapolation with sentinel;
-- within-segment action-sensitive recovery choices;
+- within-segment action-sensitive recovery that updates token state rather
+  than exposing a stale maximum-prefix readout;
 - 100 paired requests, three GPU exchanges, and closed-loop success.
 
 ## Artifact roots

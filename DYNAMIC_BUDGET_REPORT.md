@@ -737,3 +737,52 @@ Artifacts:
 dynamic_m1_m2/dynamic_budgets/20260831_propagation_recovery/
 dynamic_m1_m2/e2e/20260831_balanced_r3e5_validation18/
 ```
+
+## Dynamic maximum-current action readout
+
+Commit `bd28485` adds an optional fixed 8x40 schedule for a narrower
+action-sensitive recovery experiment. At an enabled cell, only the 25
+action/state queries read K/V from the maximum already-packed current-video
+prefix. Video queries, current Q/O, cross-attention, and FFN retain the active
+layer prefix, so this does not scatter the middle state or restore full-token
+compute. The schedule generator separates propagation-segment entries
+`{1,6,11,16,21,26,31,36}` from exits
+`{5,10,15,20,25,30,35,38}` for radius-two/every-five Packed M2.
+
+Two H200 checkpoint rounds exchanged the entry and exit candidates across
+GPUs 0 and 1. A same-commit two-GPU `none` run reproduced the original quality
+exactly:
+
+| Maximum-current cells | Action cosine | Action rel-L2 | Video cosine | Video rel-L2 |
+| --- | ---: | ---: | ---: | ---: |
+| none | 0.99983209 | 1.84871% | 0.99616599 | 8.75774% |
+| segment entries | 0.99983412 | 1.84485% | 0.99617040 | 8.75309% |
+| segment exits | 0.99982333 | 1.93281% | 0.99616808 | 8.75578% |
+| all packed layers | 0.99978894 | 2.14739% | 0.99616653 | 8.75699% |
+
+The same schedule produces bit-identical quality metrics after the GPU swap.
+Fresh segment-entry readout improves action relative L2 by only 0.00387
+percentage points, or 0.21% relative. Reading the under-updated maximum prefix
+at segment exits worsens action L2 by 4.55% relative, and enabling it in all
+packed layers worsens L2 by 16.16%. This directly verifies that dormant
+maximum-prefix tokens become stale inside a propagation segment.
+
+The entry and exit candidates have essentially identical exchanged-round
+geometric-mean checkpoint speedups, 1.26235x and 1.26225x. Independent `none`
+timing is too noisy to infer a sub-millisecond overhead: each rank has a large
+first-use compilation sample and substantial run-to-run drift. Since the only
+reproducible quality gain is 0.21% relative and the accumulated validation
+failure is orders of magnitude larger, maximum-current action readout is
+retained as a negative ablation and is not promoted to validation18 or the
+dynamic policy.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/
+  checkpoint_balanced_gpu01/
+  checkpoint_segment_entries_vs_exits_gpu01_bd28485/
+  checkpoint_segment_exits_vs_entries_swap_gpu01_bd28485/
+  checkpoint_none_both_gpu01_bd28485/
+  tables/
+```

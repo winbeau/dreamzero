@@ -199,3 +199,33 @@ requests.  Its worst request is again
 video tensor substantially closer to Dense while the action registers retain
 earlier packed-state error.  Radius three is therefore rejected as a global
 quality policy despite its strong checkpoint video row.
+
+## Maximum-current action-readout quality gate
+
+The maximum packed current prefix was tested as an extra K/V source for only
+the 25 action/state queries. Identical schedules produce exactly the same
+quality numbers after exchanging GPUs, so the comparison is deterministic:
+
+| Schedule | Action cosine | Action rel-L2 | Change from none |
+| --- | ---: | ---: | ---: |
+| none | 0.99983209 | 1.84871% | -- |
+| segment entries | 0.99983412 | 1.84485% | -0.00387 pp |
+| segment exits | 0.99982333 | 1.93281% | +0.08410 pp |
+| all packed layers | 0.99978894 | 2.14739% | +0.29868 pp |
+
+Video relative L2 remains between 8.753% and 8.758% for all rows, confirming
+that the intervention is restricted to the action readout. The sign changes
+with hidden-state freshness: segment-entry tokens were just recovered and
+repacked, while inactive tail tokens at an exit have skipped up to four
+Transformer blocks. The latter are not valid current features even though
+their storage remains allocated.
+
+The best row improves action L2 by only 0.21% relative, far below the roughly
+9% mean and 18--20% tail errors observed in complete validation trajectories.
+It is therefore rejected before validation18. Dynamic M1 may not use stale
+maximum-prefix visibility as confidence fallback; any future within-segment
+recovery must update the exposed token state or select the exact Dense path.
+
+Artifact:
+
+`dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/`

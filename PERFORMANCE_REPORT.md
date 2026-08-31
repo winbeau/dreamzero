@@ -276,3 +276,34 @@ action-sensitive recovery path passes quality.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_balanced_r3e5_validation18/`
+
+## Maximum-current action-readout performance gate
+
+The scheduled maximum-current experiment was run twice with segment-entry and
+segment-exit candidates exchanged across auxiliary GPUs 0 and 1. Each rank
+uses the same balanced 8x40 budget, radius two/every five propagation, suffix
+one, five recorded forwards after two warmups, and no KV-cache update.
+
+| Candidate | GPU0 speedup | GPU1 speedup | Exchanged geomean |
+| --- | ---: | ---: | ---: |
+| segment entries | 1.298x | 1.228x | 1.26235x |
+| segment exits | 1.278x | 1.247x | 1.26225x |
+
+The order reversal confirms a stable GPU throughput difference and removes
+the apparent first-round advantage of the entry schedule. Both candidates
+perform eight extra 25-query current-K/V readouts and have indistinguishable
+aggregate speed. A same-commit two-rank `none` control measures 1.285x and
+1.127x, but is not used to claim negative overhead because independent loads
+show large first-use compilation samples and material p50 drift. Extra K/V
+projection cannot logically accelerate the executor; a longer within-process
+timing design would be required to resolve its small cost.
+
+The entry schedule is not promoted to end-to-end validation because its only
+reproducible quality improvement is 0.00387 action-L2 percentage points. The
+global trajectory error remains approximately 9%, so spending a validation18
+run on this readout cannot change the quality gate or the main performance
+claim.
+
+Artifact:
+
+`dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/`
