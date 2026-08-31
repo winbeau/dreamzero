@@ -18,6 +18,10 @@ from benchmarks.benchmark_downstream_head_sensitivity_grid_droid import (
     load_candidates,
     summarize_candidate_records,
 )
+from benchmarks.analyze_downstream_oracle_alignment import (
+    average_tie_ranks,
+    finite_correlation,
+)
 from benchmarks.compare_dreamzero_server_e2e import compare_reports
 from benchmarks.summarize_dreamzero_server_log import summarize_log
 
@@ -181,6 +185,22 @@ def test_downstream_grid_summary_records_worst_and_stage_means() -> None:
         "early": pytest.approx(0.04),
         "late": pytest.approx(0.01),
     }
+
+
+def test_downstream_alignment_correlations_handle_ties() -> None:
+    np.testing.assert_array_equal(
+        average_tie_ranks(np.asarray([2.0, 1.0, 2.0, 4.0])),
+        np.asarray([1.5, 0.0, 1.5, 3.0]),
+    )
+    assert finite_correlation([1.0, 2.0, 3.0], [3.0, 2.0, 1.0]) == pytest.approx(
+        -1.0
+    )
+    assert finite_correlation(
+        [1.0, 1.0, 2.0],
+        [4.0, 4.0, 5.0],
+        rank=True,
+    ) == pytest.approx(1.0)
+    assert finite_correlation([1.0, 1.0], [2.0, 3.0]) is None
 
 
 def test_summarize_rejects_empty_input():
