@@ -139,6 +139,16 @@ def parse_args() -> argparse.Namespace:
             "keep-ratios."
         ),
     )
+    parser.add_argument("--dynamic-max-action-current-table", type=Path)
+    parser.add_argument(
+        "--dynamic-max-action-current-table-candidates",
+        type=Path,
+        nargs="+",
+        help=(
+            "Optional per-rank 8x40 maximum action-current K/V schedules aligned "
+            "with keep-ratios."
+        ),
+    )
     parser.add_argument("--dynamic-budget-dit-index", type=int, default=0)
     parser.add_argument(
         "--dynamic-budget-dit-indices",
@@ -457,6 +467,45 @@ def main() -> None:
         raise ValueError(
             "Dynamic action-history tables require dense-action-history to be enabled"
         )
+    if (
+        args.dynamic_max_action_current_table is not None
+        and not args.packed_middle
+    ):
+        raise ValueError(
+            "Dynamic max-action-current tables require --packed-middle"
+        )
+    if (
+        args.dynamic_max_action_current_table_candidates is not None
+        and not args.packed_middle
+    ):
+        raise ValueError(
+            "Dynamic max-action-current table candidates require --packed-middle"
+        )
+    if (
+        args.dynamic_max_action_current_table is not None
+        and args.dynamic_max_action_current_table_candidates is not None
+    ):
+        raise ValueError(
+            "Use either dynamic-max-action-current-table or its candidates"
+        )
+    if (
+        args.dynamic_max_action_current_table_candidates is not None
+        and len(args.dynamic_max_action_current_table_candidates)
+        != len(args.keep_ratios)
+    ):
+        raise ValueError(
+            "dynamic-max-action-current-table-candidates must align with keep-ratios"
+        )
+    if (
+        args.dynamic_max_action_current_table is not None
+        or args.dynamic_max_action_current_table_candidates is not None
+    ) and not (
+        args.max_action_current
+        or args.max_action_current_candidates is not None
+    ):
+        raise ValueError(
+            "Dynamic max-action-current tables require max-action-current to be enabled"
+        )
     if not 0 <= args.dynamic_budget_dit_index < 8:
         raise ValueError("dynamic-budget-dit-index must lie in [0, 7]")
     if (
@@ -467,6 +516,8 @@ def main() -> None:
         and args.dynamic_head_group_budget_table_candidates is None
         and args.dynamic_action_history_table is None
         and args.dynamic_action_history_table_candidates is None
+        and args.dynamic_max_action_current_table is None
+        and args.dynamic_max_action_current_table_candidates is None
     ):
         raise ValueError(
             "dynamic-budget-dit-indices requires a dynamic budget table"
@@ -592,10 +643,30 @@ def main() -> None:
         if candidate_dynamic_action_history_table_path is not None
         else None
     )
+    candidate_dynamic_max_action_current_table_path = (
+        args.dynamic_max_action_current_table_candidates[candidate_index]
+        if args.dynamic_max_action_current_table_candidates is not None
+        else args.dynamic_max_action_current_table
+    )
+    if (
+        candidate_dynamic_max_action_current_table_path is not None
+        and not candidate_max_action_current
+    ):
+        raise ValueError(
+            "Each dynamic max-action-current table requires its candidate flag to be enabled"
+        )
+    dynamic_max_action_current_table = (
+        DynamicDenseActionHistoryTable.from_json(
+            candidate_dynamic_max_action_current_table_path
+        )
+        if candidate_dynamic_max_action_current_table_path is not None
+        else None
+    )
     dynamic_budget_active = (
         dynamic_budget_table is not None
         or dynamic_head_group_budget_table is not None
         or dynamic_action_history_table is not None
+        or dynamic_max_action_current_table is not None
     )
     candidate_dynamic_budget_dit_index = (
         args.dynamic_budget_dit_indices[candidate_index]
@@ -697,6 +768,10 @@ def main() -> None:
         if dynamic_action_history_table is not None:
             diffusion_model.configure_dynamic_dense_action_history_table(
                 dynamic_action_history_table
+            )
+        if dynamic_max_action_current_table is not None:
+            diffusion_model.configure_dynamic_max_action_current_table(
+                dynamic_max_action_current_table
             )
         if dynamic_budget_active:
             diffusion_model.set_dynamic_attention_oracle_step(
@@ -899,6 +974,11 @@ def main() -> None:
             if candidate_dynamic_action_history_table_path is not None
             else None
         ),
+        "dynamic_max_action_current_table": (
+            str(candidate_dynamic_max_action_current_table_path)
+            if candidate_dynamic_max_action_current_table_path is not None
+            else None
+        ),
         "dynamic_budget_dit_index": (
             candidate_dynamic_budget_dit_index
             if dynamic_budget_active
@@ -917,6 +997,11 @@ def main() -> None:
             if dynamic_action_history_table is not None
             else None
         ),
+        "dynamic_max_action_current_table_name": (
+            dynamic_max_action_current_table.name
+            if dynamic_max_action_current_table is not None
+            else None
+        ),
         "dynamic_action_history_enabled_layers": (
             [
                 layer_index
@@ -927,6 +1012,18 @@ def main() -> None:
                 )
             ]
             if dynamic_action_history_table is not None
+            else []
+        ),
+        "dynamic_max_action_current_enabled_layers": (
+            [
+                layer_index
+                for layer_index in range(dynamic_max_action_current_table.num_layers)
+                if dynamic_max_action_current_table.enabled(
+                    candidate_dynamic_budget_dit_index,
+                    layer_index,
+                )
+            ]
+            if dynamic_max_action_current_table is not None
             else []
         ),
         "dynamic_middle_layers": dynamic_middle_layers,

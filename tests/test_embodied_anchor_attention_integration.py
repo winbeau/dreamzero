@@ -1048,6 +1048,13 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         name="late-dit-late-layer",
     )
     model.configure_dynamic_dense_action_history_table(action_history_table)
+    max_action_current_table = DynamicDenseActionHistoryTable(
+        enabled_cells=tuple(
+            ((False, dit_index < 4)) for dit_index in range(8)
+        ),
+        name="early-dit-late-layer",
+    )
+    model.configure_dynamic_max_action_current_table(max_action_current_table)
     model.set_dynamic_attention_oracle_step(
         scheduler_index=1,
         dit_index=1,
@@ -1055,6 +1062,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         timestep=986,
     )
     assert not model._packed_dense_action_history_for_layer(1)
+    assert model._packed_max_action_current_for_layer(1)
     model.set_dynamic_attention_oracle_step(
         scheduler_index=10,
         dit_index=4,
@@ -1062,6 +1070,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         timestep=749,
     )
     assert model._packed_dense_action_history_for_layer(1)
+    assert not model._packed_max_action_current_for_layer(1)
 
     model.configure_anchor_sparse_attention(
         enabled=True,
@@ -1073,6 +1082,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model._dynamic_packed_budget_table is None
     assert model._dynamic_packed_head_group_budget_table is None
     assert model._dynamic_dense_action_history_table is None
+    assert model._dynamic_max_action_current_table is None
     assert not model.anchor_sparse_max_action_current
     assert not any(block.self_attn.record_anchor_diagnostics for block in model.blocks)
 

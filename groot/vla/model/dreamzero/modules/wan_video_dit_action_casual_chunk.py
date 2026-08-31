@@ -2719,6 +2719,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_dense_action_history_table: (
             DynamicDenseActionHistoryTable | None
         ) = None
+        self._dynamic_max_action_current_table: (
+            DynamicDenseActionHistoryTable | None
+        ) = None
         self._dynamic_sparse_dit_index: int | None = None
         self._dynamic_sparse_scheduler_index: int | None = None
         self._dynamic_sparse_scheduler_steps: int | None = None
@@ -3087,8 +3090,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             self._dynamic_packed_budget_table = None
             self._dynamic_packed_head_group_budget_table = None
             self._dynamic_dense_action_history_table = None
+            self._dynamic_max_action_current_table = None
         elif not self.anchor_sparse_dense_action_history:
             self._dynamic_dense_action_history_table = None
+        if packed_middle_active and not self.anchor_sparse_max_action_current:
+            self._dynamic_max_action_current_table = None
         sparse_end = len(self.blocks) - dense_suffix_layers
         block_config = config
         if packed_middle_active and block_config is not None:
@@ -3236,6 +3242,47 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if self._dynamic_sparse_dit_index is None:
             raise RuntimeError(
                 "Dynamic action-history table is active before the real DiT index was set"
+            )
+        return table.enabled(self._dynamic_sparse_dit_index, layer_index)
+
+    def configure_dynamic_max_action_current_table(
+        self,
+        table: DynamicDenseActionHistoryTable | None,
+    ) -> None:
+        """Attach an eight-DiT by layer maximum-current action K/V schedule."""
+
+        if table is not None:
+            if not self.anchor_sparse_packed_middle:
+                raise ValueError(
+                    "Dynamic maximum action-current K/V requires Packed Middle Stack"
+                )
+            if not self.anchor_sparse_max_action_current:
+                raise ValueError(
+                    "Enable max_action_current before attaching its dynamic table"
+                )
+            if table.num_dit_steps != 8:
+                raise ValueError(
+                    "DreamZero max-action-current schedules must cover exactly 8 DiT evaluations"
+                )
+            if table.num_layers != len(self.blocks):
+                raise ValueError(
+                    "Dynamic max-action-current layer count differs from model depth"
+                )
+            if self._dynamic_packed_head_group_budget_table is not None:
+                raise ValueError(
+                    "Dynamic max-action-current K/V requires one shared head group"
+                )
+        self._dynamic_max_action_current_table = table
+
+    def _packed_max_action_current_for_layer(self, layer_index: int) -> bool:
+        if not self.anchor_sparse_max_action_current:
+            return False
+        table = self._dynamic_max_action_current_table
+        if table is None:
+            return True
+        if self._dynamic_sparse_dit_index is None:
+            raise RuntimeError(
+                "Dynamic max-action-current table is active before the real DiT index was set"
             )
         return table.enabled(self._dynamic_sparse_dit_index, layer_index)
 
@@ -3959,6 +4006,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 active_length = packed_state.active_length(packed_current_video_tokens)
                 block.self_attn.packed_dense_action_history = (
                     self._packed_dense_action_history_for_layer(block_index)
+                )
+                block.self_attn.packed_max_action_current = (
+                    self._packed_max_action_current_for_layer(block_index)
                 )
                 max_action_current_active = (
                     block.self_attn.packed_max_action_current
