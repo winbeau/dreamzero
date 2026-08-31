@@ -605,14 +605,31 @@ def train_shared_gate(args: argparse.Namespace) -> dict[str, Any]:
             args.output_dir / f"{split}_labels_and_features.parquet", index=False
         )
     selected_result = model_results[selected]
-    passed = bool(
-        selected_result["validation"]["false_sparse_rate"]
+    safety_gates_passed = bool(
+        selected_result["train_episode_cross_validation"]["false_sparse_rate"]
+        < args.false_sparse_limit
+        and selected_result["train_episode_cross_validation"][
+            "folds_with_false_sparse"
+        ]
+        == 0
+        and selected_result["validation"]["false_sparse_rate"]
         < args.false_sparse_limit
         and selected_result["test"]["false_sparse_rate"]
         < args.false_sparse_limit
         and selected_result["validation_realized"]["quality_failure_count"] == 0
         and selected_result["test_realized"]["quality_failure_count"] == 0
     )
+    performance_gates_passed = bool(
+        selected_result["validation_realized"]["mixed_e2e_speedup"]
+        >= args.minimum_mixed_speedup
+        and selected_result["test_realized"]["mixed_e2e_speedup"]
+        >= args.minimum_mixed_speedup
+        and selected_result["validation_realized"]["strictly_faster_fraction"]
+        >= args.minimum_strictly_faster_fraction
+        and selected_result["test_realized"]["strictly_faster_fraction"]
+        >= args.minimum_strictly_faster_fraction
+    )
+    passed = safety_gates_passed and performance_gates_passed
     summary = {
         "selected_model": selected,
         "feature_columns": list(SHARED_GATE_FEATURE_COLUMNS),
@@ -627,12 +644,22 @@ def train_shared_gate(args: argparse.Namespace) -> dict[str, Any]:
         },
         "underprediction_cost": args.underprediction_cost,
         "false_sparse_limit": args.false_sparse_limit,
+        "minimum_mixed_speedup": args.minimum_mixed_speedup,
+        "minimum_strictly_faster_fraction": (
+            args.minimum_strictly_faster_fraction
+        ),
         "models": model_results,
+        "safety_gates_passed": safety_gates_passed,
+        "performance_gates_passed": performance_gates_passed,
         "passed": passed,
         "reason": (
-            "all held-out false-sparse and final-action gates passed"
+            "all safety and performance gates passed"
             if passed
-            else "shared promotion gate remains a diagnostic candidate"
+            else (
+                "shared promotion gate failed episode-level safety"
+                if not safety_gates_passed
+                else "shared promotion gate is safe but misses performance targets"
+            )
         ),
     }
     (args.output_dir / "summary.json").write_text(
@@ -657,9 +684,19 @@ def main() -> None:
     parser.add_argument("--relative-l2-threshold", type=float, default=0.05)
     parser.add_argument("--false-sparse-limit", type=float, default=0.01)
     parser.add_argument("--underprediction-cost", type=float, default=50.0)
+    parser.add_argument("--minimum-mixed-speedup", type=float, default=1.35)
+    parser.add_argument(
+        "--minimum-strictly-faster-fraction",
+        type=float,
+        default=0.95,
+    )
     args = parser.parse_args()
     if args.underprediction_cost <= 1.0:
         parser.error("--underprediction-cost must exceed one")
+    if args.minimum_mixed_speedup <= 1.0:
+        parser.error("--minimum-mixed-speedup must exceed one")
+    if not 0.0 < args.minimum_strictly_faster_fraction <= 1.0:
+        parser.error("--minimum-strictly-faster-fraction must lie in (0, 1]")
     summary = train_shared_gate(args)
     print(json.dumps(summary, indent=2))
 
