@@ -344,6 +344,16 @@ class CausalWanSelfAttention(nn.Module):
         self._packed_head_channel_index_cache: dict[
             tuple[tuple[int, ...], str, int | None], torch.Tensor
         ] = {}
+        self._packed_head_projection_weight_cache: dict[
+            tuple[tuple[int, ...], str, int | None, torch.dtype],
+            tuple[
+                torch.Tensor,
+                torch.Tensor | None,
+                torch.Tensor | None,
+                torch.Tensor | None,
+                torch.Tensor,
+            ],
+        ] = {}
         self._packed_query_position_cache: dict[
             tuple[int, int, int, str, int | None], torch.Tensor
         ] = {}
@@ -448,37 +458,112 @@ class CausalWanSelfAttention(nn.Module):
             self._packed_head_channel_index_cache[cache_key] = cached
         return cached
 
-    @staticmethod
-    def _project_packed_head_group(
-        x: torch.Tensor,
-        projection: nn.Linear,
+    def _packed_head_projection_weights(
+        self,
+        heads: tuple[int, ...],
         channel_indices: torch.Tensor,
-        norm: nn.Module | None = None,
-    ) -> torch.Tensor:
-        """Project only the output channels owned by one packed head group.
+        dtype: torch.dtype,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+    ]:
+        """Prepack fused QKV rows and O columns for a stable M1 head class."""
+
+        cache_key = (
+            heads,
+            channel_indices.device.type,
+            channel_indices.device.index,
+            dtype,
+        )
+        use_cache = not torch.is_grad_enabled()
+        if use_cache:
+            cached = self._packed_head_projection_weight_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        q_weight = self.q.weight.index_select(0, channel_indices)
+        k_weight = self.k.weight.index_select(0, channel_indices)
+        v_weight = self.v.weight.index_select(0, channel_indices)
+        qkv_weight = torch.cat((q_weight, k_weight, v_weight), dim=0).contiguous()
+        qkv_bias = None
+        if self.q.bias is not None:
+            assert self.k.bias is not None and self.v.bias is not None
+            qkv_bias = torch.cat(
+                (
+                    self.q.bias.index_select(0, channel_indices),
+                    self.k.bias.index_select(0, channel_indices),
+                    self.v.bias.index_select(0, channel_indices),
+                ),
+                dim=0,
+            ).contiguous()
+        q_norm_weight = (
+            self.norm_q.weight.index_select(0, channel_indices).contiguous()
+            if isinstance(self.norm_q, WanRMSNorm)
+            else None
+        )
+        k_norm_weight = (
+            self.norm_k.weight.index_select(0, channel_indices).contiguous()
+            if isinstance(self.norm_k, WanRMSNorm)
+            else None
+        )
+        output_weight = self.o.weight.index_select(
+            1,
+            channel_indices,
+        ).contiguous()
+        packed = (
+            qkv_weight,
+            qkv_bias,
+            q_norm_weight,
+            k_norm_weight,
+            output_weight,
+        )
+        if use_cache:
+            packed = tuple(
+                value.detach() if value is not None else None
+                for value in packed
+            )
+            self._packed_head_projection_weight_cache[cache_key] = packed
+        return packed
+
+    def _project_packed_qkv_head_group(
+        self,
+        x: torch.Tensor,
+        heads: tuple[int, ...],
+        channel_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run one fused QKV GEMM for the video tokens of a head group.
 
         Video Q/K normalization uses the group's channels as an unbiased
         estimate of the full-width RMS. Dense action/state registers take the
         exact full-width projection path separately.
         """
 
-        projected = F.linear(
-            x,
-            projection.weight.index_select(0, channel_indices),
-            (
-                projection.bias.index_select(0, channel_indices)
-                if projection.bias is not None
-                else None
-            ),
+        (
+            qkv_weight,
+            qkv_bias,
+            q_norm_weight,
+            k_norm_weight,
+            output_weight,
+        ) = self._packed_head_projection_weights(
+            heads,
+            channel_indices,
+            x.dtype,
         )
-        if norm is None or isinstance(norm, nn.Identity):
-            return projected
-        if not isinstance(norm, WanRMSNorm):
-            raise TypeError(
-                "Packed head-sliced Q/K projection only supports WanRMSNorm"
-            )
-        normalized = norm._norm(projected.float()).type_as(projected)
-        return normalized * norm.weight.index_select(0, channel_indices)
+        qkv = F.linear(
+            x,
+            qkv_weight,
+            qkv_bias,
+        )
+        group_dim = channel_indices.numel()
+        query, key, value = qkv.split(group_dim, dim=-1)
+        if q_norm_weight is not None:
+            query = self.norm_q._norm(query.float()).type_as(query) * q_norm_weight
+        if k_norm_weight is not None:
+            key = self.norm_k._norm(key.float()).type_as(key) * k_norm_weight
+        return query, key, value, output_weight
 
     def _forward_packed_current_head_groups(
         self,
@@ -555,23 +640,34 @@ class CausalWanSelfAttention(nn.Module):
             ]
             group_head_count = len(group_heads)
 
-            video_query = self._project_packed_head_group(
+            (
+                video_query,
+                video_key,
+                video_value,
+                group_output_weight,
+            ) = self._project_packed_qkv_head_group(
                 group_video_x,
-                self.q,
+                group_heads,
                 channel_indices,
-                self.norm_q,
-            ).view(batch, group_video_tokens, group_head_count, self.head_dim)
-            video_key = self._project_packed_head_group(
-                group_video_x,
-                self.k,
-                channel_indices,
-                self.norm_k,
-            ).view(batch, group_video_tokens, group_head_count, self.head_dim)
-            video_value = self._project_packed_head_group(
-                group_video_x,
-                self.v,
-                channel_indices,
-            ).view(batch, group_video_tokens, group_head_count, self.head_dim)
+            )
+            video_query = video_query.view(
+                batch,
+                group_video_tokens,
+                group_head_count,
+                self.head_dim,
+            )
+            video_key = video_key.view(
+                batch,
+                group_video_tokens,
+                group_head_count,
+                self.head_dim,
+            )
+            video_value = video_value.view(
+                batch,
+                group_video_tokens,
+                group_head_count,
+                self.head_dim,
+            )
             video_query = apply_packed_rope(
                 video_query,
                 group_video_freqs,
@@ -640,7 +736,7 @@ class CausalWanSelfAttention(nn.Module):
             )
             group_output_projection = F.linear(
                 group_output.flatten(2),
-                self.o.weight.index_select(1, channel_indices),
+                group_output_weight,
                 None,
             )
             projected_output[:, :group_length].add_(group_output_projection)
