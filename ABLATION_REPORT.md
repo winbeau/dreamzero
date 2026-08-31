@@ -4,9 +4,11 @@ Date: 2026-08-31
 
 ## Status
 
-This indexes completed and pending ablations. It is not a final claim: 100
-paired requests, three GPU exchanges, closed-loop non-inferiority, accepted
-confidence fallback, and a quality-safe accelerated policy remain incomplete.
+The measured shared-table/request-gate line is closed as a negative result.
+The static frontier now covers 108 paired requests, but three GPU exchanges,
+closed-loop non-inferiority, accepted confidence fallback, and a quality-safe
+accelerated policy remain incomplete. `FINAL_STATUS.md` separates kernel,
+end-to-end, and quality-safe results and records the next route.
 
 ## Completed executor ablations
 

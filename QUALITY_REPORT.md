@@ -4,9 +4,12 @@ Date: 2026-08-31
 
 ## Status
 
-This report records preliminary quality gates only. Full video evaluation,
-worst-case task coverage, at least 100 paired requests, and closed-loop success
-non-inferiority remain incomplete. No final quality claim is made.
+The current shared-table/request-gate line is rejected. Its complete static
+frontier is action-safe on 92/108 requests, while the safer request gate falls
+back Dense on 15/18 validation and development-test requests and still has
+6/72 false-sparse events under train episode CV. Full video evaluation and
+closed-loop non-inferiority remain incomplete. No final quality Claim is made;
+see `FINAL_STATUS.md`.
 
 ## Full-budget invariants
 

@@ -4,6 +4,13 @@ Date: 2026-08-31
 
 ## Status
 
+The shared-Packed deployment branch is now closed as a negative result. The
+local per-Head classifier is statistically useful, but maximum-Head promotion
+makes every held-out candidate cell Dense. A causal request-wide gate retains
+only 3/18 sparse routes per held-out split, realizes about `1.01x`, and has
+6/72 false-sparse train episode-CV events. It is explicitly rejected and not
+deployed. `FINAL_STATUS.md` freezes the decision and next route.
+
 The earlier v2 statistical result is now classified as a contaminated
 ablation, not a deployment-safe M1 result. A feature audit found that it used
 ground-truth DROID action magnitude/variation and offline trajectory-stage,

@@ -4,6 +4,13 @@ Date: 2026-08-31
 
 ## Status
 
+The current shared timestep/layer table and request-wide fallback route is
+closed as a negative result. The 108-request static table is consistently
+faster but reaches only `1.0738x--1.0908x` by split and is action-safe on
+92/108 requests. Maximum-Head promotion collapses to Dense, while the causal
+request gate reaches only `1.009x--1.014x`. It does not meet the quality-safe
+`>=1.35x` goal. See `FINAL_STATUS.md`.
+
 The fixed-bucket timestep/layer runtime and the one-gather Packed Middle Stack
 integration are implemented and pass a released DreamZero-DROID 14B checkpoint
 gate. Real timing changes with the selected DiT and layer budgets, while the

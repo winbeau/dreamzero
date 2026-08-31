@@ -4,11 +4,12 @@ Date: 2026-08-31
 
 ## Status
 
-This report freezes the Dense and old per-layer gather/scatter sparse DiT
-baseline required before Dynamic Packed M2 work and records the first complete
-eight-DiT Dynamic Packed M2 service smoke. The 100-request runs, GPU-group
-exchange, closed-loop measurements, and final confidence intervals are not
-complete, so no final performance claim is made here.
+The current shared-table/request-gate line is closed as a negative result.
+Fixed-20% Packed M2 reaches a `2.42x--2.82x` single-DiT executor ceiling but
+fails video quality. The stable static frontier covers 108 requests at
+`1.0738x--1.0908x` by split and is action-safe on only 92/108. Its
+quality-gated request route realizes only `1.0094x--1.0137x`. No accepted
+quality-safe E2E acceleration Claim is made. See `FINAL_STATUS.md`.
 
 ## Protocol invariant
 

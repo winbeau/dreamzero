@@ -4,6 +4,12 @@ Date: 2026-08-31
 
 ## Status
 
+Packed M2 is validated as a fast executor but not yet as a quality-safe
+policy. Fixed 20% remains the trustworthy `2.42x--2.82x` single-DiT ceiling;
+the shared static table reaches only `1.0738x--1.0908x` E2E and fails 16/108
+action gates. Per-Head grouping and request-wide fallback are both rejected.
+The distinction is frozen in `FINAL_STATUS.md`.
+
 The fixed-budget Packed Middle Stack is integrated into the real DreamZero-14B
 AR execution path and passes a released-checkpoint H200 gate. With both
 historical K/V and current Q/K/V/compute at 20%, it reaches 2.42x--2.82x real
