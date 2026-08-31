@@ -597,6 +597,8 @@ def test_model_uses_live_dynamic_m1_head_groups_and_rejects_static_conflicts():
     )
 
     class Decision:
+        keep_ratios = ((1.0, 0.25), (1.0, 0.25))
+
         @staticmethod
         def execution_groups_for_layer(layer_index):
             assert layer_index in (0, 1)
