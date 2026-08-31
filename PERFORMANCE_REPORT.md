@@ -173,3 +173,32 @@ to the 100-request run.
 Artifact:
 
 `dynamic_m1_m2/dynamic_budgets/20260831_two_group_qkv/checkpoint_early_gpu01_varlen_lowtrunk/`
+
+## Dense action-history performance ablation
+
+The 25 action/state queries were separately evaluated against complete
+historical K/V while video queries retained the balanced sparse history. On
+the same 14B checkpoint input this raises Sparse p50 from 154.98 to 164.43 ms
+and reduces paired DiT speedup from 1.228x to 1.147x. The corresponding
+single-layer attention microbenchmark measures 0.603 ms extra work, about 23
+ms over 38 packed layers without overlap.
+
+The task-disjoint validation replay contains 18 targets, each preceded by
+three real history calls. All 72 service calls retain exactly eight DiT model
+calls and no Dense rerun. Relative to the existing Dense 2--3 replay:
+
+| Metric | Dense | Balanced + Dense action history | Result |
+| --- | ---: | ---: | ---: |
+| mean target latency | 1.9034 s | 1.4292 s | 1.332x |
+| p50 target latency | 1.9107 s | 1.4036 s | 1.361x |
+| paired geometric-mean speedup | -- | 1.3329x | CI95 [1.3058x, 1.3539x] |
+| Sparse-faster requests | -- | 18 / 18 | 100% |
+
+The original balanced validation replay measured 1.2899 s and 1.476x mean
+speedup. Protecting action history therefore costs 10.8% Sparse latency and
+drops below the 1.35x end-to-end mean target while still failing quality. It
+is not promoted.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/`

@@ -25,6 +25,8 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | trunk 35%, critical H100/Q35, normal H25/Q20 | action 0.999901; video 0.878; 1.317x | reject |
 | balanced/conservative/Dense selector | held-out Oracle ceiling <=1.125x | profile family rejected |
 | action-flow sentinel | test false-sparse 6.67%; triggers all safe requests | reject |
+| Dense action-history microbenchmark | +0.603 ms/layer attention; about +23 ms/38 layers | protected-action overhead |
+| Dense action-history validation18 | L2 9.293% -> 8.377%; 0/18 safe; 1.332x | reject global policy |
 
 ## Required remaining ablations
 

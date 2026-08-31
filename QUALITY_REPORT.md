@@ -106,3 +106,30 @@ Full-budget video/action/cache exactness passes on both ranks. Critical-head
 protection preserves the isolated action gate, but neither video result is
 acceptable and isolated first-step quality cannot override the accumulated
 DROID failures. No candidate is promoted.
+
+## Dense action-history quality ablation
+
+Keeping only the 25 action/state queries on complete historical K/V provides a
+measurable but insufficient improvement. On the paired checkpoint input,
+action cosine changes from 0.999832 to 0.999863 and relative L2 from 1.849% to
+1.703%, while video cosine and relative L2 are unchanged within 0.002
+percentage points.
+
+Across the 18 task-disjoint validation targets, mean action cosine improves
+from 0.995541 to 0.996276 and mean relative L2 falls from 9.293% to 8.377%.
+Cosine improves on 11/18 requests and relative L2 improves on 12/18. However:
+
+- zero of 18 requests satisfy cosine >=0.999 and relative L2 <=5%;
+- minimum cosine is 0.977948;
+- maximum relative L2 is 21.059%;
+- the worst request remains
+  `validation_subset024_source018470_late`, and it becomes worse than the
+  original balanced result.
+
+Dense action history is therefore not a monotonic safety mechanism and cannot
+replace confidence promotion or Dense fallback. It is rejected as a global
+policy despite improving the validation mean.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/`

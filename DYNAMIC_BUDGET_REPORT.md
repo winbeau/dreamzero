@@ -564,3 +564,31 @@ dynamic_m1_m2/dynamic_budgets/20260831_two_group_qkv/
   checkpoint_early_gpu01/
   checkpoint_early_gpu01_varlen_lowtrunk/
 ```
+
+## Dense action-history route ablation
+
+The packed executor now supports a protected action route: sparse video
+queries use the selected historical prefix, while the 25 action/state queries
+attend the complete historical K/V. This directly tests whether accumulated
+action error is dominated by sparse action-to-history attention without
+restoring Dense video Q/K/V/O or FFN.
+
+The paired checkpoint result improves action relative L2 from 1.849% to
+1.703%, but costs 9.45 ms Sparse p50. On the complete validation18 history
+chains, mean relative L2 improves by 9.85% relative (9.293% to 8.377%) and
+12/18 requests improve individually. The mechanism is not monotonic: six
+requests regress, the worst late request reaches 21.06% relative L2, and the
+quality-safe count remains 0/18. Mean end-to-end speedup is 1.332x with paired
+CI95 [1.306x, 1.354x].
+
+This isolates an important design constraint for dynamic M1: action-history
+protection may be selected for particular high-confidence routes, but it is
+not itself a safe fallback. Low-confidence and demonstrated regression cases
+still require budget promotion or the exact Dense path.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_dense_action_history/
+dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/
+```

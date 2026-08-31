@@ -169,3 +169,36 @@ the 50% trunk reaches 1.063x p50 and 1.38x on its final warmed sample. Both
 pass local action gates and fail video quality. The fixed-20% one-group result
 remains the valid 2.42--2.82x executor ceiling; final grouping must be
 kernel-aware and collapse unprofitable head splits to shared fixed shapes.
+
+## Dense action-history ablation
+
+Packed M2 can now keep the 25 action/state queries on the complete historical
+K/V sequence while video queries retain the sparse historical prefix. Current
+video Q/K/V/O and FFN remain packed. This adds one short 25-query FA2 call per
+packed layer and is disabled by default.
+
+At the released checkpoint geometry, the isolated attention microbenchmark
+increases from 1.543 ms to 2.146 ms per layer, or about 23 ms over 38 packed
+layers. The paired 14B checkpoint result is consistent but smaller after full
+layer overlap: Sparse p50 increases from 154.98 to 164.43 ms. Action relative
+L2 improves from 1.849% to 1.703% and cosine from 0.999832 to 0.999863; video
+quality is unchanged. Full-budget video, action, and cache exactness still
+pass.
+
+The real validation replay rejects this mechanism as a standalone policy fix.
+Against the same Dense actions, mean action relative L2 improves from 9.293%
+to 8.377%, but zero of 18 requests pass both final-action gates and the worst
+request reaches 21.06% relative L2. Mean end-to-end speedup falls from 1.476x
+for the original balanced executor to 1.332x. Dense action history is retained
+as a protected-action ablation and possible confidence-selected fallback, not
+the shared main path.
+
+Implementation commits: `c0ee515`, `ef52371`, and `4937d92`.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/packed_m2/20260831_dense_action_history_microbench/
+dynamic_m1_m2/dynamic_budgets/20260831_dense_action_history/
+dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/
+```
