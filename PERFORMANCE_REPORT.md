@@ -307,3 +307,31 @@ claim.
 Artifact:
 
 `dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/`
+
+## Propagation-aligned guarded performance pilot
+
+Complete five-layer segment selection at commit `5eb04fb` converts nominal
+current budgets into real fixed-shape Packed work.  The real-DROID pilot uses
+the same three measured requests and Dense baseline, with all eight DiTs
+executed.  Warm repeats are reported where a first request compiled a new
+shape.
+
+| Schedule | Sparse mean | Paired geomean | CI95 | Faster | Quality |
+| --- | ---: | ---: | --- | ---: | --- |
+| late3, S4, H75/Q50 | 1.7907 s | 1.252x | [1.028x, 1.827x] | 3/3 | pass |
+| late3, S4, H50/Q50, repeat | 1.7678 s | 1.269x | [1.033x, 1.864x] | 3/3 | pass |
+| late4, S4, H50/Q50, repeat | 1.7081 s | 1.313x | [1.088x, 1.901x] | 3/3 | pass |
+| late5, S4, H50/Q50 | 1.6928 s | 1.325x | [1.082x, 1.941x] | 3/3 | reject |
+| late4, S5, H50/Q50 | 1.7698 s | 1.267x | [1.040x, 1.830x] | 3/3 | reject |
+
+The accepted late4 row improves the late3 H50/Q50 warm latency by 3.4% and is
+the first quality-safe pilot above 1.30x.  It remains below the 1.35x E2E goal.
+The nominally larger S5 schedule is slower in this small sample and fails
+quality, while the faster late5 schedule also fails quality badly.  Therefore
+no result is selected by speed alone.  Formal performance still requires at
+least 100 paired requests, three GPU exchange rounds, CI95 lower bound above
+1.20x, and at least 95% Sparse-faster requests.
+
+Artifacts:
+
+`dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/`

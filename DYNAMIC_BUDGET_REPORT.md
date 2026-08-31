@@ -1014,3 +1014,48 @@ dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
   comparison_guarded_joint_late3_safe20_h75q50_r3e5_f9429d2_droid_validation3.json
   comparison_guarded_joint_late3_safe20_h75q35_r3e5_f9429d2_droid_validation3.json
 ```
+
+## Propagation-aligned Oracle frontier
+
+Commit `5eb04fb` extends the guarded table builder to rank complete Packed-M2
+propagation segments.  The default segment risk is the maximum Dense-Oracle
+layer score inside the segment, so one unusually sensitive layer prevents an
+otherwise low-mean segment from being selected early.  With prefix/suffix one
+and propagation every five layers, the first four ranked segments are layers
+1--20.  Unlike the earlier individual-layer table, every requested current
+budget in these segments is the budget actually executed.
+
+The same three measured real-DROID task keys give the following boundary
+pilot.  Rows labelled repeat are taken after the service has already compiled
+all shapes; every row still executes eight real DiTs.
+
+| Schedule | Sparse cells | Mean latency | Paired geomean speedup | Faster | Action cosine mean/min | Action rel-L2 mean/max | Gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| late3, 4 segments, H75/Q50 | 60/320 | 1.791 s | 1.252x | 3/3 | 0.999695 / 0.999317 | 2.28% / 3.87% | pass |
+| late3, 4 segments, H75/Q35 | 60/320 | 1.810 s | 1.239x | 3/3 | 0.998594 / 0.996235 | 4.27% / 8.72% | reject |
+| late3, 4 segments, H50/Q50, repeat | 60/320 | 1.768 s | 1.269x | 3/3 | 0.999700 / 0.999375 | 2.44% / 3.93% | pass |
+| late4, 4 segments, H50/Q50, repeat | 80/320 | 1.708 s | 1.313x | 3/3 | 0.999569 / 0.999218 | 2.92% / 4.09% | pass |
+| late5, 4 segments, H50/Q50 | 100/320 | 1.693 s | 1.325x | 3/3 | 0.994347 / 0.984626 | 8.86% / 18.41% | reject |
+| late4, 5 segments, H50/Q50 | 100/320 | 1.770 s | 1.267x | 3/3 | 0.999158 / 0.998245 | 3.78% / 5.92% | reject |
+
+The safe pilot frontier is therefore `late4 x four segments x H50/Q50`.
+Moving the same 100 sparse cells onto an earlier denoise step fails much more
+severely than adding a later Layer segment, directly supporting a high-budget
+early-denoise bucket.  Both expansions nevertheless cross the action gate, so
+neither a monotonic timestep rule nor a monotonic layer-depth rule may replace
+the measured Oracle/fallback policy.
+
+The earlier individual-cell Q25 row is also rejected: its worst action cosine
+is 0.998057 and worst relative L2 is 6.37%.  Its result, together with the
+segment-aligned Q35 failure, establishes Q50 as the current full-segment
+current-token floor.  These are three-request boundary results only; the
+late4 candidate must next pass task-disjoint validation, video quality, GPU
+exchange, and the final 100-request protocol.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_guarded_segments_*/
+dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
+  comparison_guarded_segments_*_5eb04fb_droid_validation3*.json
+```

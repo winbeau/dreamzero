@@ -255,3 +255,31 @@ recovery must update the exposed token state or select the exact Dense path.
 Artifact:
 
 `dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/`
+
+## Propagation-aligned guarded boundary
+
+Complete propagation segments were replayed on the three-request real-DROID
+pilot so that the configured current budget exactly matches executed Packed
+compute.  The accepted and rejected boundaries are:
+
+| Schedule | Action cosine mean/min | Action rel-L2 mean/max | Decision |
+| --- | ---: | ---: | --- |
+| late3, 4 segments, H75/Q50 | 0.999695 / 0.999317 | 2.28% / 3.87% | preliminary pass |
+| late3, 4 segments, H75/Q35 | 0.998594 / 0.996235 | 4.27% / 8.72% | reject |
+| late3, 4 segments, H50/Q50 | 0.999700 / 0.999375 | 2.44% / 3.93% | preliminary pass |
+| late4, 4 segments, H50/Q50 | 0.999569 / 0.999218 | 2.92% / 4.09% | preliminary pass |
+| late5, 4 segments, H50/Q50 | 0.994347 / 0.984626 | 8.86% / 18.41% | reject |
+| late4, 5 segments, H50/Q50 | 0.999158 / 0.998245 | 3.78% / 5.92% | reject |
+
+The result supports the early-denoise hypothesis: adding DiT index 3 causes
+the largest failure even though its Dense-Oracle aggregate score is adjacent
+to the accepted late bucket.  It also falsifies a simple "deeper is always
+safer" layer rule because adding layers 21--25 crosses both worst-case action
+gates.  Q35 is rejected once its full requested coverage is actually executed;
+the earlier scattered-cell Q35 pass was not evidence for a full-segment Q35
+policy.
+
+`late4 x four segments x H50/Q50` is promoted only to task-disjoint validation,
+not to a final quality claim.  The sample count is three, generated video is
+not yet compared on this service path, and confidence fallback, 100-request,
+GPU-exchange, and closed-loop gates remain open.

@@ -43,6 +43,13 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | max current K/V at segment entries | action L2 1.849% -> 1.845%; 1.262x exchanged geomean | negligible gain; reject |
 | max current K/V at segment exits | action L2 1.933% | stale inactive state; reject |
 | max current K/V at all packed layers | action L2 2.147% | stale-readout negative ablation |
+| individual-cell H75/Q25, late3 | worst cosine 0.99806; L2 6.37%; 1.206x | reject current floor |
+| propagation-aligned S4 H75/Q50, late3 | cosine min 0.99932; L2 max 3.87%; 1.252x | pass pilot |
+| propagation-aligned S4 H75/Q35, late3 | cosine min 0.99623; L2 max 8.72%; 1.239x | reject Q35 |
+| propagation-aligned S4 H50/Q50, late3 | cosine min 0.99938; L2 max 3.93%; 1.269x | pass pilot |
+| timestep expansion late3 -> late4 | 1.269x -> 1.313x; L2 max 4.09% | promote validation |
+| timestep expansion late4 -> late5 | 1.325x; cosine min 0.98463; L2 max 18.41% | reject early DiT 3 |
+| layer expansion S4 -> S5 at late4 | 1.267x; cosine min 0.99825; L2 max 5.92% | reject fifth segment |
 
 ## Required remaining ablations
 

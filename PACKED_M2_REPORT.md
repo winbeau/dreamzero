@@ -429,3 +429,35 @@ dynamic tables.
 Artifacts:
 
 `dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/`
+
+## Propagation-aligned Packed frontier
+
+Commit `5eb04fb` makes the table generator select complete five-layer
+propagation segments.  This removes the mismatch in which isolated sparse
+cells were promoted to the segment maximum at runtime.  The first four
+Oracle-ranked segments are layers 1--20; on late DiTs they now remain packed
+at one shared fixed shape for the entire segment and scatter only at the
+existing propagation boundaries.
+
+| Packed schedule | Effective cell coverage | Warm mean latency | Action gate |
+| --- | ---: | ---: | --- |
+| late3, four segments, H75/Q50 | 18.75% | 1.791 s | pass |
+| late3, four segments, H75/Q35 | 18.75% | 1.810 s | reject |
+| late3, four segments, H50/Q50 | 18.75% | 1.768 s | pass |
+| late4, four segments, H50/Q50 | 25.00% | 1.708 s | pass |
+| late5, four segments, H50/Q50 | 31.25% | 1.693 s | reject |
+| late4, five segments, H50/Q50 | 31.25% | 1.770 s | reject |
+
+The `late4 x four-segment x H50/Q50` row is the current executor candidate.
+It reaches 1.313x paired E2E speedup on the three-request pilot while keeping
+the first four real DiTs Dense.  Reducing current compute to Q35 fails even at
+late3, whereas reducing immutable history from H75 to H50 remains inside the
+gate.  This confirms that mutable current-token state, not historical QK/PV,
+sets the tight quality floor.
+
+Adding a fifth segment does not speed up this small run and crosses the action
+gate.  The selected segment includes layers 21--25, whose worst Oracle score
+is higher than the first four groups.  Expanding to DiT index 3 is faster but
+causes a much larger quality failure.  Packed M2 therefore needs calibrated
+timestep/layer promotion rather than a global coverage target.  All services
+remain stable near 67.2 GiB per GPU after repeated history-chain requests.
