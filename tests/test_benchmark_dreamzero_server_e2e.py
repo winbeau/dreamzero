@@ -12,6 +12,10 @@ from benchmarks.benchmark_downstream_head_sensitivity_droid import (
     intervention_control,
     run_chain,
 )
+from benchmarks.benchmark_downstream_head_sensitivity_grid_droid import (
+    load_candidates,
+    summarize_candidate_records,
+)
 from benchmarks.compare_dreamzero_server_e2e import compare_reports
 from benchmarks.summarize_dreamzero_server_log import summarize_log
 
@@ -110,6 +114,71 @@ def test_downstream_run_chain_disables_history_and_controls_only_target() -> Non
     ] == [{"enabled": False}] * 3
     assert client.requests[-1]["dynamic_downstream_head_intervention"] == control
     assert client.resets == [{"session_id": "paired"}]
+
+
+def test_downstream_grid_loads_unique_candidates(tmp_path) -> None:
+    path = tmp_path / "candidates.json"
+    path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "label": "early-critical",
+                        "dit_index": 0,
+                        "layer_index": 20,
+                        "head_indices": [1, 4],
+                        "query_scope": "all",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert load_candidates(path) == [
+        {
+            "label": "early-critical",
+            "control": {
+                "enabled": True,
+                "dit_index": 0,
+                "layer_index": 20,
+                "head_indices": [1, 4],
+                "scale": 0.0,
+                "cfg_branches": ["conditional"],
+                "query_scope": "all",
+            },
+        }
+    ]
+
+
+def test_downstream_grid_summary_records_worst_and_stage_means() -> None:
+    records = [
+        {
+            "request_key": "early",
+            "trajectory_stage": "early",
+            "action_cosine": 0.99,
+            "action_relative_l2": 0.04,
+            "action_max_abs": 0.2,
+        },
+        {
+            "request_key": "late",
+            "trajectory_stage": "late",
+            "action_cosine": 0.999,
+            "action_relative_l2": 0.01,
+            "action_max_abs": 0.1,
+        },
+    ]
+
+    summary = summarize_candidate_records(records)
+
+    assert summary["measured_requests"] == 2
+    assert summary["action_cosine_mean"] == pytest.approx(0.9945)
+    assert summary["action_relative_l2_mean"] == pytest.approx(0.025)
+    assert summary["action_relative_l2_max"] == pytest.approx(0.04)
+    assert summary["worst_request_key"] == "early"
+    assert summary["stage_relative_l2_mean"] == {
+        "early": pytest.approx(0.04),
+        "late": pytest.approx(0.01),
+    }
 
 
 def test_summarize_rejects_empty_input():
