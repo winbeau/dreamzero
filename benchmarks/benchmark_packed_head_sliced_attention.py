@@ -139,10 +139,16 @@ def main() -> None:
         "history_token_count": args.history_tokens,
     }
 
-    def single_full_history() -> torch.Tensor:
+    def single_sparse_history() -> torch.Tensor:
+        attention.packed_dense_action_history = False
+        return attention.forward_packed(x, packed_freqs, **common)
+
+    def single_dense_action_history() -> torch.Tensor:
+        attention.packed_dense_action_history = True
         return attention.forward_packed(x, packed_freqs, **common)
 
     def grouped_full_width_current() -> torch.Tensor:
+        attention.packed_dense_action_history = False
         return attention.forward_packed(
             x,
             packed_freqs,
@@ -155,6 +161,7 @@ def main() -> None:
         )
 
     def grouped_head_sliced_current() -> torch.Tensor:
+        attention.packed_dense_action_history = False
         return attention.forward_packed(
             x,
             packed_freqs,
@@ -171,7 +178,10 @@ def main() -> None:
         )
 
     methods = {
-        "single_full_history_current75": single_full_history,
+        "single_sparse_history_current75": single_sparse_history,
+        "single_sparse_video_dense_action_history_current75": (
+            single_dense_action_history
+        ),
         "grouped_history_only_full_width_current75": grouped_full_width_current,
         "grouped_head_sliced_current75_35": grouped_head_sliced_current,
     }
