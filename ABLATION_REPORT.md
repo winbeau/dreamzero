@@ -33,6 +33,10 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | early video-history 75% vs 100% | checkpoint action L2 1.259% vs 1.360% | 75% locally favored |
 | early video-history75 validation18 | 1.487x; L2 10.011%; 2/18 safe | reject global schedule |
 | five-profile validation Oracle | safety union 8/18; 1.102x ratio-of-means | coarse profile family exhausted |
+| Dense suffix 3 checkpoint | video L2 7.512%; action L2 1.858%; 1.252x | local video recovery |
+| Dense suffix 5 checkpoint | video L2 6.708%; action L2 1.864%; 1.159x | recovery cost dominates |
+| Dense suffix 3 validation18 | 1.484x; action L2 8.999%; 1/18 safe | reject global policy |
+| Dense suffix 5 validation18 | 1.420x; action L2 9.103%; 0/18 safe | reject deeper suffix |
 
 ## Required remaining ablations
 
@@ -43,7 +47,7 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 - GMM versus supervised M1 on final executor labels;
 - random, uniform, action-anchor, and Oracle routes;
 - no extrapolation versus late-step VV extrapolation with sentinel;
-- final-layer Dense recovery and propagation-boundary choices;
+- propagation-boundary and within-segment recovery choices;
 - 100 paired requests, three GPU exchanges, and closed-loop success.
 
 ## Artifact roots

@@ -165,3 +165,20 @@ L2 of 1.259%/8.525%, but validation18 mean action L2 worsens to 10.011% and the
 worst request reaches 23.406%. Two requests pass, one more than the union
 already covered by the conservative profile, but ten of 18 still require
 Dense execution even under a perfect selector over all measured profiles.
+
+## Dense-suffix recovery quality gate
+
+The checkpoint gate suggests a clean video benefit from Dense recovery:
+suffix one, three, and five reduce video relative L2 from 8.758% to 7.512% to
+6.708%.  Final action quality does not follow this ordering.  Validation18
+suffix three reaches mean cosine 0.995709 and mean relative L2 8.999%, with
+only request index 4 satisfying both action gates.  Its minimum cosine is
+0.978420 and maximum relative L2 is 20.828%.
+
+Suffix five is worse: mean cosine 0.995497, mean relative L2 9.103%, minimum
+cosine 0.976171, maximum relative L2 21.758%, and zero safe requests.  The
+worst request remains `validation_subset024_source018470_late` for both rows.
+Thus final Dense layers can cosmetically repair video output without undoing
+the hidden-state/action error accumulated through earlier packed segments.
+Suffix recovery is rejected as a fallback; low-confidence routes still need
+earlier budget promotion or exact Dense execution.

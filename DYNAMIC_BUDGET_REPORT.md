@@ -662,3 +662,39 @@ Artifacts:
 dynamic_m1_m2/dynamic_budgets/20260831_early_video_history/
 dynamic_m1_m2/e2e/20260831_early_video_history75_validation18/
 ```
+
+## Dense-suffix recovery gate
+
+The balanced packed table was next evaluated with three and five Dense suffix
+layers, keeping the Dense prefix, dynamic budgets, radius-two/every-five
+propagation, and all eight real DiT calls fixed.  On the released early-step
+checkpoint, increasing the suffix from one to three to five layers reduces
+video relative L2 from 8.758% to 7.512% to 6.708%.  Action relative L2 remains
+nearly flat at 1.849%, 1.858%, and 1.864%, while paired DiT speedup changes
+from 1.228x to 1.252x to 1.159x.  Full-budget video, action, and cache paths are
+exact for both new rows.
+
+The complete validation18 replay shows that the checkpoint video recovery does
+not translate into monotonic final-action recovery:
+
+| Dense suffix | Paired geomean speedup | CI95 | Action cosine mean/min | Action rel-L2 mean/max | Safe |
+| ---: | ---: | --- | --- | --- | ---: |
+| 1 | 1.476x | [1.459x, 1.493x] | 0.995541 / 0.983234 | 9.293% / 18.352% | 0/18 |
+| 3 | 1.484x | [1.431x, 1.518x] | 0.995709 / 0.978420 | 8.999% / 20.828% | 1/18 |
+| 5 | 1.420x | [1.377x, 1.457x] | 0.995497 / 0.976171 | 9.103% / 21.758% | 0/18 |
+
+Every suffix-3 and suffix-5 target is faster than Dense and every one of the
+76 warmup/history/target calls per service records exactly eight DiT model
+evaluations.  Suffix three gives only a small mean improvement and worsens the
+tail; suffix five loses both speed and action quality.  Dense output recovery
+is therefore saturated and non-monotonic.  The dominant error is accumulated
+inside packed propagation segments, so further recovery work must control
+segment state rather than merely extending the output suffix.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_dense_suffix_recovery/
+dynamic_m1_m2/e2e/20260831_balanced_suffix3_validation18/
+dynamic_m1_m2/e2e/20260831_balanced_suffix5_validation18/
+```

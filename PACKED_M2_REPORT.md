@@ -248,3 +248,21 @@ The complete validation18 replay reverses the local result: mean action L2 is
 end-to-end speedup is 1.487x. This variant adds only one new safe request beyond
 the conservative profile and leaves the multi-profile Oracle ceiling at
 1.102x. It is retained as an ablation, not a main executor schedule.
+
+## Dense-suffix recovery ablation
+
+Restoring more complete output layers does reduce the isolated packed video
+error: balanced suffix one, three, and five measure 8.758%, 7.512%, and 6.708%
+video relative L2 at the early checkpoint.  The corresponding action errors
+remain 1.849%, 1.858%, and 1.864%, showing that the suffix mostly repairs the
+video representation after the action-path error has already accumulated.
+
+Validation18 confirms the limit.  Suffix three retains 1.484x paired geometric
+mean end-to-end speedup and improves mean action L2 only to 8.999%, with 1/18
+safe requests and a worse 20.83% tail.  Suffix five falls to 1.420x, regresses
+mean action L2 to 9.103%, and has 0/18 safe requests.  Both services execute 76
+warmup/history/target calls with exactly eight DiT evaluations per call.
+
+The final-layer recovery ablation is complete and rejected as the primary
+quality mechanism.  Packed M2 should retain a small suffix and spend recovery
+budget at propagation boundaries or within sensitive segments instead.

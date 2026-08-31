@@ -234,3 +234,27 @@ against 1.9034 s Dense, or 1.487x ratio-of-means and 1.489x paired geometric
 mean speedup. CI95 is [1.452x, 1.512x], all 18 targets are faster, and all 72
 history/target calls retain eight DiT model calls. It is rejected solely on
 quality; no performance claim treats this profile as accepted.
+
+## Dense-suffix recovery performance
+
+Balanced Packed M2 was replayed with three and five Dense suffix layers on
+auxiliary GPUs 0--1 against the unchanged Dense GPUs 2--3 reference.  Each row
+uses one independent four-call warmup chain followed by 18 measured targets,
+each with three real history calls.  Server logs contain 76 entries with eight
+DiT model evaluations for each row.
+
+| Dense suffix | Sparse mean | Ratio-of-means | Paired geomean | CI95 | Faster |
+| ---: | ---: | ---: | ---: | --- | ---: |
+| 3 | 1.2857 s | 1.480x | 1.484x | [1.431x, 1.518x] | 18/18 |
+| 5 | 1.3425 s | 1.418x | 1.420x | [1.377x, 1.457x] | 18/18 |
+
+Suffix three retains the end-to-end stretch target but fails quality.  Suffix
+five spends 4.4% more Sparse latency and also fails quality, so deeper output
+recovery is not promoted to the 100-request experiment.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/e2e/20260831_balanced_suffix3_validation18/
+dynamic_m1_m2/e2e/20260831_balanced_suffix5_validation18/
+```
