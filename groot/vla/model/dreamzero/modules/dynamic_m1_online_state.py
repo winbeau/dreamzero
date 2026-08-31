@@ -21,8 +21,11 @@ from groot.vla.model.dreamzero.modules.dynamic_m1_group_router import (
     DynamicM1GroupedRouter,
     GroupedM1StepDecision,
 )
+from groot.vla.model.dreamzero.modules.dynamic_m1_observation import (
+    M1CausalObservation,
+)
 
-HISTORY_FEATURE_NAMES = (
+ORACLE_HISTORY_FEATURE_NAMES = (
     "previous_support_turnover_max",
     "previous_vv_output_change_relative_l2_max",
     "previous_two_vv_output_change_relative_l2_max",
@@ -30,6 +33,42 @@ HISTORY_FEATURE_NAMES = (
     "previous_max_attention_mass_mean",
     "previous_qa_qv_key_importance_correlation_mean",
 )
+PACKED_PROXY_HISTORY_FEATURE_NAMES = (
+    "previous_packed_route_support_turnover_max",
+    "previous_packed_route_normalized_entropy_mean",
+    "previous_packed_route_max_mass_mean",
+    "previous_packed_action_output_change_relative_l2_max",
+    "previous_two_packed_action_output_change_relative_l2_max",
+    "previous_packed_action_output_change_cosine_min",
+    "previous_packed_cfg_disagreement_relative_l2",
+    "previous_packed_action_output_signature_norm",
+)
+OBSERVATION_FEATURE_TO_METRIC = {
+    "previous_support_turnover_max": "support_turnover_max",
+    "previous_vv_output_change_relative_l2_max": ("vv_output_change_relative_l2_max"),
+    "previous_normalized_entropy_mean": "normalized_entropy_mean",
+    "previous_max_attention_mass_mean": "max_attention_mass_mean",
+    "previous_qa_qv_key_importance_correlation_mean": (
+        "qa_qv_key_importance_correlation_mean"
+    ),
+    "previous_packed_route_support_turnover_max": ("packed_route_support_turnover_max"),
+    "previous_packed_route_normalized_entropy_mean": (
+        "packed_route_normalized_entropy_mean"
+    ),
+    "previous_packed_route_max_mass_mean": "packed_route_max_mass_mean",
+    "previous_packed_action_output_change_relative_l2_max": (
+        "packed_action_output_change_relative_l2_max"
+    ),
+    "previous_packed_action_output_change_cosine_min": (
+        "packed_action_output_change_cosine_min"
+    ),
+    "previous_packed_cfg_disagreement_relative_l2": (
+        "packed_cfg_disagreement_relative_l2"
+    ),
+    "previous_packed_action_output_signature_norm": (
+        "packed_action_output_signature_norm"
+    ),
+}
 SUPPORTED_FEATURE_NAMES = frozenset(
     {
         "timestep_position",
@@ -41,8 +80,10 @@ SUPPORTED_FEATURE_NAMES = frozenset(
         "state_abs_mean",
         "history_one_available",
         "history_two_available",
-        *HISTORY_FEATURE_NAMES,
+        *ORACLE_HISTORY_FEATURE_NAMES,
+        *PACKED_PROXY_HISTORY_FEATURE_NAMES,
         "vv_change_acceleration",
+        "packed_action_output_change_acceleration",
         "prior_budget_mean_tlh",
         "prior_budget_std_tlh",
         "prior_critical_rate_tlh",
@@ -118,6 +159,14 @@ class M1HistoricalObservation:
     @property
     def shape(self) -> tuple[int, int]:
         return tuple(int(value) for value in self.support_turnover_max.shape)
+
+    def metric(self, name: str) -> np.ndarray:
+        if not hasattr(self, name):
+            raise KeyError(f"Dense Oracle observation has no metric {name}")
+        return np.asarray(getattr(self, name), dtype=np.float64)
+
+
+M1Observation = M1HistoricalObservation | M1CausalObservation
 
 
 @dataclass(frozen=True)
@@ -264,7 +313,7 @@ class OnlineM1FeatureState:
             for name in PRIOR_VALUE_COLUMNS
         }
         self._active = False
-        self._completed_steps: dict[int, M1HistoricalObservation | None] = {}
+        self._completed_steps: dict[int, M1Observation | None] = {}
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -281,7 +330,7 @@ class OnlineM1FeatureState:
     def complete_step(
         self,
         dit_index: int,
-        observation: M1HistoricalObservation | None = None,
+        observation: M1Observation | None = None,
     ) -> None:
         """Advance causal state after one real DiT, with or without a probe."""
 
@@ -301,10 +350,10 @@ class OnlineM1FeatureState:
                 raise ValueError("online M1 observation does not match model geometry")
         self._completed_steps[dit_index] = observation
 
-    def observe(self, observation: M1HistoricalObservation) -> None:
+    def observe(self, observation: M1Observation) -> None:
         self.complete_step(observation.dit_index, observation)
 
-    def _accepted(self, observation: M1HistoricalObservation | None) -> bool:
+    def _accepted(self, observation: M1Observation | None) -> bool:
         return bool(
             observation is not None
             and observation.schema in self.accepted_observation_schemas
@@ -342,23 +391,41 @@ class OnlineM1FeatureState:
         shape = self.shape
         nan = np.full(shape, np.nan, dtype=np.float64)
 
-        def previous_value(name: str) -> np.ndarray:
+        def observation_value(
+            observation: M1Observation | None,
+            *,
+            accepted: bool,
+            metric_name: str,
+        ) -> np.ndarray:
+            if not accepted or observation is None:
+                return nan
+            try:
+                return observation.metric(metric_name)
+            except KeyError:
+                return nan
+
+        def previous_feature(name: str) -> np.ndarray:
             if not previous_accepted or previous is None:
                 return nan
-            return np.asarray(getattr(previous, name), dtype=np.float64)
-
-        previous_support = previous_value("support_turnover_max")
-        previous_vv = previous_value("vv_output_change_relative_l2_max")
-        previous_entropy = previous_value("normalized_entropy_mean")
-        previous_max_mass = previous_value("max_attention_mass_mean")
-        previous_correlation = previous_value("qa_qv_key_importance_correlation_mean")
-        previous_two_vv = (
-            np.asarray(
-                previous_two.vv_output_change_relative_l2_max,
-                dtype=np.float64,
+            metric_name = OBSERVATION_FEATURE_TO_METRIC[name]
+            return observation_value(
+                previous,
+                accepted=True,
+                metric_name=metric_name,
             )
-            if previous_two_accepted and previous_two is not None
-            else nan
+
+        history_features = {
+            name: previous_feature(name) for name in OBSERVATION_FEATURE_TO_METRIC
+        }
+        previous_two_vv = observation_value(
+            previous_two,
+            accepted=previous_two_accepted,
+            metric_name="vv_output_change_relative_l2_max",
+        )
+        previous_two_packed_action = observation_value(
+            previous_two,
+            accepted=previous_two_accepted,
+            metric_name="packed_action_output_change_relative_l2_max",
         )
 
         layer_position = np.arange(self.num_layers, dtype=np.float64)[:, None] / max(
@@ -378,13 +445,19 @@ class OnlineM1FeatureState:
             "state_abs_mean": full(state_abs_mean),
             "history_one_available": full(float(previous_accepted)),
             "history_two_available": full(float(previous_two_accepted)),
-            "previous_support_turnover_max": previous_support,
-            "previous_vv_output_change_relative_l2_max": previous_vv,
+            **history_features,
             "previous_two_vv_output_change_relative_l2_max": previous_two_vv,
-            "previous_normalized_entropy_mean": previous_entropy,
-            "previous_max_attention_mass_mean": previous_max_mass,
-            "previous_qa_qv_key_importance_correlation_mean": previous_correlation,
-            "vv_change_acceleration": np.abs(previous_vv - previous_two_vv),
+            "previous_two_packed_action_output_change_relative_l2_max": (
+                previous_two_packed_action
+            ),
+            "vv_change_acceleration": np.abs(
+                history_features["previous_vv_output_change_relative_l2_max"]
+                - previous_two_vv
+            ),
+            "packed_action_output_change_acceleration": np.abs(
+                history_features["previous_packed_action_output_change_relative_l2_max"]
+                - previous_two_packed_action
+            ),
             **{name: self.priors[name][dit_index] for name in PRIOR_VALUE_COLUMNS},
         }
         features = {name: all_features[name] for name in self.feature_columns}
@@ -450,7 +523,7 @@ class OnlineM1FeatureState:
         completed_steps = snapshot.get("completed_steps")
         if not isinstance(completed_steps, tuple):
             raise TypeError("invalid online M1 snapshot")
-        restored: dict[int, M1HistoricalObservation | None] = {}
+        restored: dict[int, M1Observation | None] = {}
         for entry in completed_steps:
             if (
                 not isinstance(entry, tuple)
@@ -458,7 +531,10 @@ class OnlineM1FeatureState:
                 or not isinstance(entry[0], int)
                 or (
                     entry[1] is not None
-                    and not isinstance(entry[1], M1HistoricalObservation)
+                    and not isinstance(
+                        entry[1],
+                        (M1HistoricalObservation, M1CausalObservation),
+                    )
                 )
             ):
                 raise ValueError("invalid online M1 snapshot")

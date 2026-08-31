@@ -9,6 +9,9 @@ from groot.vla.model.dreamzero.modules.dynamic_m1_classifier import (
 from groot.vla.model.dreamzero.modules.dynamic_m1_group_router import (
     DynamicM1GroupedRouter,
 )
+from groot.vla.model.dreamzero.modules.dynamic_m1_observation import (
+    M1CausalObservation,
+)
 from groot.vla.model.dreamzero.modules.dynamic_m1_online_state import (
     M1HistoricalObservation,
     OnlineM1FeatureState,
@@ -218,3 +221,57 @@ def test_online_state_rejects_out_of_order_and_restores_missing_probes() -> None
     restored.end_request()
     with pytest.raises(RuntimeError, match="begin_request"):
         _features(restored, 0)
+
+
+def test_online_state_maps_packed_proxy_schema_without_oracle_aliasing() -> None:
+    proxy_features = (
+        "history_one_available",
+        "history_two_available",
+        "previous_packed_route_support_turnover_max",
+        "previous_packed_action_output_change_relative_l2_max",
+        "previous_two_packed_action_output_change_relative_l2_max",
+        "packed_action_output_change_acceleration",
+        "prior_budget_mean_tlh",
+    )
+    bundle = {
+        **_bundle(),
+        "feature_columns": proxy_features,
+        "online_observation_schema": "dreamzero-packed-m1-proxy-v1",
+    }
+    state = OnlineM1FeatureState(
+        bundle,
+        num_dit_steps=3,
+        num_layers=2,
+        num_heads=2,
+    )
+
+    def proxy_observation(dit_index, change, turnover):
+        shape = (2, 2)
+        return M1CausalObservation(
+            dit_index=dit_index,
+            schema="dreamzero-packed-m1-proxy-v1",
+            metrics={
+                "packed_route_support_turnover_max": np.full(shape, turnover),
+                "packed_action_output_change_relative_l2_max": np.full(shape, change),
+            },
+        )
+
+    state.begin_request()
+    _features(state, 0)
+    state.observe(proxy_observation(0, 0.05, 0.10))
+    _features(state, 1)
+    state.observe(proxy_observation(1, 0.20, 0.30))
+
+    step2 = _features(state, 2)
+    assert not np.any(step2.dense_fallback)
+    assert np.all(
+        step2.features["previous_packed_action_output_change_relative_l2_max"] == 0.20
+    )
+    assert np.all(
+        step2.features["previous_two_packed_action_output_change_relative_l2_max"]
+        == 0.05
+    )
+    assert np.allclose(
+        step2.features["packed_action_output_change_acceleration"],
+        0.15,
+    )

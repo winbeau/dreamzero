@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from itertools import pairwise
 from pathlib import Path
 
 import joblib
@@ -23,7 +24,6 @@ from groot.vla.model.dreamzero.modules.dynamic_m1_classifier import (
     MappedGMMClassifier,
     RoutePolicy,
 )
-
 
 SEED = 20260830
 PRIOR_KEYS = ("dit_index", "layer_index", "head_index")
@@ -82,16 +82,44 @@ FEATURE_COLUMNS = (
     "prior_budget_std_tlh",
     "prior_critical_rate_tlh",
 )
+PACKED_PROXY_INPUT_COLUMNS = (
+    "previous_packed_route_support_turnover_max",
+    "previous_packed_route_normalized_entropy_mean",
+    "previous_packed_route_max_mass_mean",
+    "previous_packed_action_output_change_relative_l2_max",
+    "previous_two_packed_action_output_change_relative_l2_max",
+    "previous_packed_action_output_change_cosine_min",
+    "previous_packed_cfg_disagreement_relative_l2",
+    "previous_packed_action_output_signature_norm",
+)
+PACKED_PROXY_FEATURE_COLUMNS = (
+    "timestep_position",
+    "layer_depth",
+    "head_position",
+    "scheduler_position",
+    "diffusion_timestep_scaled",
+    "state_l2",
+    "state_abs_mean",
+    "history_one_available",
+    "history_two_available",
+    *PACKED_PROXY_INPUT_COLUMNS,
+    "packed_action_output_change_acceleration",
+    "prior_budget_mean_tlh",
+    "prior_budget_std_tlh",
+    "prior_critical_rate_tlh",
+)
+PACKED_PROXY_OBSERVATION_SCHEMA = "dreamzero-packed-m1-proxy-v1"
 
 
 def _ratio_suffix(ratio: float) -> str:
-    return f"r{int(round(ratio * 100)):03d}"
+    return f"r{round(ratio * 100):03d}"
 
 
-def required_columns() -> list[str]:
+def required_columns(extra_columns: tuple[str, ...] = ()) -> list[str]:
     columns = list(BASE_COLUMNS)
     for prefix in QUALITY_PREFIXES:
         columns.extend(f"{prefix}_{_ratio_suffix(ratio)}" for ratio in BUDGET_BUCKETS)
+    columns.extend(extra_columns)
     return list(dict.fromkeys(columns))
 
 
@@ -120,7 +148,9 @@ def add_train_only_priors(
         "prior_square_sum": ("_target_square", "sum"),
         "prior_critical_sum": ("_critical", "sum"),
     }
-    global_stats = train.groupby(list(PRIOR_KEYS), sort=False).agg(**aggregations).reset_index()
+    global_stats = (
+        train.groupby(list(PRIOR_KEYS), sort=False).agg(**aggregations).reset_index()
+    )
     episode_stats = (
         train.groupby(["source_episode_index", *PRIOR_KEYS], sort=False)
         .agg(**aggregations)
@@ -206,6 +236,11 @@ def add_deployment_features(frame: pd.DataFrame) -> pd.DataFrame:
         frame["previous_vv_output_change_relative_l2_max"]
         - frame["previous_two_vv_output_change_relative_l2_max"]
     )
+    if set(PACKED_PROXY_INPUT_COLUMNS).issubset(frame.columns):
+        frame["packed_action_output_change_acceleration"] = np.abs(
+            frame["previous_packed_action_output_change_relative_l2_max"]
+            - frame["previous_two_packed_action_output_change_relative_l2_max"]
+        )
     # Route-state columns are populated recursively during deployment.  They
     # stay outside FEATURE_COLUMNS until out-of-fold route histories exist;
     # fitting on Oracle previous budgets would create teacher-forcing leakage.
@@ -221,8 +256,10 @@ def stratified_cap(frame: pd.DataFrame, labels: np.ndarray, maximum: int) -> np.
     selected = []
     for label in np.unique(labels):
         candidates = np.flatnonzero(labels == label)
-        count = max(1, int(round(maximum * len(candidates) / len(labels))))
-        selected.append(rng.choice(candidates, size=min(count, len(candidates)), replace=False))
+        count = max(1, round(maximum * len(candidates) / len(labels)))
+        selected.append(
+            rng.choice(candidates, size=min(count, len(candidates)), replace=False)
+        )
     result = np.concatenate(selected)
     if len(result) > maximum:
         result = rng.choice(result, size=maximum, replace=False)
@@ -310,11 +347,14 @@ def sequential_predict(
     frame: pd.DataFrame,
     calibrator: IsotonicRegression | None = None,
     policy: RoutePolicy | None = None,
+    feature_columns: tuple[str, ...] = FEATURE_COLUMNS,
 ) -> dict[str, np.ndarray]:
     """Predict in real DiT order so budget history is deployment-faithful."""
 
     working = frame.copy()
-    state_keys = pd.MultiIndex.from_frame(working[["request_key", "layer_index", "head_index"]])
+    state_keys = pd.MultiIndex.from_frame(
+        working[["request_key", "layer_index", "head_index"]]
+    )
     state_codes, uniques = pd.factorize(state_keys, sort=False)
     previous = np.ones(len(uniques), dtype=np.float64)
     previous_two = np.ones(len(uniques), dtype=np.float64)
@@ -331,7 +371,7 @@ def sequential_predict(
         working.loc[row_indices, "previous_route_budget"] = previous[codes]
         working.loc[row_indices, "previous_two_route_budget"] = previous_two[codes]
         step_probabilities = aligned_probabilities(
-            estimator, working.loc[row_indices, FEATURE_COLUMNS]
+            estimator, working.loc[row_indices, feature_columns]
         )
         step_raw = np.argmax(step_probabilities, axis=1)
         step_raw_confidence = np.max(step_probabilities, axis=1)
@@ -374,16 +414,20 @@ def expected_calibration_error(
 ) -> float:
     edges = np.linspace(0.0, 1.0, bins + 1)
     error = 0.0
-    for lower, upper in zip(edges[:-1], edges[1:]):
+    for lower, upper in pairwise(edges):
         mask = (confidence >= lower) & (
             (confidence < upper) if upper < 1.0 else (confidence <= upper)
         )
         if np.any(mask):
-            error += np.mean(mask) * abs(np.mean(confidence[mask]) - np.mean(outcomes[mask]))
+            error += np.mean(mask) * abs(
+                np.mean(confidence[mask]) - np.mean(outcomes[mask])
+            )
     return float(error if len(confidence) else np.nan)
 
 
-def selected_quality(frame: pd.DataFrame, prediction: np.ndarray, prefix: str) -> np.ndarray:
+def selected_quality(
+    frame: pd.DataFrame, prediction: np.ndarray, prefix: str
+) -> np.ndarray:
     matrix = frame[
         [f"{prefix}_{_ratio_suffix(ratio)}" for ratio in BUDGET_BUCKETS]
     ].to_numpy(dtype=np.float64)
@@ -405,7 +449,13 @@ def route_metrics(
     return {
         "row_count": len(frame),
         "macro_f1": float(
-            f1_score(truth, prediction, labels=np.arange(len(BUDGET_BUCKETS)), average="macro", zero_division=0)
+            f1_score(
+                truth,
+                prediction,
+                labels=np.arange(len(BUDGET_BUCKETS)),
+                average="macro",
+                zero_division=0,
+            )
         ),
         "confusion_matrix": confusion_matrix(
             truth, prediction, labels=np.arange(len(BUDGET_BUCKETS))
@@ -418,7 +468,9 @@ def route_metrics(
         "dense_route_rate": float(np.mean(prediction == len(BUDGET_BUCKETS) - 1)),
         "confidence_fallback_rate": float(np.mean(result["fallback"])),
         "mass_p05_at_least_0_9_rate": float(np.mean(mass >= 0.9)),
-        "local_output_gate_rate": float(np.mean((cosine >= 0.999) & (relative_l2 <= 0.05))),
+        "local_output_gate_rate": float(
+            np.mean((cosine >= 0.999) & (relative_l2 <= 0.05))
+        ),
         "route_confidence_ece": expected_calibration_error(
             result["route_confidence"], safe_outcome
         ),
@@ -442,8 +494,13 @@ def choose_policy(
     *,
     false_sparse_limit: float,
     mass_gate_rate: float,
+    feature_columns: tuple[str, ...] = FEATURE_COLUMNS,
 ) -> tuple[RoutePolicy, dict[str, np.ndarray], dict[str, object]]:
-    raw = sequential_predict(estimator, validation)
+    raw = sequential_predict(
+        estimator,
+        validation,
+        feature_columns=feature_columns,
+    )
     calibrated = calibrator.predict(raw["raw_confidence"])
     thresholds = np.unique(
         np.concatenate(
@@ -498,14 +555,23 @@ def bootstrap_test_metrics(
     unique = np.unique(episodes)
     by_episode = {episode: np.flatnonzero(episodes == episode) for episode in unique}
     rng = np.random.default_rng(SEED)
-    values = {name: [] for name in ("false_sparse_rate", "mean_keep_ratio", "mass_p05_at_least_0_9_rate")}
+    values = {
+        name: []
+        for name in (
+            "false_sparse_rate",
+            "mean_keep_ratio",
+            "mass_p05_at_least_0_9_rate",
+        )
+    }
     for _ in range(repeats):
         sampled = rng.choice(unique, size=len(unique), replace=True)
         indices = np.concatenate([by_episode[episode] for episode in sampled])
         subset_result = {key: value[indices] for key, value in result.items()}
-        subset_metrics = route_metrics(frame.iloc[indices], truth[indices], subset_result)
-        for name in values:
-            values[name].append(subset_metrics[name])
+        subset_metrics = route_metrics(
+            frame.iloc[indices], truth[indices], subset_result
+        )
+        for name, samples in values.items():
+            samples.append(subset_metrics[name])
     return {
         name: {
             "mean": float(np.mean(samples)),
@@ -516,11 +582,24 @@ def bootstrap_test_metrics(
     }
 
 
-def route_semantics(frame: pd.DataFrame, result: dict[str, np.ndarray]) -> dict[str, object]:
+def route_semantics(
+    frame: pd.DataFrame, result: dict[str, np.ndarray]
+) -> dict[str, object]:
     prediction = result["prediction"]
     fallback = result["fallback"]
-    previous_turnover = frame["previous_support_turnover_max"].to_numpy()
-    previous_vv_l2 = frame["previous_vv_output_change_relative_l2_max"].to_numpy()
+    packed_proxy = "previous_packed_route_support_turnover_max" in frame.columns
+    turnover_column = (
+        "previous_packed_route_support_turnover_max"
+        if packed_proxy
+        else "previous_support_turnover_max"
+    )
+    change_column = (
+        "previous_packed_action_output_change_relative_l2_max"
+        if packed_proxy
+        else "previous_vv_output_change_relative_l2_max"
+    )
+    previous_turnover = frame[turnover_column].to_numpy()
+    previous_vv_l2 = frame[change_column].to_numpy()
     late = frame["dit_index"].to_numpy() >= 5
     categories = np.full(len(frame), "slow-changing", dtype=object)
     categories[prediction >= budget_indices([0.75])[0]] = "critical"
@@ -540,8 +619,11 @@ def route_semantics(frame: pd.DataFrame, result: dict[str, np.ndarray]) -> dict[
         "category_counts": {str(key): int(value) for key, value in counts.items()},
         "category_rules": {
             "critical": "routed budget >= 75%",
-            "stable": "budget <=25% and previous support turnover <=0.20",
-            "predictable-late": "DiT>=5, budget<=35%, two-step history, turnover<=0.20, previous VV relative L2<=0.05",
+            "stable": f"budget <=25% and {turnover_column} <=0.20",
+            "predictable-late": (
+                "DiT>=5, budget<=35%, two-step history, turnover<=0.20, "
+                f"{change_column}<=0.05"
+            ),
             "slow-changing": "remaining confident routes",
             "uncertain": "confidence-triggered Dense fallback",
         },
@@ -560,7 +642,21 @@ def route_semantics(frame: pd.DataFrame, result: dict[str, np.ndarray]) -> dict[
 
 
 def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
-    frame = pd.read_parquet(args.input_table, columns=required_columns())
+    feature_schema = getattr(args, "feature_schema", "dense-oracle-v3")
+    if feature_schema == "dense-oracle-v3":
+        feature_columns = FEATURE_COLUMNS
+        input_columns: tuple[str, ...] = ()
+        observation_schema = None
+    elif feature_schema == "packed-proxy-v1":
+        feature_columns = PACKED_PROXY_FEATURE_COLUMNS
+        input_columns = PACKED_PROXY_INPUT_COLUMNS
+        observation_schema = PACKED_PROXY_OBSERVATION_SCHEMA
+    else:
+        raise ValueError(f"Unknown M1 feature schema: {feature_schema}")
+    frame = pd.read_parquet(
+        args.input_table,
+        columns=required_columns(input_columns),
+    )
     frame["split"] = frame["split"].replace({"validation": "val"})
     split_frames = {
         split: frame.loc[frame["split"] == split].reset_index(drop=True)
@@ -592,32 +688,43 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         estimator, cost_sensitive = available[name]
         cap = args.mlp_train_rows if name == "small_mlp" else args.max_train_rows
         indices = stratified_cap(split_frames["train"], labels["train"], cap)
-        fit_features = split_frames["train"].iloc[indices][list(FEATURE_COLUMNS)]
+        fit_features = split_frames["train"].iloc[indices][list(feature_columns)]
         fit_labels = labels["train"][indices]
         fit_kwargs = {}
         if cost_sensitive:
-            weights = 1.0 + args.underprediction_cost * (
-                fit_labels / (len(BUDGET_BUCKETS) - 1)
-            ) ** 2
+            weights = (
+                1.0
+                + args.underprediction_cost
+                * (fit_labels / (len(BUDGET_BUCKETS) - 1)) ** 2
+            )
             fit_kwargs["histgradientboostingclassifier__sample_weight"] = weights
         estimator.fit(fit_features, fit_labels, **fit_kwargs)
-        raw_validation = sequential_predict(estimator, split_frames["val"])
+        raw_validation = sequential_predict(
+            estimator,
+            split_frames["val"],
+            feature_columns=feature_columns,
+        )
         calibrator = calibrate_confidence(raw_validation, labels["val"])
-        policy, validation_result, validation_metrics = choose_policy(
+        policy, _validation_result, validation_metrics = choose_policy(
             estimator,
             split_frames["val"],
             labels["val"],
             calibrator,
             false_sparse_limit=args.false_sparse_limit,
             mass_gate_rate=args.mass_gate_rate,
+            feature_columns=feature_columns,
         )
         test_result = sequential_predict(
-            estimator, split_frames["test"], calibrator, policy
+            estimator,
+            split_frames["test"],
+            calibrator,
+            policy,
+            feature_columns=feature_columns,
         )
         test_metrics = route_metrics(split_frames["test"], labels["test"], test_result)
         raw_safe = raw_validation["raw_prediction"] >= labels["val"]
         model_results[name] = {
-            "train_rows": int(len(indices)),
+            "train_rows": len(indices),
             "validation": validation_metrics,
             "test": test_metrics,
             "policy": {
@@ -663,17 +770,19 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
             -model_results[name]["validation"]["macro_f1"],
         ),
     )
-    best_estimator, best_calibrator, best_policy, best_test_result = fitted[best_name]
+    best_estimator, best_calibrator, best_policy, _best_test_result = fitted[best_name]
     bundle = {
         "model_name": best_name,
         "estimator": best_estimator,
         "confidence_calibrator": best_calibrator,
         "policy": best_policy,
-        "feature_columns": FEATURE_COLUMNS,
+        "feature_columns": feature_columns,
         "budget_buckets": BUDGET_BUCKETS,
         "prior_table": prior_table,
         "schema_version": 1,
     }
+    if observation_schema is not None:
+        bundle["online_observation_schema"] = observation_schema
     joblib.dump(bundle, args.output_dir / "selected_m1_bundle.joblib", compress=3)
     prior_table.to_parquet(args.output_dir / "m1_prior_table.parquet", index=False)
     test_metrics = model_results[best_name]["test"]
@@ -688,7 +797,9 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
     )
     summary = {
         "input_table": str(args.input_table),
-        "feature_columns": list(FEATURE_COLUMNS),
+        "feature_schema": feature_schema,
+        "online_observation_schema": observation_schema,
+        "feature_columns": list(feature_columns),
         "forbidden_current_dense_features": [
             "support_turnover_max",
             "vv_output_change_relative_l2_max",
@@ -739,6 +850,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-table", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--feature-schema",
+        choices=("dense-oracle-v3", "packed-proxy-v1"),
+        default="dense-oracle-v3",
+    )
     parser.add_argument(
         "--models",
         nargs="+",

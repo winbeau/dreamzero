@@ -1,12 +1,14 @@
 from argparse import Namespace
 
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
-import joblib
 
 from benchmarks.train_dynamic_m1_classifier import (
     BASE_COLUMNS,
+    PACKED_PROXY_FEATURE_COLUMNS,
+    PACKED_PROXY_INPUT_COLUMNS,
     QUALITY_PREFIXES,
     RoutePolicy,
     add_train_only_priors,
@@ -109,7 +111,7 @@ def test_low_confidence_route_falls_back_dense():
     for column in FEATURE_COLUMNS:
         frame[column] = 0.0
     for ratio in BUDGET_BUCKETS:
-        suffix = f"r{int(round(ratio * 100)):03d}"
+        suffix = f"r{round(ratio * 100):03d}"
         frame[f"worst_mass_p05_{suffix}"] = ratio
         frame[f"worst_output_cosine_p05_{suffix}"] = 1.0
         frame[f"worst_output_relative_l2_p95_{suffix}"] = 0.0
@@ -207,7 +209,7 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
                             ),
                         }
                         for ratio in BUDGET_BUCKETS:
-                            suffix = f"r{int(round(ratio * 100)):03d}"
+                            suffix = f"r{round(ratio * 100):03d}"
                             safe = ratio >= target
                             row[f"worst_mass_p05_{suffix}"] = 0.95 if safe else 0.5
                             row[f"worst_output_cosine_p05_{suffix}"] = (
@@ -220,6 +222,15 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
                         previous_two[state_key] = previous.get(state_key, 1.0)
                         previous[state_key] = target
     table = pd.DataFrame(rows)
+    first_step = table["dit_index"] == 0
+    first_two_steps = table["dit_index"] < 2
+    for column_index, column in enumerate(PACKED_PROXY_INPUT_COLUMNS):
+        unavailable = first_two_steps if "previous_two" in column else first_step
+        table[column] = np.where(
+            unavailable,
+            np.nan,
+            0.01 * (column_index + 1) + 0.001 * table["dit_index"],
+        )
     assert set(BASE_COLUMNS).issubset(table.columns)
     assert all(
         any(column.startswith(prefix) for column in table.columns)
@@ -252,3 +263,31 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
     bundle = joblib.load(output_dir / "selected_m1_bundle.joblib")
     assert len(bundle["prior_table"]) == 8 * 2 * 2
     assert (output_dir / "m1_prior_table.parquet").is_file()
+
+    proxy_output_dir = tmp_path / "proxy-output"
+    proxy_summary = train_and_evaluate(
+        Namespace(
+            input_table=input_path,
+            output_dir=proxy_output_dir,
+            feature_schema="packed-proxy-v1",
+            models=["gradient_boosting"],
+            max_train_rows=0,
+            mlp_train_rows=0,
+            underprediction_cost=20.0,
+            false_sparse_limit=0.01,
+            mass_gate_rate=0.95,
+            minimum_macro_f1=0.0,
+            require_confidence_fallback=False,
+            bootstrap_repeats=5,
+        )
+    )
+    proxy_bundle = joblib.load(proxy_output_dir / "selected_m1_bundle.joblib")
+
+    assert proxy_summary["feature_schema"] == "packed-proxy-v1"
+    assert proxy_bundle["online_observation_schema"] == (
+        "dreamzero-packed-m1-proxy-v1"
+    )
+    assert tuple(proxy_bundle["feature_columns"]) == PACKED_PROXY_FEATURE_COLUMNS
+    assert "previous_vv_output_change_relative_l2_max" not in proxy_bundle[
+        "feature_columns"
+    ]

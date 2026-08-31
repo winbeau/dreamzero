@@ -336,6 +336,8 @@ class CausalWanSelfAttention(nn.Module):
         self.packed_dense_action_history = False
         self.packed_max_action_current = False
         self.dynamic_oracle_collector: Any | None = None
+        self.dynamic_m1_packed_observer: Any | None = None
+        self.dynamic_m1_cfg_branch: str | None = None
         self.downstream_head_intervention: DownstreamHeadIntervention | None = None
         self.downstream_intervention_dit_index: int | None = None
         self.downstream_intervention_cfg_branch: str | None = None
@@ -376,6 +378,34 @@ class CausalWanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim)
         self.causal_attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim, causal=True)
+
+    def _observe_dynamic_m1_action_output(
+        self,
+        output: torch.Tensor,
+        *,
+        action_register_length: int,
+        registers_first: bool,
+    ) -> None:
+        observer = self.dynamic_m1_packed_observer
+        if observer is None:
+            return
+        branch = self.dynamic_m1_cfg_branch
+        if branch is None:
+            return
+        if output.ndim != 4 or output.shape[2] != self.num_heads:
+            raise ValueError("M1 attention output must have shape [B, L, H, D]")
+        if not 0 < action_register_length <= output.shape[1]:
+            raise ValueError("M1 action/state register length is invalid")
+        register_output = (
+            output[:, :action_register_length]
+            if registers_first
+            else output[:, -action_register_length:]
+        )
+        observer.observe_action_output(
+            layer_index=self.layer_index,
+            cfg_branch=branch,
+            action_output=register_output,
+        )
 
     def _apply_downstream_head_intervention(
         self,
@@ -678,6 +708,7 @@ class CausalWanSelfAttention(nn.Module):
 
         group_attention_inputs: list[
             tuple[
+                tuple[int, ...],
                 int,
                 int,
                 torch.Tensor,
@@ -804,6 +835,7 @@ class CausalWanSelfAttention(nn.Module):
             )
             group_attention_inputs.append(
                 (
+                    group_heads,
                     group_length,
                     group_head_count,
                     group_query,
@@ -824,6 +856,7 @@ class CausalWanSelfAttention(nn.Module):
         max_query_length = 0
         max_key_length = 0
         for (
+            _group_heads,
             group_length,
             group_head_count,
             group_query,
@@ -884,8 +917,20 @@ class CausalWanSelfAttention(nn.Module):
         )
 
         projected_output = x.new_zeros(x.shape)
+        observed_register_output = (
+            x.new_empty(
+                batch,
+                action_register_length,
+                self.num_heads,
+                self.head_dim,
+            )
+            if self.dynamic_m1_packed_observer is not None
+            and self.dynamic_m1_cfg_branch is not None
+            else None
+        )
         output_offset = 0
         for (
+            group_heads,
             group_length,
             group_head_count,
             _group_query,
@@ -908,8 +953,21 @@ class CausalWanSelfAttention(nn.Module):
                 None,
             )
             projected_output[:, :group_length].add_(group_output_projection)
+            if observed_register_output is not None:
+                head_indices = self._packed_head_indices(group_heads, x.device)
+                observed_register_output[:, :action_register_length].index_copy_(
+                    2,
+                    head_indices,
+                    group_output[:, :action_register_length],
+                )
             output_offset += group_output_tokens
 
+        if observed_register_output is not None:
+            self._observe_dynamic_m1_action_output(
+                observed_register_output,
+                action_register_length=action_register_length,
+                registers_first=True,
+            )
         if self.o.bias is not None:
             projected_output.add_(self.o.bias)
         return projected_output
@@ -1241,6 +1299,11 @@ class CausalWanSelfAttention(nn.Module):
                     output = output.index_copy(
                         1, query_positions, selected_output
                     )
+        self._observe_dynamic_m1_action_output(
+            output,
+            action_register_length=action_register_length,
+            registers_first=True,
+        )
         return self.o(output.flatten(2))
 
     def _visualize_attention_mask(self, total_len, first_image_len, image_blocks_len, 
@@ -2192,6 +2255,14 @@ class CausalWanSelfAttention(nn.Module):
                         updated_anchor_route_indices = route.video_indices.detach()
                         if self.record_anchor_diagnostics:
                             self.last_anchor_route = route.detached()
+                        if (
+                            self.dynamic_m1_packed_observer is not None
+                            and self.dynamic_m1_cfg_branch is not None
+                        ):
+                            self.dynamic_m1_packed_observer.observe_route_scores(
+                                route.scores,
+                                cfg_branch=self.dynamic_m1_cfg_branch,
+                            )
                     if sparse_config.keep_ratio < 1.0:
                         num_new_frames = num_new_tokens // sparse_config.frame_seqlen
                         direct_sparse_history = (
@@ -2270,6 +2341,13 @@ class CausalWanSelfAttention(nn.Module):
                 assert new_k is not None and new_v is not None
                 updated_kv_cache = torch.stack([new_k, new_v], dim=0)
 
+
+        if action_register_length is not None and kv_cache is not None:
+            self._observe_dynamic_m1_action_output(
+                x,
+                action_register_length=action_register_length,
+                registers_first=False,
+            )
 
         # Controlled downstream Oracle interventions act on the exact per-head
         # Dense attention output and then retain the released O projection and
@@ -2800,6 +2878,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             DownstreamHeadIntervention | None
         ) = None
         self._dynamic_attention_oracle_cfg_branch: str | None = None
+        self._dynamic_m1_packed_observer: Any | None = None
+        self._dynamic_m1_packed_observations: list[Any | None] = []
 
         max_num_embodiments = 1
 
@@ -3010,7 +3090,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         trajectory_stage: str | None = None,
     ) -> None:
         self._dynamic_sparse_force_dense = False
+        self._dynamic_sparse_dit_index = None
+        self._dynamic_sparse_scheduler_index = None
+        self._dynamic_sparse_scheduler_steps = None
         self._dynamic_attention_oracle_cfg_branch = None
+        self._dynamic_m1_packed_observations = []
+        if self._dynamic_m1_packed_observer is not None:
+            self._dynamic_m1_packed_observer.begin_request()
         intervention = self._dynamic_downstream_head_intervention
         if intervention is not None:
             block = self.blocks[intervention.layer_index]
@@ -3038,6 +3124,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # evaluation even when Oracle collection is disabled.  Reuse that exact
         # execution context for dynamic sparse budgets; skipped scheduler steps
         # never advance ``dit_index``.
+        observer = self._dynamic_m1_packed_observer
+        if observer is not None:
+            if observer.step_active:
+                self._dynamic_m1_packed_observations.append(
+                    observer.finish_step()
+                )
+            if len(self._dynamic_m1_packed_observations) != dit_index:
+                raise RuntimeError(
+                    "Packed M1 observations do not align with real DiT order"
+                )
+            observer.begin_step(int(dit_index))
         self._dynamic_sparse_scheduler_index = int(scheduler_index)
         self._dynamic_sparse_dit_index = int(dit_index)
         self._dynamic_sparse_scheduler_steps = int(scheduler_steps)
@@ -3057,6 +3154,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
     def set_dynamic_attention_oracle_cfg_branch(self, branch: str | None) -> None:
         self._dynamic_attention_oracle_cfg_branch = branch
+        for block in self.blocks:
+            block.self_attn.dynamic_m1_cfg_branch = branch
         intervention = self._dynamic_downstream_head_intervention
         if intervention is not None:
             self.blocks[
@@ -3122,10 +3221,34 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         }
 
     def flush_dynamic_attention_oracle_request(self):
+        observer = self._dynamic_m1_packed_observer
+        if observer is not None:
+            if observer.step_active:
+                self._dynamic_m1_packed_observations.append(
+                    observer.finish_step()
+                )
+            observer.end_request()
         collector = self._dynamic_attention_oracle_collector
         if collector is None:
             return None
         return collector.flush_request()
+
+    def configure_dynamic_m1_packed_observer(self, observer: Any | None) -> None:
+        """Attach a low-overhead causal observer to Dense and Packed paths."""
+
+        if observer is not None:
+            if observer.num_layers != len(self.blocks):
+                raise ValueError("Packed M1 observer layer count differs from model")
+            if observer.num_heads != self.num_heads:
+                raise ValueError("Packed M1 observer Head count differs from model")
+        self._dynamic_m1_packed_observer = observer
+        self._dynamic_m1_packed_observations = []
+        for block in self.blocks:
+            block.self_attn.dynamic_m1_packed_observer = observer
+            block.self_attn.dynamic_m1_cfg_branch = None
+
+    def get_dynamic_m1_packed_observations(self) -> tuple[Any | None, ...]:
+        return tuple(self._dynamic_m1_packed_observations)
 
     def get_dynamic_attention_oracle_last_flush_paths(self):
         collector = self._dynamic_attention_oracle_collector

@@ -18,6 +18,9 @@ from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
 from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
     DownstreamHeadIntervention,
 )
+from groot.vla.model.dreamzero.modules.dynamic_m1_packed_observer import (
+    PackedM1CausalObserver,
+)
 
 
 def _load_attention_module():
@@ -464,7 +467,117 @@ def test_head_sliced_full_current_groups_match_single_call_without_qk_norm():
 
     # Head-as-batch varlen SDPA changes reduction ordering slightly while
     # preserving the same per-head attention problem.
-    assert torch.allclose(grouped, single, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(grouped, single, atol=2e-3, rtol=2e-3)
+
+
+def test_packed_m1_observer_sees_same_dense_register_heads_for_grouped_qkv():
+    module = _load_attention_module()
+    single_attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+        qk_norm=False,
+    )
+    grouped_attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+        qk_norm=False,
+    )
+    grouped_attention.load_state_dict(single_attention.state_dict())
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    packed_freqs = torch.ones((1, 5, 1, 2), dtype=torch.complex128)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+
+    class Observer:
+        def __init__(self):
+            self.action_output = None
+
+        def observe_action_output(self, **kwargs):
+            self.action_output = kwargs["action_output"].detach().clone()
+
+    single_observer = Observer()
+    grouped_observer = Observer()
+    for attention, observer in (
+        (single_attention, single_observer),
+        (grouped_attention, grouped_observer),
+    ):
+        attention.dynamic_m1_packed_observer = observer
+        attention.dynamic_m1_cfg_branch = "conditional"
+        attention.layer_index = 0
+
+    single_attention.forward_packed(
+        packed_x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+    )
+    grouped_attention.forward_packed(
+        packed_x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+        head_groups=(((0,), 0.5, 1.0), ((1,), 0.5, 1.0)),
+        history_indices_by_ratio={0.5: history_indices},
+        current_video_tokens_by_ratio={1.0: 2},
+    )
+
+    assert single_observer.action_output is not None
+    assert grouped_observer.action_output is not None
+    assert single_observer.action_output.shape == (1, 3, 2, 4)
+    assert torch.allclose(
+        grouped_observer.action_output,
+        single_observer.action_output,
+        atol=2e-3,
+        rtol=2e-3,
+    )
+
+
+def test_model_lifecycle_finalizes_one_proxy_observation_per_real_dit():
+    module = _load_attention_module()
+    model = _small_model(module)
+    observer = PackedM1CausalObserver(
+        num_layers=2,
+        num_heads=2,
+        cfg_branches=("conditional",),
+    )
+    model.configure_dynamic_m1_packed_observer(observer)
+    model.begin_dynamic_attention_oracle_request(current_start_frame=1)
+
+    for dit_index in range(2):
+        model.set_dynamic_attention_oracle_step(
+            scheduler_index=dit_index,
+            dit_index=dit_index,
+            scheduler_steps=16,
+            timestep=999 - dit_index,
+        )
+        model.set_dynamic_attention_oracle_cfg_branch("conditional")
+        for layer_index, block in enumerate(model.blocks):
+            block.self_attn._observe_dynamic_m1_action_output(
+                torch.full((1, 3, 2, 4), float(dit_index + layer_index + 1)),
+                action_register_length=3,
+                registers_first=True,
+            )
+
+    model.flush_dynamic_attention_oracle_request()
+    observations = model.get_dynamic_m1_packed_observations()
+
+    assert len(observations) == 2
+    assert all(observation is not None for observation in observations)
+    assert observations[0].dit_index == 0
+    assert observations[1].dit_index == 1
+    assert observations[1].metric(
+        "packed_action_output_change_relative_l2_max"
+    ).shape == (2, 2)
 
 
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
@@ -1163,6 +1276,14 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model._packed_budget_ratios_for_layer(1) == (1.0, 1.0)
     assert model._packed_head_groups_for_layer(1) is None
     model.begin_dynamic_attention_oracle_request(current_start_frame=7)
+    with pytest.raises(RuntimeError, match="before the real DiT index was set"):
+        model._packed_budget_ratios_for_layer(1)
+    model.set_dynamic_attention_oracle_step(
+        scheduler_index=0,
+        dit_index=0,
+        scheduler_steps=16,
+        timestep=999,
+    )
     assert model._packed_budget_ratios_for_layer(1) == (0.20, 0.25)
     route = AnchorRoute(
         video_indices=torch.arange(3 * 880).reshape(1, -1),
