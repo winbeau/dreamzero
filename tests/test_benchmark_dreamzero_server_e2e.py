@@ -7,6 +7,11 @@ from benchmarks.benchmark_dreamzero_server_droid import (
     history_frame_groups,
     split_state,
 )
+from benchmarks.benchmark_downstream_head_sensitivity_droid import (
+    action_sensitivity_metrics,
+    intervention_control,
+    run_chain,
+)
 from benchmarks.compare_dreamzero_server_e2e import compare_reports
 from benchmarks.summarize_dreamzero_server_log import summarize_log
 
@@ -35,6 +40,76 @@ def test_summarize_reports_expected_statistics():
     assert result["median_seconds"] == pytest.approx(2.5)
     assert result["min_seconds"] == pytest.approx(1.0)
     assert result["max_seconds"] == pytest.approx(4.0)
+
+
+def test_downstream_action_sensitivity_metrics_are_paired() -> None:
+    baseline = np.asarray([[1.0, 0.0]])
+    intervened = np.asarray([[0.8, 0.2]])
+
+    metrics = action_sensitivity_metrics(baseline, intervened)
+
+    assert metrics["action_cosine"] == pytest.approx(0.9701425)
+    assert metrics["action_relative_l2"] == pytest.approx(np.sqrt(0.08))
+    assert metrics["action_max_abs"] == pytest.approx(0.2)
+
+
+def test_downstream_intervention_control_is_conditional_only() -> None:
+    assert intervention_control(
+        dit_index=2,
+        layer_index=7,
+        head_indices=(1, 4),
+        scale=0.0,
+        query_scope="register",
+    ) == {
+        "enabled": True,
+        "dit_index": 2,
+        "layer_index": 7,
+        "head_indices": [1, 4],
+        "scale": 0.0,
+        "cfg_branches": ["conditional"],
+        "query_scope": "register",
+    }
+
+
+def test_downstream_run_chain_disables_history_and_controls_only_target() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.requests = []
+            self.resets = []
+
+        def infer(self, observation):
+            self.requests.append(observation.copy())
+            return np.asarray([[len(self.requests), 0.0]])
+
+        def reset(self, reset_info):
+            self.resets.append(reset_info.copy())
+
+    client = FakeClient()
+    observations = [{"frame": index} for index in range(4)]
+    control = intervention_control(
+        dit_index=0,
+        layer_index=39,
+        head_indices=(14,),
+        scale=0.0,
+        query_scope="all",
+    )
+
+    action, history_latencies, target_latency = run_chain(
+        client,
+        observations,
+        target_control=control,
+        session_id="paired",
+    )
+
+    assert np.array_equal(action, np.asarray([[4, 0.0]]))
+    assert len(history_latencies) == 3
+    assert target_latency >= 0.0
+    assert [
+        request["dynamic_downstream_head_intervention"]
+        for request in client.requests[:-1]
+    ] == [{"enabled": False}] * 3
+    assert client.requests[-1]["dynamic_downstream_head_intervention"] == control
+    assert client.resets == [{"session_id": "paired"}]
 
 
 def test_summarize_rejects_empty_input():

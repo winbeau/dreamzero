@@ -81,6 +81,7 @@ class Args:
     dynamic_downstream_scale: float = 0.0
     dynamic_downstream_cfg_branches: tuple[str, ...] = ("conditional",)
     dynamic_downstream_query_scope: str = "all"
+    dynamic_downstream_allow_request_override: bool = False
     save_video_on_reset: bool = True
 
 
@@ -103,11 +104,15 @@ class ARDroidRoboarenaPolicy:
         signal_group: dist.ProcessGroup,
         output_dir: str | None = None,
         save_video_on_reset: bool = True,
+        allow_downstream_request_override: bool = False,
     ) -> None:
         self._policy = groot_policy
         self._signal_group = signal_group
         self._output_dir = output_dir
         self._save_video_on_reset = save_video_on_reset
+        self._allow_downstream_request_override = (
+            allow_downstream_request_override
+        )
         
         # Frame buffers for accumulation (per camera view)
         self._frame_buffers: dict[str, list[np.ndarray]] = {
@@ -286,6 +291,52 @@ class ARDroidRoboarenaPolicy:
         # Broadcast data
         data_tensor = torch.frombuffer(serialized, dtype=torch.uint8).cuda()
         dist.broadcast(data_tensor, src=0)
+
+    def _apply_downstream_request_override(self, obs: dict) -> None:
+        control = obs.pop("dynamic_downstream_head_intervention", None)
+        if control is None:
+            return
+        if not self._allow_downstream_request_override:
+            raise ValueError(
+                "Per-request downstream intervention override is disabled"
+            )
+        if not isinstance(control, dict):
+            raise ValueError("downstream intervention override must be a mapping")
+
+        diffusion_model = self._policy.trained_model.action_head.model
+        configure = getattr(
+            diffusion_model,
+            "configure_dynamic_downstream_head_intervention",
+            None,
+        )
+        if configure is None:
+            raise RuntimeError(
+                "Loaded diffusion model does not support downstream intervention"
+            )
+        if not bool(control.get("enabled", True)):
+            configure(None)
+            return
+
+        from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
+            DownstreamHeadIntervention,
+        )
+
+        cfg_branches = tuple(control.get("cfg_branches", ("conditional",)))
+        if cfg_branches != ("conditional",):
+            raise ValueError(
+                "Distributed per-request override currently supports only the "
+                "conditional CFG branch"
+            )
+        intervention = DownstreamHeadIntervention(
+            dit_index=int(control["dit_index"]),
+            layer_index=int(control["layer_index"]),
+            head_indices=tuple(int(index) for index in control["head_indices"]),
+            scale=float(control.get("scale", 0.0)),
+            cfg_branches=cfg_branches,
+            query_scope=str(control.get("query_scope", "all")),
+        )
+        configure(intervention)
+        logger.info("Per-request downstream intervention: %s", intervention)
     
     def infer(self, obs: dict) -> np.ndarray:
         """Infer actions from observations.
@@ -309,6 +360,11 @@ class ARDroidRoboarenaPolicy:
         
         self._msg_index += 1
         self._call_count += 1
+
+        # This research-only control is consumed before observation conversion
+        # and is never exposed to the trained policy transforms.  Rank zero is
+        # the conditional CFG branch in the released two-rank deployment.
+        self._apply_downstream_request_override(obs)
         
         # Convert observation format
         converted_obs = self._convert_observation(obs)
@@ -1119,6 +1175,9 @@ def main(args: Args) -> None:
         signal_group=signal_group,
         output_dir=output_dir,
         save_video_on_reset=args.save_video_on_reset,
+        allow_downstream_request_override=(
+            args.dynamic_downstream_allow_request_override
+        ),
     )
     
     # Configure server for AR_droid (2 external cameras, wrist camera, joint position actions)
