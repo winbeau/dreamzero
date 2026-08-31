@@ -1,0 +1,15 @@
+{
+  "description": "Four-head shared groups for the first downstream action-sensitivity scan at real DiT 0, layer 39.",
+  "candidates": [
+    {"label": "d0_l39_h00_03_all", "dit_index": 0, "layer_index": 39, "head_indices": [0, 1, 2, 3], "query_scope": "all"},
+    {"label": "d0_l39_h04_07_all", "dit_index": 0, "layer_index": 39, "head_indices": [4, 5, 6, 7], "query_scope": "all"},
+    {"label": "d0_l39_h08_11_all", "dit_index": 0, "layer_index": 39, "head_indices": [8, 9, 10, 11], "query_scope": "all"},
+    {"label": "d0_l39_h12_15_all", "dit_index": 0, "layer_index": 39, "head_indices": [12, 13, 14, 15], "query_scope": "all"},
+    {"label": "d0_l39_h16_19_all", "dit_index": 0, "layer_index": 39, "head_indices": [16, 17, 18, 19], "query_scope": "all"},
+    {"label": "d0_l39_h20_23_all", "dit_index": 0, "layer_index": 39, "head_indices": [20, 21, 22, 23], "query_scope": "all"},
+    {"label": "d0_l39_h24_27_all", "dit_index": 0, "layer_index": 39, "head_indices": [24, 25, 26, 27], "query_scope": "all"},
+    {"label": "d0_l39_h28_31_all", "dit_index": 0, "layer_index": 39, "head_indices": [28, 29, 30, 31], "query_scope": "all"},
+    {"label": "d0_l39_h32_35_all", "dit_index": 0, "layer_index": 39, "head_indices": [32, 33, 34, 35], "query_scope": "all"},
+    {"label": "d0_l39_h36_39_all", "dit_index": 0, "layer_index": 39, "head_indices": [36, 37, 38, 39], "query_scope": "all"}
+  ]
+}
