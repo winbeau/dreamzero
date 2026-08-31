@@ -283,3 +283,31 @@ policy.
 not to a final quality claim.  The sample count is three, generated video is
 not yet compared on this service path, and confidence fallback, 100-request,
 GPU-exchange, and closed-loop gates remain open.
+
+## Propagation-aligned validation18 result
+
+The task-disjoint validation replay rejects the pilot frontier.  Four of 18
+requests fail the joint cosine/L2 gate:
+
+| Stage | Request | Cosine | Relative L2 |
+| --- | --- | ---: | ---: |
+| early | `validation_subset024_source018470_early` | 0.998022 | 7.51% |
+| middle | `validation_subset024_source018470_middle` | 0.998592 | 5.79% |
+| late | `validation_subset024_source018470_late` | 0.998624 | 5.39% |
+| late | `validation_subset028_source020543_late` | 0.999206 | 5.24% |
+
+Overall action cosine is 0.999513 mean and 0.998022 minimum; relative L2 is
+3.04% mean and 7.51% maximum.  Stage pass counts are 5/6 early, 5/6 middle,
+and 4/6 late.  The failure across all three stages of one held-out trajectory
+shows that a timestep/layer table alone cannot express request-conditioned
+risk.  Static late4/H50/Q50 is rejected before test, 100-request, video, or
+closed-loop promotion.
+
+The four failures become mandatory M1 false-sparse regression cases.  A future
+confidence gate must promote them using task-disjoint runtime features, not
+their task or trajectory identity, while preserving the 14 already-safe
+requests whenever confidence is calibrated.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_validation18/`

@@ -461,3 +461,17 @@ is higher than the first four groups.  Expanding to DiT index 3 is faster but
 causes a much larger quality failure.  Packed M2 therefore needs calibrated
 timestep/layer promotion rather than a global coverage target.  All services
 remain stable near 67.2 GiB per GPU after repeated history-chain requests.
+
+The subsequent validation18 replay rejects the static late4/four-segment
+candidate.  Its Packed service is operationally stable at 1.7725 s mean and
+18/18 requests are faster, but paired geomean speedup is only 1.0738x with
+CI95 [1.0691x, 1.0786x].  Four action requests fail, including every stage of
+one trajectory.  Thus segment alignment fixes the executor shape contract but
+does not by itself provide enough safe coverage or request-aware fallback for
+the paper target.
+
+The next M2 use of this schedule must accept M1 promotions at the shared bucket
+level: risky requests should raise selected segments to Q75/Q100 or Dense,
+while confident requests may retain H50/Q50.  Per-Head kernels remain excluded
+from the main path.  The current resident service continues to hold GPUs 5--6
+at approximately 67.2 GiB each.

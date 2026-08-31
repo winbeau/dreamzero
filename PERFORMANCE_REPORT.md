@@ -335,3 +335,32 @@ least 100 paired requests, three GPU exchange rounds, CI95 lower bound above
 Artifacts:
 
 `dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/`
+
+## Propagation-aligned validation18 performance
+
+The late4/four-segment H50/Q50 candidate was measured on all 18 validation
+targets against the existing same-task Dense reference.  Each target includes
+three real history calls and all 72 calls execute eight real DiTs.
+
+| Metric | Result |
+| --- | ---: |
+| Dense mean target latency | 1.9034 s |
+| Sparse mean target latency | 1.7725 s |
+| ratio of means | 1.0738x |
+| paired geometric mean | 1.0738x |
+| paired CI95 | [1.0691x, 1.0786x] |
+| Sparse-faster targets | 18/18 |
+| minimum paired speedup | 1.0584x |
+
+This stable run is substantially below the 1.35x E2E target.  The earlier
+three-request 1.313x value was inflated by a large Dense-baseline outlier; it
+was correctly labelled a pilot and is not retained as the candidate estimate.
+The narrow validation18 interval demonstrates that 80/320 H50/Q50 cells do
+not remove enough total work.  More coverage is required, but both tested
+directions for reaching 100 cells fail quality.  Runtime M1 promotion/fallback
+and a more selective safe coverage expansion are therefore prerequisites for
+the 100-request performance experiment.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_validation18/`

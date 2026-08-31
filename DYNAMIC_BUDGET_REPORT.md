@@ -1059,3 +1059,36 @@ dynamic_m1_m2/dynamic_budgets/20260831_guarded_segments_*/
 dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
   comparison_guarded_segments_*_5eb04fb_droid_validation3*.json
 ```
+
+## Task-disjoint validation18 gate
+
+The promoted pilot frontier, `late4 x four segments x H50/Q50`, was replayed
+on all 18 task-disjoint validation targets with three real history blocks per
+target.  It passes only 14/18 action gates.  Failures are 5/6 early, 5/6
+middle, and 4/6 late by stage; all three stages of
+`validation_subset024_source018470` fail, as does
+`validation_subset028_source020543_late`.
+
+| Metric | Validation18 result | Gate | Status |
+| --- | ---: | ---: | --- |
+| action cosine mean/min | 0.999513 / 0.998022 | minimum >= 0.999 | fail |
+| action rel-L2 mean/max | 3.04% / 7.51% | maximum <= 5% | fail |
+| safe requests | 14/18 | 18/18 before promotion | fail |
+| paired E2E geomean | 1.074x | final >= 1.35x mean target | fail |
+| Sparse faster | 18/18 | >= 95% final | pass only |
+
+The worst request is `validation_subset024_source018470_early`, with cosine
+0.998022 and relative L2 7.51%.  This candidate therefore cannot enter the
+100-request main result as a static table.  M1 must promote the demonstrated
+risky requests/cells to a higher bucket or exact Dense fallback, and that gate
+must be calibrated without using validation task identities.
+
+The stable validation timing also corrects the three-request estimate.  Dense
+validation18 averages 1.903 s and Sparse 1.773 s, whereas the pilot Dense file
+contained a large request outlier.  The resulting paired CI is tight,
+[1.069x, 1.079x], so the current 25% cell coverage is intrinsically below the
+E2E target rather than merely noisy.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_validation18/`

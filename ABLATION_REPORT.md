@@ -50,6 +50,7 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | timestep expansion late3 -> late4 | 1.269x -> 1.313x; L2 max 4.09% | promote validation |
 | timestep expansion late4 -> late5 | 1.325x; cosine min 0.98463; L2 max 18.41% | reject early DiT 3 |
 | layer expansion S4 -> S5 at late4 | 1.267x; cosine min 0.99825; L2 max 5.92% | reject fifth segment |
+| late4/S4/H50Q50 validation18 | 1.074x; 14/18 safe; cosine min 0.99802; L2 max 7.51% | reject static candidate |
 
 ## Required remaining ablations
 
