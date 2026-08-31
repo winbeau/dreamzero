@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-PACKED_M1_OBSERVATION_SCHEMA = "dreamzero-packed-m1-proxy-v1"
+PACKED_M1_OBSERVATION_SCHEMA = "dreamzero-packed-m1-proxy-v2"
 PACKED_M1_OBSERVATION_METRICS = (
     "packed_route_support_turnover_max",
     "packed_route_normalized_entropy_mean",

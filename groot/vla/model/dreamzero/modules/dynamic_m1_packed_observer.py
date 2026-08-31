@@ -52,7 +52,13 @@ def route_proxy_metrics(
     if not 0.0 < support_ratio <= 1.0:
         raise ValueError("Packed M1 route support ratio must lie in (0, 1]")
     current = scores.detach().float()
-    probabilities = torch.softmax(current, dim=-1)
+    centered = current - current.mean(dim=-1, keepdim=True)
+    standardized = centered / current.std(
+        dim=-1,
+        keepdim=True,
+        unbiased=False,
+    ).clamp_min(1e-6)
+    probabilities = torch.softmax(standardized, dim=-1)
     entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum(dim=-1)
     entropy = entropy / torch.log(
         torch.tensor(

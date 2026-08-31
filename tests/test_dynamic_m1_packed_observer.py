@@ -53,6 +53,14 @@ def test_route_proxy_metrics_are_normalized_and_causal() -> None:
     assert entropy.item() == pytest.approx(1.0)
     assert max_mass.item() == pytest.approx(0.25)
 
+    _, peaked_entropy, peaked_max_mass = route_proxy_metrics(
+        torch.tensor([[[3.0, 2.0, 0.0, 0.0]]]),
+        None,
+        support_ratio=0.5,
+    )
+    assert peaked_entropy.item() < 0.9
+    assert peaked_max_mass.item() > 0.5
+
     previous = torch.tensor([[[3.0, 2.0, 0.0, 0.0]]])
     current = torch.tensor([[[0.0, 0.0, 3.0, 2.0]]])
     turnover, _, _ = route_proxy_metrics(current, previous, support_ratio=0.5)

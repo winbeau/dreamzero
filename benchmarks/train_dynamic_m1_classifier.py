@@ -24,6 +24,9 @@ from groot.vla.model.dreamzero.modules.dynamic_m1_classifier import (
     MappedGMMClassifier,
     RoutePolicy,
 )
+from groot.vla.model.dreamzero.modules.dynamic_m1_observation import (
+    PACKED_M1_OBSERVATION_SCHEMA,
+)
 
 SEED = 20260830
 PRIOR_KEYS = ("dit_index", "layer_index", "head_index")
@@ -108,7 +111,6 @@ PACKED_PROXY_FEATURE_COLUMNS = (
     "prior_budget_std_tlh",
     "prior_critical_rate_tlh",
 )
-PACKED_PROXY_OBSERVATION_SCHEMA = "dreamzero-packed-m1-proxy-v1"
 
 
 def _ratio_suffix(ratio: float) -> str:
@@ -650,7 +652,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
     elif feature_schema == "packed-proxy-v1":
         feature_columns = PACKED_PROXY_FEATURE_COLUMNS
         input_columns = PACKED_PROXY_INPUT_COLUMNS
-        observation_schema = PACKED_PROXY_OBSERVATION_SCHEMA
+        observation_schema = PACKED_M1_OBSERVATION_SCHEMA
     else:
         raise ValueError(f"Unknown M1 feature schema: {feature_schema}")
     frame = pd.read_parquet(

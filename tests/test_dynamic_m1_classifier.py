@@ -285,7 +285,7 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
 
     assert proxy_summary["feature_schema"] == "packed-proxy-v1"
     assert proxy_bundle["online_observation_schema"] == (
-        "dreamzero-packed-m1-proxy-v1"
+        "dreamzero-packed-m1-proxy-v2"
     )
     assert tuple(proxy_bundle["feature_columns"]) == PACKED_PROXY_FEATURE_COLUMNS
     assert "previous_vv_output_change_relative_l2_max" not in proxy_bundle[

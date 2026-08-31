@@ -236,7 +236,7 @@ def test_online_state_maps_packed_proxy_schema_without_oracle_aliasing() -> None
     bundle = {
         **_bundle(),
         "feature_columns": proxy_features,
-        "online_observation_schema": "dreamzero-packed-m1-proxy-v1",
+        "online_observation_schema": "dreamzero-packed-m1-proxy-v2",
     }
     state = OnlineM1FeatureState(
         bundle,
@@ -249,7 +249,7 @@ def test_online_state_maps_packed_proxy_schema_without_oracle_aliasing() -> None
         shape = (2, 2)
         return M1CausalObservation(
             dit_index=dit_index,
-            schema="dreamzero-packed-m1-proxy-v1",
+            schema="dreamzero-packed-m1-proxy-v2",
             metrics={
                 "packed_route_support_turnover_max": np.full(shape, turnover),
                 "packed_action_output_change_relative_l2_max": np.full(shape, change),
