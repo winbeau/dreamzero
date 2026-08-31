@@ -33,6 +33,15 @@ class IdentityCalibrator:
         return np.asarray(confidence)
 
 
+class FeatureCheckingEstimator(AggressiveEstimator):
+    def __init__(self, expected_columns):
+        self.expected_columns = list(expected_columns)
+
+    def predict_proba(self, features):
+        assert features.columns.tolist() == self.expected_columns
+        return super().predict_proba(features)
+
+
 def _quality_columns(frame: pd.DataFrame, truth: np.ndarray) -> None:
     for ratio in BUDGET_BUCKETS:
         suffix = f"r{round(ratio * 100):03d}"
@@ -126,3 +135,39 @@ def test_evaluate_grouped_split_bootstraps_post_quantization_route() -> None:
         == 0.0
     )
     assert routes["grouped_keep_ratio"].tolist() == [0.25] * 8
+
+
+def test_evaluate_grouped_split_uses_bundle_feature_contract() -> None:
+    frame = pd.DataFrame(
+        {
+            "request_key": ["request"] * 8,
+            "split": ["validation"] * 8,
+            "source_episode_index": [0] * 8,
+            "dit_index": np.arange(8),
+            "layer_index": [0] * 8,
+            "head_index": [0] * 8,
+            "oracle_min_keep_ratio": [0.20] * 8,
+            "packed_feature": np.linspace(0.0, 1.0, 8),
+        }
+    )
+    _quality_columns(frame, frame["oracle_min_keep_ratio"].to_numpy())
+    risk_table = DownstreamHeadRiskTable(
+        np.ones((8, 1, 1), dtype=bool),
+        np.ones((8, 1, 1), dtype=bool),
+        {},
+    )
+    bundle = {
+        "estimator": FeatureCheckingEstimator(("packed_feature",)),
+        "confidence_calibrator": IdentityCalibrator(),
+        "policy": RoutePolicy(confidence_threshold=0.8, promotion_buckets=0),
+        "feature_columns": ("packed_feature",),
+    }
+
+    metrics, _routes = evaluate_grouped_split(
+        frame,
+        bundle,
+        risk_table,
+        bootstrap_repeats=2,
+    )
+
+    assert metrics["false_sparse_rate"] == 0.0

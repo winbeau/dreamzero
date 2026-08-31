@@ -14,6 +14,8 @@ import pandas as pd
 
 from benchmarks.train_dynamic_m1_classifier import (
     BUDGET_BUCKETS,
+    FEATURE_COLUMNS,
+    PACKED_PROXY_INPUT_COLUMNS,
     PRIOR_KEYS,
     add_deployment_features,
     bootstrap_test_metrics,
@@ -35,9 +37,15 @@ def prepare_m1_evaluation_frame(
     splits: Iterable[str],
 ) -> pd.DataFrame:
     splits = tuple(str(split) for split in splits)
+    feature_columns = tuple(bundle.get("feature_columns", FEATURE_COLUMNS))
+    input_columns = (
+        PACKED_PROXY_INPUT_COLUMNS
+        if "previous_packed_route_support_turnover_max" in feature_columns
+        else ()
+    )
     frame = pd.read_parquet(
         oracle_table,
-        columns=required_columns(),
+        columns=required_columns(input_columns),
         filters=[("split", "in", list(splits))],
     )
     if frame.empty:
@@ -176,6 +184,7 @@ def evaluate_grouped_split(
         frame,
         bundle.get("confidence_calibrator"),
         bundle["policy"],
+        feature_columns=tuple(bundle.get("feature_columns", FEATURE_COLUMNS)),
     )
     grouped_result, routes, diagnostics = apply_grouped_route_fallback(
         frame,
