@@ -2042,6 +2042,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_dit_index: int | None = None
         self._dynamic_sparse_scheduler_index: int | None = None
         self._dynamic_sparse_scheduler_steps: int | None = None
+        self._dynamic_sparse_force_dense = False
         self._anchor_sparse_last_packed_propagation_count = 0
         self._dynamic_attention_oracle_collector: Any | None = None
 
@@ -2253,6 +2254,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         task_id: str | None = None,
         trajectory_stage: str | None = None,
     ) -> None:
+        self._dynamic_sparse_force_dense = False
         collector = self._dynamic_attention_oracle_collector
         if collector is not None:
             collector.begin_request(
@@ -2489,10 +2491,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_packed_head_group_budget_table = table
         self.clear_anchor_sparse_route_cache()
 
+    def set_dynamic_sparse_force_dense(self, enabled: bool) -> None:
+        """Temporarily bypass Packed M2 for a sentinel Dense recomputation."""
+
+        self._dynamic_sparse_force_dense = bool(enabled)
+
     def _packed_budget_ratios_for_layer(
         self,
         layer_index: int,
     ) -> tuple[float, float]:
+        if self._dynamic_sparse_force_dense:
+            return 1.0, 1.0
         table = self._dynamic_packed_budget_table
         if table is None:
             config = self.anchor_sparse_config
@@ -2509,6 +2518,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self,
         layer_index: int,
     ) -> tuple[tuple[tuple[int, ...], float], ...] | None:
+        if self._dynamic_sparse_force_dense:
+            return None
         table = self._dynamic_packed_head_group_budget_table
         if table is None:
             return None

@@ -712,12 +712,30 @@ def train_request_gate(args: argparse.Namespace) -> dict[str, Any]:
         },
         "false_sparse_limit": args.false_sparse_limit,
         "models": model_results,
-        "passed": bool(
-            model_results[selected]["test"]["false_sparse_rate"]
-            < args.false_sparse_limit
-            and model_results[selected]["test_realized"]["quality_failure_count"] == 0
-        ),
+        "oracle_profile_ceiling": {
+            split: evaluate_realized_route(
+                frame,
+                frame["target_profile_index"].to_numpy(dtype=np.int64),
+                cosine_threshold=args.cosine_threshold,
+                relative_l2_threshold=args.relative_l2_threshold,
+            )
+            for split, frame in split_frames.items()
+        },
     }
+    selected_test = model_results[selected]
+    summary["safety_gates_passed"] = bool(
+        selected_test["test"]["false_sparse_rate"] < args.false_sparse_limit
+        and selected_test["test_realized"]["quality_failure_count"] == 0
+    )
+    summary["performance_gates_passed"] = bool(
+        selected_test["test_realized"]["mixed_e2e_speedup"]
+        >= args.minimum_e2e_speedup
+        and selected_test["test_realized"]["strictly_faster_fraction"]
+        >= args.minimum_faster_fraction
+    )
+    summary["passed"] = bool(
+        summary["safety_gates_passed"] and summary["performance_gates_passed"]
+    )
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 
@@ -735,6 +753,8 @@ def main() -> None:
     parser.add_argument("--relative-l2-threshold", type=float, default=0.05)
     parser.add_argument("--false-sparse-limit", type=float, default=0.01)
     parser.add_argument("--underprediction-cost", type=float, default=40.0)
+    parser.add_argument("--minimum-e2e-speedup", type=float, default=1.35)
+    parser.add_argument("--minimum-faster-fraction", type=float, default=0.95)
     args = parser.parse_args()
     print(json.dumps(train_request_gate(args), indent=2))
 

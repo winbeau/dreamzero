@@ -58,6 +58,11 @@ class Args:
     anchor_sparse_dynamic_budget_table: str | None = None
     anchor_sparse_dynamic_head_group_budget_table: str | None = None
     anchor_sparse_record_diagnostics: bool = False
+    anchor_sparse_flow_sentinel_enabled: bool = False
+    anchor_sparse_flow_sentinel_minimum_cosine: float = 0.99
+    anchor_sparse_flow_sentinel_maximum_relative_l2: float = 0.25
+    anchor_sparse_flow_sentinel_start_dit_index: int = 2
+    anchor_sparse_flow_sentinel_rerun_dense: bool = True
     dynamic_oracle_output_dir: str | None = None
     dynamic_oracle_max_video_queries: int | None = 32
     dynamic_oracle_max_action_queries: int | None = None
@@ -909,6 +914,28 @@ def main(args: Args) -> None:
                 args.anchor_sparse_dynamic_head_group_budget_table
             )
         )
+    if args.anchor_sparse_flow_sentinel_enabled:
+        from groot.vla.model.dreamzero.modules.dynamic_flow_sentinel import (
+            FlowSentinelConfig,
+        )
+
+        configure_flow_sentinel = getattr(
+            policy.trained_model.action_head,
+            "configure_sparse_flow_sentinel",
+            None,
+        )
+        if configure_flow_sentinel is None:
+            raise RuntimeError("Loaded action head does not support flow sentinel")
+        configure_flow_sentinel(
+            FlowSentinelConfig(
+                minimum_cosine=args.anchor_sparse_flow_sentinel_minimum_cosine,
+                maximum_relative_l2=(
+                    args.anchor_sparse_flow_sentinel_maximum_relative_l2
+                ),
+                start_dit_index=args.anchor_sparse_flow_sentinel_start_dit_index,
+                rerun_dense=args.anchor_sparse_flow_sentinel_rerun_dense,
+            )
+        )
     logger.info(
         "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
         "current_keep=%.3f attention_query_keep=%s dense_prefix=%d dense_suffix=%d "
@@ -931,6 +958,15 @@ def main(args: Args) -> None:
         args.anchor_sparse_dynamic_head_group_budget_table,
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
+    )
+    logger.info(
+        "Sparse flow sentinel: enabled=%s min_cosine=%.6f max_relative_l2=%.6f "
+        "start_dit=%d rerun_dense=%s",
+        args.anchor_sparse_flow_sentinel_enabled,
+        args.anchor_sparse_flow_sentinel_minimum_cosine,
+        args.anchor_sparse_flow_sentinel_maximum_relative_l2,
+        args.anchor_sparse_flow_sentinel_start_dit_index,
+        args.anchor_sparse_flow_sentinel_rerun_dense,
     )
 
     configure_dynamic_oracle = getattr(

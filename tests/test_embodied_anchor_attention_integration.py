@@ -765,6 +765,11 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         ((0,), 1.0),
         ((1,), 0.20),
     )
+    model.set_dynamic_sparse_force_dense(True)
+    assert model._packed_budget_ratios_for_layer(1) == (1.0, 1.0)
+    assert model._packed_head_groups_for_layer(1) is None
+    model.begin_dynamic_attention_oracle_request(current_start_frame=7)
+    assert model._packed_budget_ratios_for_layer(1) == (0.20, 0.25)
     route = AnchorRoute(
         video_indices=torch.arange(3 * 880).reshape(1, -1),
         scores=torch.randn(1, 3, 880),

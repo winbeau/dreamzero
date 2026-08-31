@@ -48,6 +48,10 @@ from groot.vla.model.dreamzero.modules.flow_match_scheduler import FlowMatchSche
 from groot.vla.model.dreamzero.modules.vram_management import enable_vram_management, AutoWrappedModule, AutoWrappedLinear
 from groot.vla.model.dreamzero.modules.wan_video_text_encoder import T5RelativeEmbedding, T5LayerNorm
 from groot.vla.model.dreamzero.modules.flow_unipc_multistep_scheduler import FlowUniPCMultistepScheduler
+from groot.vla.model.dreamzero.modules.dynamic_flow_sentinel import (
+    FlowSentinelConfig,
+    flow_sentinel_metrics,
+)
 
 
 KVCacheType: TypeAlias = torch.Tensor
@@ -205,6 +209,8 @@ class WANPolicyHead(ActionHead):
         
         self._device = "cuda"
         self.dynamic_cache_schedule = os.getenv("DYNAMIC_CACHE_SCHEDULE", "False").lower() == "true"
+        self._flow_sentinel_config: FlowSentinelConfig | None = None
+        self._last_flow_sentinel_trace: list[dict[str, object]] = []
 
 
         num_dit_steps = 8
@@ -963,6 +969,18 @@ class WANPolicyHead(ActionHead):
         output_predictions[(self.ip_rank + 1) % self.ip_size] = tuple(other_predictions)
         assert all(isinstance(pred, tuple) for pred in output_predictions)
         return cast(list[tuple[torch.Tensor, torch.Tensor]], output_predictions)
+
+    def configure_sparse_flow_sentinel(
+        self,
+        config: FlowSentinelConfig | None,
+    ) -> None:
+        """Configure online sparse-output checks and optional Dense recompute."""
+
+        self._flow_sentinel_config = config
+        self._last_flow_sentinel_trace = []
+
+    def get_last_sparse_flow_sentinel_trace(self) -> list[dict[str, object]]:
+        return list(self._last_flow_sentinel_trace)
     
     def should_run_model(self, index, current_timestep, prev_predictions):
 
@@ -1259,6 +1277,9 @@ class WANPolicyHead(ActionHead):
         start_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in sample_scheduler.timesteps]
         end_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in sample_scheduler.timesteps]
         prev_predictions = [] 
+        flow_sentinel_history: list[tuple[object, torch.Tensor]] = []
+        self._last_flow_sentinel_trace = []
+        sentinel_dense_reruns = 0
         self.skip_countdown = 0
         dit_compute_steps = 0
         for index, current_timestep in enumerate(sample_scheduler.timesteps):
@@ -1322,6 +1343,116 @@ class WANPolicyHead(ActionHead):
                 flow_pred_uncond, flow_pred_uncond_action = predictions[1]
 
                 flow_pred = flow_pred_uncond + self.cfg_scale * (flow_pred_cond - flow_pred_uncond)
+                sentinel_config = self._flow_sentinel_config
+                sentinel_record: dict[str, object] = {
+                    "dit_index": dit_compute_steps - 1,
+                    "scheduler_index": index,
+                    "scheduler_timestep": int(
+                        torch.as_tensor(video_timestep).flatten()[0].item()
+                    ),
+                    "checked": False,
+                    "triggered": False,
+                    "dense_rerun": False,
+                }
+                if (
+                    sentinel_config is not None
+                    and dit_compute_steps - 1 >= sentinel_config.start_dit_index
+                    and len(flow_sentinel_history) >= 2
+                ):
+                    previous_timestep, previous_action_flow = flow_sentinel_history[-1]
+                    previous_two_timestep, previous_two_action_flow = (
+                        flow_sentinel_history[-2]
+                    )
+                    metrics = flow_sentinel_metrics(
+                        flow_pred_cond_action,
+                        previous_action_flow,
+                        previous_two_action_flow,
+                        current_timestep=video_timestep,
+                        previous_timestep=previous_timestep,
+                        previous_two_timestep=previous_two_timestep,
+                    )
+                    triggered = metrics.triggered(sentinel_config)
+                    sentinel_record.update(
+                        {
+                            "checked": True,
+                            "cosine": metrics.cosine,
+                            "relative_l2": metrics.relative_l2,
+                            "alpha": metrics.alpha,
+                            "triggered": triggered,
+                        }
+                    )
+                    if triggered and sentinel_config.rerun_dense:
+                        set_force_dense = getattr(
+                            self.model,
+                            "set_dynamic_sparse_force_dense",
+                            None,
+                        )
+                        if set_force_dense is None:
+                            raise RuntimeError(
+                                "Flow sentinel Dense rerun requires dynamic sparse override"
+                            )
+                        sparse_action_flow = flow_pred_cond_action
+                        set_force_dense(True)
+                        try:
+                            dense_predictions = self._run_diffusion_steps(
+                                noisy_input=noisy_input.transpose(1, 2),
+                                timestep=timestep,
+                                action=noisy_input_action,
+                                timestep_action=timestep_action,
+                                state=state_features,
+                                embodiment_id=embodiment_id,
+                                context=prompt_embs,
+                                seq_len=seq_len,
+                                y=y,
+                                clip_feature=self.clip_feas,
+                                kv_caches=kv_caches,
+                                crossattn_caches=crossattn_caches,
+                                kv_cache_metadata=dict(
+                                    start_frame=self.current_start_frame,
+                                    update_kv_cache=False,
+                                ),
+                            )
+                        finally:
+                            set_force_dense(False)
+                        flow_pred_cond, flow_pred_cond_action = dense_predictions[0]
+                        flow_pred_uncond, flow_pred_uncond_action = dense_predictions[1]
+                        flow_pred = flow_pred_uncond + self.cfg_scale * (
+                            flow_pred_cond - flow_pred_uncond
+                        )
+                        sparse_flat = sparse_action_flow.float().flatten(1)
+                        dense_flat = flow_pred_cond_action.float().flatten(1)
+                        sparse_dense_cosine = torch.nn.functional.cosine_similarity(
+                            sparse_flat,
+                            dense_flat,
+                            dim=1,
+                        ).amin()
+                        sparse_dense_relative_l2 = (
+                            torch.linalg.vector_norm(sparse_flat - dense_flat, dim=1)
+                            / torch.linalg.vector_norm(dense_flat, dim=1).clamp_min(1e-12)
+                        ).amax()
+                        sentinel_dense_reruns += 1
+                        sentinel_record.update(
+                            {
+                                "dense_rerun": True,
+                                "sparse_dense_action_cosine": float(
+                                    sparse_dense_cosine.item()
+                                ),
+                                "sparse_dense_action_relative_l2": float(
+                                    sparse_dense_relative_l2.item()
+                                ),
+                            }
+                        )
+                self._last_flow_sentinel_trace.append(sentinel_record)
+                stored_timestep: object = (
+                    video_timestep.detach().clone()
+                    if isinstance(video_timestep, torch.Tensor)
+                    else video_timestep
+                )
+                flow_sentinel_history.append(
+                    (stored_timestep, flow_pred_cond_action.detach())
+                )
+                if len(flow_sentinel_history) > 2:
+                    flow_sentinel_history.pop(0)
                 prev_predictions.append((current_timestep, flow_pred, flow_pred_cond_action))
                 max_cache_size = 2
                 if len(prev_predictions) > max_cache_size:
@@ -1380,7 +1511,14 @@ class WANPolicyHead(ActionHead):
                   f"KV Cache Creation {kv_creation_time:.2f} seconds, "
                   f"Diffusion {diffusion_time:.2f} seconds, "
                   f"DIT Compute Steps {dit_compute_steps} steps, "
+                  f"DIT Model Calls {dit_compute_steps + sentinel_dense_reruns} calls, "
+                  f"Sentinel Dense Reruns {sentinel_dense_reruns}, "
                   f"Scheduler {scheduler_time:.2f} seconds")
+            if self._flow_sentinel_config is not None:
+                print(
+                    "Flow Sentinel Trace "
+                    + json.dumps(self._last_flow_sentinel_trace, sort_keys=True)
+                )
 
         flush_oracle_request = getattr(
             self.model,
