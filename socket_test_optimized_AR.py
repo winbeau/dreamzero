@@ -125,6 +125,7 @@ class ARDroidRoboarenaPolicy:
         
         # Session tracking - reset state when new session starts
         self._current_session_id: str | None = None
+        self._downstream_oracle_snapshot: dict[str, object] | None = None
         
         # Video across time for saving (similar to original server)
         self.video_across_time = []
@@ -481,6 +482,7 @@ class ARDroidRoboarenaPolicy:
         self._call_count = 0
         self._is_first_call = True
         self.video_across_time = []
+        self._downstream_oracle_snapshot = None
         diffusion_model = self._policy.trained_model.action_head.model
         clear_route_cache = getattr(diffusion_model, "clear_anchor_sparse_route_cache", None)
         if clear_route_cache is not None:
@@ -492,6 +494,43 @@ class ARDroidRoboarenaPolicy:
         Clears frame buffers and resets call count.
         """
         self._reset_state(save_video=self._save_video_on_reset)
+
+    def snapshot(self, snapshot_info: dict) -> None:
+        """Snapshot one Dense history so many target interventions can reuse it."""
+
+        if not self._allow_downstream_request_override:
+            raise ValueError("Downstream Oracle state snapshots are disabled")
+        signal_tensor = torch.full((1,), 3, dtype=torch.int32, device="cpu")
+        dist.broadcast(signal_tensor, src=0, group=self._signal_group)
+        action_head = self._policy.trained_model.action_head
+        self._downstream_oracle_snapshot = {
+            "frame_buffers": {
+                key: tuple(frames) for key, frames in self._frame_buffers.items()
+            },
+            "call_count": self._call_count,
+            "is_first_call": self._is_first_call,
+            "video_across_time": tuple(self.video_across_time),
+            "action_head": action_head.snapshot_downstream_oracle_state(),
+        }
+
+    def restore(self, restore_info: dict) -> None:
+        """Restore the most recent Dense-history snapshot on both CFG ranks."""
+
+        snapshot = self._downstream_oracle_snapshot
+        if snapshot is None:
+            raise RuntimeError("No downstream Oracle state snapshot is available")
+        signal_tensor = torch.full((1,), 4, dtype=torch.int32, device="cpu")
+        dist.broadcast(signal_tensor, src=0, group=self._signal_group)
+        self._frame_buffers = {
+            key: list(frames)
+            for key, frames in snapshot["frame_buffers"].items()
+        }
+        self._call_count = int(snapshot["call_count"])
+        self._is_first_call = bool(snapshot["is_first_call"])
+        self.video_across_time = list(snapshot["video_across_time"])
+        self._policy.trained_model.action_head.restore_downstream_oracle_state(
+            snapshot["action_head"]
+        )
 
 
 class WebsocketPolicyServer:
@@ -517,6 +556,7 @@ class WebsocketPolicyServer:
         self.video_across_time = []
         self._msg_index = 0
         self._signal_group = signal_group
+        self._downstream_oracle_snapshot: dict[str, object] | None = None
         # Create output directory if specified
         if self._output_dir:
             os.makedirs(self._output_dir, exist_ok=True)
@@ -631,6 +671,23 @@ class WebsocketPolicyServer:
                 elif signal == 2:
                     logger.info(f"Rank {dist.get_rank()} received idle signal. Waiting for next client.")
                     # Loop back to the top and wait for the next signal
+                    continue
+
+                elif signal == 3:
+                    action_head = self._policy.trained_model.action_head
+                    self._downstream_oracle_snapshot = (
+                        action_head.snapshot_downstream_oracle_state()
+                    )
+                    continue
+
+                elif signal == 4:
+                    if self._downstream_oracle_snapshot is None:
+                        raise RuntimeError(
+                            "Worker has no downstream Oracle state snapshot"
+                        )
+                    self._policy.trained_model.action_head.restore_downstream_oracle_state(
+                        self._downstream_oracle_snapshot
+                    )
                     continue
 
                 # Receive the batch data via broadcast/gather mechanism

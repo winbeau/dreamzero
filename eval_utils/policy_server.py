@@ -97,6 +97,18 @@ class WebsocketPolicyServer:
                 if endpoint == "reset":
                     self._policy.reset(obs)
                     to_return = "reset successful"
+                elif endpoint == "snapshot":
+                    snapshot = getattr(self._policy, "snapshot", None)
+                    if snapshot is None:
+                        raise RuntimeError("Policy does not support state snapshots")
+                    snapshot(obs)
+                    to_return = "snapshot successful"
+                elif endpoint == "restore":
+                    restore = getattr(self._policy, "restore", None)
+                    if restore is None:
+                        raise RuntimeError("Policy does not support state restore")
+                    restore(obs)
+                    to_return = "restore successful"
                 else:
                     action = self._policy.infer(obs)
                     to_return = packer.pack(action)

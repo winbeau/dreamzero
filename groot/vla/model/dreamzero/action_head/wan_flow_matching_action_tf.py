@@ -834,6 +834,56 @@ class WANPolicyHead(ActionHead):
         generator = None if seed is None else torch.Generator(device).manual_seed(seed)
         noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
         return noise
+
+    def snapshot_downstream_oracle_state(self) -> dict[str, object]:
+        """Retain the exact Dense causal state immediately before a target.
+
+        Cache-fill replaces list entries with newly allocated tensors rather
+        than mutating the historical tensors in place.  Retaining the current
+        tensor references therefore permits exact target replay without
+        cloning multiple GiB of KV state.
+        """
+
+        if bool(getattr(self.model, "anchor_sparse_enabled", False)):
+            raise RuntimeError(
+                "Downstream Oracle state replay is restricted to the Dense path"
+            )
+
+        def retain_cache(cache):
+            return None if cache is None else tuple(cache)
+
+        return {
+            "current_start_frame": int(self.current_start_frame),
+            "language": self.language,
+            "kv_cache1": retain_cache(self.kv_cache1),
+            "kv_cache_neg": retain_cache(self.kv_cache_neg),
+            "crossattn_cache": retain_cache(self.crossattn_cache),
+            "crossattn_cache_neg": retain_cache(self.crossattn_cache_neg),
+        }
+
+    def restore_downstream_oracle_state(self, snapshot: dict[str, object]) -> None:
+        """Restore a state produced by :meth:`snapshot_downstream_oracle_state`."""
+
+        required = {
+            "current_start_frame",
+            "language",
+            "kv_cache1",
+            "kv_cache_neg",
+            "crossattn_cache",
+            "crossattn_cache_neg",
+        }
+        if set(snapshot) != required:
+            raise ValueError("invalid downstream Oracle causal-state snapshot")
+
+        def restore_cache(cache):
+            return None if cache is None else list(cache)
+
+        self.current_start_frame = int(snapshot["current_start_frame"])
+        self.language = snapshot["language"]
+        self.kv_cache1 = restore_cache(snapshot["kv_cache1"])
+        self.kv_cache_neg = restore_cache(snapshot["kv_cache_neg"])
+        self.crossattn_cache = restore_cache(snapshot["crossattn_cache"])
+        self.crossattn_cache_neg = restore_cache(snapshot["crossattn_cache_neg"])
     
     def _get_caches(
         self, kv_caches_input: list[KVCacheType],

@@ -16,6 +16,8 @@ from benchmarks.benchmark_downstream_head_sensitivity_droid import (
     action_sensitivity_metrics,
     intervention_control,
     run_chain,
+    run_history,
+    run_target,
 )
 from benchmarks.benchmark_dreamzero_server_droid import (
     DroidRequestReader,
@@ -102,6 +104,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--jsonl-output", type=Path)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--reuse-history-snapshot", action="store_true")
     parser.add_argument("--label", required=True)
     parser.add_argument(
         "--splits",
@@ -154,6 +157,7 @@ def main() -> None:
     reader = DroidRequestReader(args.dataset_path)
     client = WebsocketClientPolicy(args.host, args.port)
     session_id = f"dreamzero-downstream-grid-{args.label}"
+    client.reset({"session_id": session_id})
     try:
         for request_index, request in enumerate(plan):
             remaining_candidates = [
@@ -168,24 +172,50 @@ def main() -> None:
                 history_blocks=args.history_blocks,
                 session_id=session_id,
             )
-            baseline, baseline_history, baseline_latency = run_chain(
-                client,
-                baseline_observations,
-                target_control=None,
-                session_id=session_id,
-            )
-            for candidate in remaining_candidates:
-                intervention_observations = reader.observations(
-                    request,
-                    history_blocks=args.history_blocks,
-                    session_id=session_id,
-                )
-                intervened, intervention_history, intervention_latency = run_chain(
+            if args.reuse_history_snapshot:
+                baseline_history = run_history(
                     client,
-                    intervention_observations,
-                    target_control=candidate["control"],
+                    baseline_observations[:-1],
+                )
+                client.snapshot({"request_key": request["request_key"]})
+                baseline, baseline_latency = run_target(
+                    client,
+                    baseline_observations[-1],
+                    target_control=None,
+                )
+            else:
+                baseline, baseline_history, baseline_latency = run_chain(
+                    client,
+                    baseline_observations,
+                    target_control=None,
                     session_id=session_id,
                 )
+            for candidate in remaining_candidates:
+                if args.reuse_history_snapshot:
+                    client.restore(
+                        {
+                            "request_key": request["request_key"],
+                            "candidate_label": candidate["label"],
+                        }
+                    )
+                    intervened, intervention_latency = run_target(
+                        client,
+                        baseline_observations[-1],
+                        target_control=candidate["control"],
+                    )
+                    intervention_history = []
+                else:
+                    intervention_observations = reader.observations(
+                        request,
+                        history_blocks=args.history_blocks,
+                        session_id=session_id,
+                    )
+                    intervened, intervention_history, intervention_latency = run_chain(
+                        client,
+                        intervention_observations,
+                        target_control=candidate["control"],
+                        session_id=session_id,
+                    )
                 record = {
                     "request_index": request_index,
                     "request_key": request["request_key"],
@@ -223,6 +253,9 @@ def main() -> None:
                     ),
                     flush=True,
                 )
+            if args.reuse_history_snapshot:
+                client.restore({"request_key": request["request_key"]})
+                client.reset({"session_id": session_id})
     finally:
         client._ws.close()
 
@@ -246,6 +279,7 @@ def main() -> None:
         "splits": args.splits,
         "stages": args.stages,
         "history_blocks": args.history_blocks,
+        "reuse_history_snapshot": args.reuse_history_snapshot,
         "requests": len(plan),
         "candidates": len(candidates),
         "baseline_trajectory_count": len(plan),

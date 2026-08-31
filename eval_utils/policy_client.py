@@ -87,6 +87,22 @@ class WebsocketClientPolicy(BasePolicy):
         response = self._ws.recv()
         return response
 
+    def snapshot(self, snapshot_info: Dict | None = None) -> None:
+        payload = {} if snapshot_info is None else snapshot_info
+        payload["endpoint"] = "snapshot"
+        self._ws.send(self._packer.pack(payload))
+        response = self._ws.recv()
+        if response != "snapshot successful":
+            raise RuntimeError(f"Unexpected snapshot response: {response!r}")
+
+    def restore(self, restore_info: Dict | None = None) -> None:
+        payload = {} if restore_info is None else restore_info
+        payload["endpoint"] = "restore"
+        self._ws.send(self._packer.pack(payload))
+        response = self._ws.recv()
+        if response != "restore successful":
+            raise RuntimeError(f"Unexpected restore response: {response!r}")
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     client = WebsocketClientPolicy()

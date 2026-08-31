@@ -72,22 +72,43 @@ def run_chain(
     target_control: dict[str, Any] | None,
     session_id: str,
 ) -> tuple[np.ndarray, list[float], float]:
+    history_latencies = run_history(client, observations[:-1])
+    action, target_latency = run_target(
+        client,
+        observations[-1],
+        target_control=target_control,
+    )
+    client.reset({"session_id": session_id})
+    return action, history_latencies, target_latency
+
+
+def run_history(
+    client: WebsocketClientPolicy,
+    observations: list[dict[str, Any]],
+) -> list[float]:
     history_latencies = []
-    for observation in observations[:-1]:
+    for observation in observations:
         observation[CONTROL_KEY] = {"enabled": False}
         started = time.perf_counter()
         client.infer(observation)
         history_latencies.append(time.perf_counter() - started)
+    return history_latencies
 
-    target = observations[-1]
+
+def run_target(
+    client: WebsocketClientPolicy,
+    observation: dict[str, Any],
+    *,
+    target_control: dict[str, Any] | None,
+) -> tuple[np.ndarray, float]:
+    target = dict(observation)
     target[CONTROL_KEY] = (
         {"enabled": False} if target_control is None else target_control
     )
     started = time.perf_counter()
     action = np.asarray(client.infer(target))
     target_latency = time.perf_counter() - started
-    client.reset({"session_id": session_id})
-    return action, history_latencies, target_latency
+    return action, target_latency
 
 
 def main() -> None:
