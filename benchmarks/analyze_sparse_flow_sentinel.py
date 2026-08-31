@@ -63,6 +63,48 @@ def _trigger_matrix(
     return (cosine < minimum_cosine) | (relative_l2 > maximum_relative_l2)
 
 
+def evaluate_thresholds(
+    cosine: np.ndarray,
+    relative_l2: np.ndarray,
+    quality_pass: np.ndarray,
+    *,
+    minimum_cosine: float,
+    maximum_relative_l2: float,
+) -> dict[str, Any]:
+    """Evaluate fixed validation-selected thresholds without test retuning."""
+
+    if cosine.shape != relative_l2.shape or cosine.ndim != 2:
+        raise ValueError("sentinel metrics must share shape [requests, checked_steps]")
+    quality_pass = np.asarray(quality_pass, dtype=bool)
+    if quality_pass.shape != (cosine.shape[0],):
+        raise ValueError("quality labels must provide one value per request")
+    step_trigger = _trigger_matrix(
+        cosine,
+        relative_l2,
+        minimum_cosine=minimum_cosine,
+        maximum_relative_l2=maximum_relative_l2,
+    )
+    request_trigger = step_trigger.any(axis=1)
+    unsafe = ~quality_pass
+    false_positive = quality_pass & request_trigger
+    false_negative = unsafe & ~request_trigger
+    return {
+        "minimum_cosine": float(minimum_cosine),
+        "maximum_relative_l2": float(maximum_relative_l2),
+        "unsafe_request_count": int(unsafe.sum()),
+        "detected_unsafe_request_count": int((unsafe & request_trigger).sum()),
+        "false_negative_request_count": int(false_negative.sum()),
+        "safe_request_count": int(quality_pass.sum()),
+        "false_positive_request_count": int(false_positive.sum()),
+        "triggered_request_count": int(request_trigger.sum()),
+        "triggered_step_count": int(step_trigger.sum()),
+        "checked_step_count": int(step_trigger.size),
+        "mean_dense_reruns_if_recomputed": float(step_trigger.sum(axis=1).mean()),
+        "request_trigger": request_trigger.tolist(),
+        "step_trigger": step_trigger.tolist(),
+    }
+
+
 def choose_thresholds(
     cosine: np.ndarray,
     relative_l2: np.ndarray,
@@ -123,26 +165,21 @@ def choose_thresholds(
         request_trigger,
         false_positive,
     ) = min(feasible, key=lambda item: item[0])
-    return {
-        "minimum_cosine": minimum_cosine,
-        "maximum_relative_l2": maximum_relative_l2,
-        "unsafe_request_count": int((~quality_pass).sum()),
-        "detected_unsafe_request_count": int(((~quality_pass) & request_trigger).sum()),
-        "safe_request_count": int(quality_pass.sum()),
-        "false_positive_request_count": int(false_positive.sum()),
-        "triggered_request_count": int(request_trigger.sum()),
-        "triggered_step_count": int(step_trigger.sum()),
-        "checked_step_count": int(step_trigger.size),
-        "mean_dense_reruns_if_recomputed": float(step_trigger.sum(axis=1).mean()),
-        "request_trigger": request_trigger.tolist(),
-        "step_trigger": step_trigger.tolist(),
-    }
+    return evaluate_thresholds(
+        cosine,
+        relative_l2,
+        quality_pass,
+        minimum_cosine=minimum_cosine,
+        maximum_relative_l2=maximum_relative_l2,
+    )
 
 
 def analyze(
     report: dict[str, Any],
     comparison: dict[str, Any],
     traces: list[list[dict[str, Any]]],
+    *,
+    frozen_thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     aligned = align_target_traces(report, traces)
     if len(aligned) != int(comparison["paired_requests"]):
@@ -182,7 +219,18 @@ def analyze(
     flow_relative_l2 = np.asarray(
         [[float(item["relative_l2"]) for item in checked] for checked in checked_rows]
     )
-    selected = choose_thresholds(flow_cosine, flow_relative_l2, quality_pass)
+    if frozen_thresholds is None:
+        selected = choose_thresholds(flow_cosine, flow_relative_l2, quality_pass)
+        threshold_mode = "validation_calibration"
+    else:
+        selected = evaluate_thresholds(
+            flow_cosine,
+            flow_relative_l2,
+            quality_pass,
+            minimum_cosine=float(frozen_thresholds["minimum_cosine"]),
+            maximum_relative_l2=float(frozen_thresholds["maximum_relative_l2"]),
+        )
+        threshold_mode = "frozen_validation_thresholds"
     for index, row in enumerate(request_rows):
         row["sentinel_triggered"] = bool(selected["request_trigger"][index])
         row["triggered_dit_indices"] = [
@@ -194,6 +242,7 @@ def analyze(
         "paired_requests": len(aligned),
         "quality_pass_count": int(quality_pass.sum()),
         "quality_failure_count": int((~quality_pass).sum()),
+        "threshold_mode": threshold_mode,
         "selected_thresholds": selected,
         "requests": request_rows,
     }
@@ -205,11 +254,22 @@ def main() -> None:
     parser.add_argument("--comparison", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--thresholds-from",
+        type=Path,
+        help="Validation calibration JSON whose thresholds are frozen for evaluation",
+    )
     args = parser.parse_args()
+    frozen_thresholds = None
+    if args.thresholds_from is not None:
+        frozen_thresholds = json.loads(args.thresholds_from.read_text())[
+            "selected_thresholds"
+        ]
     result = analyze(
         json.loads(args.report.read_text()),
         json.loads(args.comparison.read_text()),
         parse_flow_sentinel_traces(args.server_log),
+        frozen_thresholds=frozen_thresholds,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")

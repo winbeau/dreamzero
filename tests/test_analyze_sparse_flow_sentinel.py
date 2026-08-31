@@ -6,6 +6,7 @@ from benchmarks.analyze_sparse_flow_sentinel import (
     TRACE_PREFIX,
     align_target_traces,
     choose_thresholds,
+    evaluate_thresholds,
     parse_flow_sentinel_traces,
 )
 
@@ -89,3 +90,18 @@ def test_choose_thresholds_detects_all_unsafe_validation_requests():
     assert selected["triggered_request_count"] == 2
     assert selected["triggered_step_count"] == 2
     assert selected["request_trigger"] == [False, True, True]
+
+
+def test_evaluate_thresholds_reports_test_false_negatives_without_retuning():
+    evaluated = evaluate_thresholds(
+        np.asarray([[0.99], [0.80], [0.95]]),
+        np.asarray([[0.01], [0.10], [0.20]]),
+        np.asarray([True, False, False]),
+        minimum_cosine=0.90,
+        maximum_relative_l2=0.15,
+    )
+
+    assert evaluated["triggered_request_count"] == 2
+    assert evaluated["detected_unsafe_request_count"] == 2
+    assert evaluated["false_negative_request_count"] == 0
+    assert evaluated["false_positive_request_count"] == 0
