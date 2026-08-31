@@ -599,7 +599,7 @@ def test_model_uses_live_dynamic_m1_head_groups_and_rejects_static_conflicts():
     class Decision:
         @staticmethod
         def execution_groups_for_layer(layer_index):
-            assert layer_index == 1
+            assert layer_index in (0, 1)
             return (
                 {
                     "head_indices": (0,),
@@ -622,6 +622,16 @@ def test_model_uses_live_dynamic_m1_head_groups_and_rejects_static_conflicts():
 
     runtime = Runtime()
     model.configure_dynamic_m1_runtime(runtime)
+    for block in model.blocks:
+        block.self_attn._packed_head_projection_weight_cache[("stale",)] = (
+            torch.ones(1),
+        )
+    model._dynamic_sparse_dit_index = 2
+    model._evict_stale_packed_head_projection_weights()
+    assert all(
+        not block.self_attn._packed_head_projection_weight_cache
+        for block in model.blocks
+    )
     assert model._packed_head_groups_for_layer(1) == (
         ((0,), 1.0, 1.0),
         ((1,), 0.25, 0.25),

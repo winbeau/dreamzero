@@ -467,6 +467,11 @@ class CausalWanSelfAttention(nn.Module):
         self._anchor_sparse_history_v = None
         self._anchor_sparse_history_cache.clear()
 
+    def clear_packed_head_projection_weight_cache(self) -> None:
+        """Keep dynamic Head membership from retaining old full-weight slices."""
+
+        self._packed_head_projection_weight_cache.clear()
+
     def _get_sparse_history_kv(
         self,
         history_k: torch.Tensor,
@@ -2954,6 +2959,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             )
             for block_index in range(num_layers)
         ])
+        self._packed_head_projection_signatures: list[
+            tuple[tuple[int, ...], ...] | None
+        ] = [None] * len(self.blocks)
         sparse_end = num_layers - anchor_sparse_dense_suffix_layers
         for block_index, block in enumerate(self.blocks):
             block.self_attn.layer_index = block_index
@@ -3166,6 +3174,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_scheduler_index = int(scheduler_index)
         self._dynamic_sparse_dit_index = int(dit_index)
         self._dynamic_sparse_scheduler_steps = int(scheduler_steps)
+        self._evict_stale_packed_head_projection_weights()
         intervention = self._dynamic_downstream_head_intervention
         if intervention is not None:
             self.blocks[
@@ -3332,7 +3341,28 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             self.configure_dynamic_m1_packed_observer(runtime.observer)
         elif previous is not None and self._dynamic_m1_packed_observer is previous.observer:
             self.configure_dynamic_m1_packed_observer(None)
+        self._packed_head_projection_signatures = [None] * len(self.blocks)
         self.clear_anchor_sparse_route_cache()
+
+    def _evict_stale_packed_head_projection_weights(self) -> None:
+        """Retain at most one prepacked QKV/O membership partition per layer."""
+
+        if (
+            self._dynamic_m1_runtime is None
+            and self._dynamic_packed_head_group_budget_table is None
+        ):
+            return
+        for layer_index, block in enumerate(self.blocks):
+            groups = self._packed_head_groups_for_layer(layer_index)
+            signature = (
+                None
+                if groups is None
+                else tuple(tuple(heads) for heads, _, _ in groups)
+            )
+            if signature == self._packed_head_projection_signatures[layer_index]:
+                continue
+            block.self_attn.clear_packed_head_projection_weight_cache()
+            self._packed_head_projection_signatures[layer_index] = signature
 
     def get_dynamic_m1_runtime_trace(self) -> dict[str, object]:
         runtime = self._dynamic_m1_runtime
@@ -3572,6 +3602,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     "Dynamic head-group table width differs from the model head count"
                 )
         self._dynamic_packed_head_group_budget_table = table
+        self._packed_head_projection_signatures = [None] * len(self.blocks)
         self.clear_anchor_sparse_route_cache()
 
     def configure_dynamic_dense_action_history_table(
