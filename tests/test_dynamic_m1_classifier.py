@@ -269,7 +269,7 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
         Namespace(
             input_table=input_path,
             output_dir=proxy_output_dir,
-            feature_schema="packed-proxy-v1",
+            feature_schema="packed-proxy-v2",
             models=["gradient_boosting"],
             max_train_rows=0,
             mlp_train_rows=0,
@@ -283,7 +283,7 @@ def test_small_task_disjoint_training_pipeline(tmp_path):
     )
     proxy_bundle = joblib.load(proxy_output_dir / "selected_m1_bundle.joblib")
 
-    assert proxy_summary["feature_schema"] == "packed-proxy-v1"
+    assert proxy_summary["feature_schema"] == "packed-proxy-v2"
     assert proxy_bundle["online_observation_schema"] == (
         "dreamzero-packed-m1-proxy-v2"
     )

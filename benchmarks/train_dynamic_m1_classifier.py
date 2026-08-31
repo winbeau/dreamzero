@@ -649,7 +649,7 @@ def train_and_evaluate(args: argparse.Namespace) -> dict[str, object]:
         feature_columns = FEATURE_COLUMNS
         input_columns: tuple[str, ...] = ()
         observation_schema = None
-    elif feature_schema == "packed-proxy-v1":
+    elif feature_schema == "packed-proxy-v2":
         feature_columns = PACKED_PROXY_FEATURE_COLUMNS
         input_columns = PACKED_PROXY_INPUT_COLUMNS
         observation_schema = PACKED_M1_OBSERVATION_SCHEMA
@@ -854,7 +854,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--feature-schema",
-        choices=("dense-oracle-v3", "packed-proxy-v1"),
+        choices=("dense-oracle-v3", "packed-proxy-v2"),
         default="dense-oracle-v3",
     )
     parser.add_argument(
