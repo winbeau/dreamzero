@@ -648,6 +648,18 @@ def test_model_uses_live_dynamic_m1_head_groups_and_rejects_static_conflicts():
     model.configure_dynamic_m1_runtime(None)
     assert model._dynamic_m1_packed_observer is None
 
+    model.configure_dynamic_m1_runtime(
+        runtime,
+        layer_shared_current_keep_ratio=0.75,
+    )
+    model._dynamic_sparse_dit_index = 2
+    assert model._packed_budget_ratios_for_layer(1) == (0.25, 0.75)
+    assert model._packed_head_groups_for_layer(1) == (
+        ((0,), 1.0, None),
+        ((1,), 0.25, None),
+    )
+    model.configure_dynamic_m1_runtime(None)
+
 
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
     module = _load_attention_module()

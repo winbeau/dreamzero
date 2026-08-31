@@ -2886,6 +2886,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_m1_packed_observer: Any | None = None
         self._dynamic_m1_packed_observations: list[Any | None] = []
         self._dynamic_m1_runtime: Any | None = None
+        self._dynamic_m1_layer_shared_current_keep_ratio: float | None = None
         self._dynamic_m1_request_condition: tuple[float, float] | None = None
 
         max_num_embodiments = 1
@@ -3310,10 +3311,21 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             return
         self._dynamic_m1_request_condition = values
 
-    def configure_dynamic_m1_runtime(self, runtime: Any | None) -> None:
+    def configure_dynamic_m1_runtime(
+        self,
+        runtime: Any | None,
+        *,
+        layer_shared_current_keep_ratio: float | None = None,
+    ) -> None:
         """Attach causal M1 decisions directly to the Packed-M2 executor."""
 
         previous = self._dynamic_m1_runtime
+        if layer_shared_current_keep_ratio is not None and (
+            float(layer_shared_current_keep_ratio) not in (0.25, 0.50, 0.75, 1.00)
+        ):
+            raise ValueError(
+                "Dynamic M1 layer-shared current ratio must use an executor bucket"
+            )
         if runtime is not None:
             if not self.anchor_sparse_packed_middle:
                 raise ValueError("Dynamic M1 runtime requires Packed Middle Stack")
@@ -3337,6 +3349,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if runtime.num_layers != len(self.blocks) or runtime.num_heads != self.num_heads:
                 raise ValueError("Dynamic M1 runtime geometry differs from the model")
         self._dynamic_m1_runtime = runtime
+        self._dynamic_m1_layer_shared_current_keep_ratio = (
+            None
+            if runtime is None or layer_shared_current_keep_ratio is None
+            else float(layer_shared_current_keep_ratio)
+        )
         if runtime is not None:
             self.configure_dynamic_m1_packed_observer(runtime.observer)
         elif previous is not None and self._dynamic_m1_packed_observer is previous.observer:
@@ -3368,6 +3385,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         runtime = self._dynamic_m1_runtime
         return {"configured": False} if runtime is None else {
             "configured": True,
+            "layer_shared_current_keep_ratio": (
+                self._dynamic_m1_layer_shared_current_keep_ratio
+            ),
             **runtime.trace(),
         }
 
@@ -3698,6 +3718,24 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     ) -> tuple[float, float]:
         if self._dynamic_sparse_force_dense:
             return 1.0, 1.0
+        runtime = self._dynamic_m1_runtime
+        shared_current = self._dynamic_m1_layer_shared_current_keep_ratio
+        if runtime is not None and shared_current is not None:
+            decision = runtime.current_decision
+            if decision is None:
+                raise RuntimeError(
+                    "Dynamic M1 runtime is active before the real DiT was routed"
+                )
+            layer_keep_ratios = decision.keep_ratios[layer_index]
+            current_keep_ratio = (
+                1.0
+                if all(float(value) == 1.0 for value in layer_keep_ratios)
+                else shared_current
+            )
+            config = self.anchor_sparse_config
+            if config is None:
+                raise RuntimeError("Dynamic M1 Packed budgets require anchor config")
+            return config.keep_ratio, current_keep_ratio
         table = self._dynamic_packed_budget_table
         if table is None:
             config = self.anchor_sparse_config
@@ -3727,7 +3765,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 (
                     group["head_indices"],
                     group["history_keep_ratio"],
-                    group["current_keep_ratio"],
+                    (
+                        None
+                        if self._dynamic_m1_layer_shared_current_keep_ratio is not None
+                        else group["current_keep_ratio"]
+                    ),
                 )
                 for group in decision.execution_groups_for_layer(layer_index)
             )
