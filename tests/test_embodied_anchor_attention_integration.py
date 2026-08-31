@@ -505,6 +505,49 @@ def test_packed_dense_action_history_only_expands_register_attention():
     assert attention_shapes == [(3, 13, 2), (2, 9, 2)]
 
 
+def test_packed_max_action_current_only_expands_register_current_kv():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    attention.packed_max_action_current = True
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    maximum_x = torch.cat((packed_x, torch.randn(1, 2, 8)), dim=1)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+    attention_shapes = []
+    hook = attention.attn.register_forward_pre_hook(
+        lambda _module, inputs: attention_shapes.append(
+            (inputs[0].shape[1], inputs[1].shape[1], inputs[0].shape[2])
+        )
+    )
+    try:
+        output = attention.forward_packed(
+            packed_x,
+            torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+            action_register_length=3,
+            kv_cache=cache,
+            history_indices=history_indices,
+            history_token_count=cache.shape[2],
+            maximum_current_x=maximum_x,
+            maximum_current_freqs=torch.ones(
+                (1, 7, 1, 2), dtype=torch.complex128
+            ),
+        )
+    finally:
+        hook.remove()
+
+    assert output.shape == packed_x.shape
+    # Registers see four sparse historical tokens, four maximum-prefix video
+    # tokens, and three current registers. Video queries retain two active
+    # video tokens, the same registers, and the sparse history.
+    assert attention_shapes == [(3, 11, 2), (2, 9, 2)]
+
+
 def test_complete_packed_block_matches_dense_at_full_budget() -> None:
     module = _load_attention_module()
 
@@ -990,10 +1033,14 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
         dense_suffix_layers=0,
         packed_middle=True,
         dense_action_history=True,
+        max_action_current=True,
     )
     assert model.anchor_sparse_dense_action_history
+    assert model.anchor_sparse_max_action_current
     assert not model.blocks[0].self_attn.packed_dense_action_history
     assert model.blocks[1].self_attn.packed_dense_action_history
+    assert not model.blocks[0].self_attn.packed_max_action_current
+    assert model.blocks[1].self_attn.packed_max_action_current
     action_history_table = DynamicDenseActionHistoryTable(
         enabled_cells=tuple(
             ((False, dit_index >= 4)) for dit_index in range(8)
@@ -1026,6 +1073,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model._dynamic_packed_budget_table is None
     assert model._dynamic_packed_head_group_budget_table is None
     assert model._dynamic_dense_action_history_table is None
+    assert not model.anchor_sparse_max_action_current
     assert not any(block.self_attn.record_anchor_diagnostics for block in model.blocks)
 
     model.configure_anchor_sparse_attention(enabled=False)

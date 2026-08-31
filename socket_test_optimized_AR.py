@@ -56,6 +56,7 @@ class Args:
     anchor_sparse_current_attention: bool = False
     anchor_sparse_packed_middle: bool = False
     anchor_sparse_dense_action_history: bool = False
+    anchor_sparse_max_action_current: bool = False
     anchor_sparse_dynamic_budget_table: str | None = None
     anchor_sparse_dynamic_head_group_budget_table: str | None = None
     anchor_sparse_dynamic_action_history_table: str | None = None
@@ -879,6 +880,7 @@ def main(args: Args) -> None:
             current_attention=args.anchor_sparse_current_attention,
             packed_middle=args.anchor_sparse_packed_middle,
             dense_action_history=args.anchor_sparse_dense_action_history,
+            max_action_current=args.anchor_sparse_max_action_current,
             record_diagnostics=args.anchor_sparse_record_diagnostics,
         )
     if args.anchor_sparse_dynamic_budget_table is not None:
@@ -962,7 +964,7 @@ def main(args: Args) -> None:
         "Embodied anchor sparse attention: enabled=%s key_keep=%.3f "
         "current_keep=%.3f attention_query_keep=%s dense_prefix=%d dense_suffix=%d "
         "propagate_radius=%d propagate_every=%d current_attention=%s packed_middle=%s "
-        "dense_action_history=%s "
+        "dense_action_history=%s max_action_current=%s "
         "recent_dense_frames=%d "
         "dynamic_budget_table=%s dynamic_head_group_budget_table=%s "
         "dynamic_action_history_table=%s "
@@ -978,6 +980,7 @@ def main(args: Args) -> None:
         args.anchor_sparse_current_attention,
         args.anchor_sparse_packed_middle,
         args.anchor_sparse_dense_action_history,
+        args.anchor_sparse_max_action_current,
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_dynamic_budget_table,
         args.anchor_sparse_dynamic_head_group_budget_table,

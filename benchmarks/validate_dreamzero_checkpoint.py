@@ -93,6 +93,22 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help="Optional per-rank 0/1 flags aligned with keep-ratios.",
     )
+    parser.add_argument(
+        "--max-action-current",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Let packed action/state queries attend the maximum current-video "
+            "anchor prefix while video queries retain the active layer prefix."
+        ),
+    )
+    parser.add_argument(
+        "--max-action-current-candidates",
+        type=int,
+        choices=(0, 1),
+        nargs="+",
+        help="Optional per-rank 0/1 flags aligned with keep-ratios.",
+    )
     parser.add_argument("--dynamic-budget-table", type=Path)
     parser.add_argument(
         "--dynamic-budget-table-candidates",
@@ -474,6 +490,7 @@ def main() -> None:
         ("propagate-radius-candidates", args.propagate_radius_candidates),
         ("propagate-every-candidates", args.propagate_every_candidates),
         ("dense-action-history-candidates", args.dense_action_history_candidates),
+        ("max-action-current-candidates", args.max_action_current_candidates),
     ):
         if candidates is not None and len(candidates) != len(args.keep_ratios):
             raise ValueError(f"{name} must align one-to-one with keep-ratios")
@@ -535,6 +552,11 @@ def main() -> None:
         bool(args.dense_action_history_candidates[candidate_index])
         if args.dense_action_history_candidates is not None
         else args.dense_action_history
+    )
+    candidate_max_action_current = (
+        bool(args.max_action_current_candidates[candidate_index])
+        if args.max_action_current_candidates is not None
+        else args.max_action_current
     )
     candidate_dynamic_budget_table_path = (
         args.dynamic_budget_table_candidates[candidate_index]
@@ -663,6 +685,7 @@ def main() -> None:
             current_attention=args.current_attention,
             packed_middle=args.packed_middle,
             dense_action_history=candidate_dense_action_history,
+            max_action_current=candidate_max_action_current,
             record_diagnostics=True,
         )
         if dynamic_budget_table is not None:
@@ -860,6 +883,7 @@ def main() -> None:
         "current_attention": args.current_attention,
         "packed_middle": args.packed_middle,
         "dense_action_history": candidate_dense_action_history,
+        "max_action_current": candidate_max_action_current,
         "dynamic_budget_table": (
             str(candidate_dynamic_budget_table_path)
             if candidate_dynamic_budget_table_path is not None

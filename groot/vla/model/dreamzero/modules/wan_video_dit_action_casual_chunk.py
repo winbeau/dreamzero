@@ -331,6 +331,7 @@ class CausalWanSelfAttention(nn.Module):
         self.anchor_sparse_config = anchor_sparse_config
         self.record_anchor_diagnostics = record_anchor_diagnostics
         self.packed_dense_action_history = False
+        self.packed_max_action_current = False
         self.dynamic_oracle_collector: Any | None = None
         self.layer_index = -1
         self.last_anchor_route: AnchorRoute | None = None
@@ -898,6 +899,8 @@ class CausalWanSelfAttention(nn.Module):
         head_groups: tuple[tuple[Any, ...], ...] | None = None,
         history_indices_by_ratio: dict[float, torch.Tensor] | None = None,
         current_video_tokens_by_ratio: dict[float, int] | None = None,
+        maximum_current_x: torch.Tensor | None = None,
+        maximum_current_freqs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run Q/K/V/O only on packed current tokens plus Dense registers.
 
@@ -919,6 +922,10 @@ class CausalWanSelfAttention(nn.Module):
         if not 0 <= history_token_count <= kv_cache.shape[2]:
             raise ValueError("history_token_count exceeds the immutable KV cache")
         batch, sequence, _ = x.shape
+        if self.packed_max_action_current and head_groups is not None:
+            raise ValueError(
+                "Maximum action-current K/V currently requires one shared head group"
+            )
         if (
             head_groups is not None
             and history_indices_by_ratio is not None
@@ -958,6 +965,48 @@ class CausalWanSelfAttention(nn.Module):
         query = apply_packed_rope(query, packed_freqs).type_as(value)
         key = apply_packed_rope(key, packed_freqs).type_as(value)
 
+        maximum_video_key: torch.Tensor | None = None
+        maximum_video_value: torch.Tensor | None = None
+        if self.packed_max_action_current and maximum_current_x is not None:
+            if maximum_current_freqs is None:
+                raise ValueError(
+                    "Maximum action-current K/V requires maximum-prefix RoPE"
+                )
+            if maximum_current_x.ndim != 3:
+                raise ValueError("maximum_current_x must have shape [B, L, C]")
+            if (
+                maximum_current_x.shape[0] != batch
+                or maximum_current_x.shape[2] != self.dim
+                or maximum_current_x.shape[1] < sequence
+            ):
+                raise ValueError(
+                    "maximum_current_x must contain the active packed sequence"
+                )
+            if maximum_current_freqs.shape[:2] != maximum_current_x.shape[:2]:
+                raise ValueError(
+                    "maximum_current_freqs must align with maximum_current_x"
+                )
+            if maximum_current_x.shape[1] > sequence:
+                maximum_sequence = maximum_current_x.shape[1]
+                maximum_key = self.norm_k(self.k(maximum_current_x)).view(
+                    batch,
+                    maximum_sequence,
+                    self.num_heads,
+                    self.head_dim,
+                )
+                maximum_value = self.v(maximum_current_x).view(
+                    batch,
+                    maximum_sequence,
+                    self.num_heads,
+                    self.head_dim,
+                )
+                maximum_key = apply_packed_rope(
+                    maximum_key,
+                    maximum_current_freqs,
+                ).type_as(maximum_value)
+                maximum_video_key = maximum_key[:, action_register_length:]
+                maximum_video_value = maximum_value[:, action_register_length:]
+
         history_key = (
             kv_cache[0, :, -history_token_count:]
             if history_token_count > 0
@@ -978,22 +1027,43 @@ class CausalWanSelfAttention(nn.Module):
             else:
                 sparse_history_key = history_key[:, :0]
                 sparse_history_value = history_value[:, :0]
-            if (
+            dense_action_history_active = (
                 self.packed_dense_action_history
                 and sparse_history_key.shape[1] < history_key.shape[1]
-            ):
+            )
+            max_action_current_active = maximum_video_key is not None
+            if dense_action_history_active or max_action_current_active:
                 action_query = query[:, :action_register_length]
                 video_query = query[:, action_register_length:]
-                current_key_value = (key, value)
+                action_history_key = (
+                    history_key if dense_action_history_active else sparse_history_key
+                )
+                action_history_value = (
+                    history_value if dense_action_history_active else sparse_history_value
+                )
+                if max_action_current_active:
+                    assert maximum_video_key is not None
+                    assert maximum_video_value is not None
+                    action_current_key = torch.cat(
+                        (maximum_video_key, key[:, :action_register_length]),
+                        dim=1,
+                    )
+                    action_current_value = torch.cat(
+                        (maximum_video_value, value[:, :action_register_length]),
+                        dim=1,
+                    )
+                else:
+                    action_current_key = key
+                    action_current_value = value
                 action_output = self.attn(
                     action_query,
-                    torch.cat((history_key, current_key_value[0]), dim=1),
-                    torch.cat((history_value, current_key_value[1]), dim=1),
+                    torch.cat((action_history_key, action_current_key), dim=1),
+                    torch.cat((action_history_value, action_current_value), dim=1),
                 )
                 video_output = self.attn(
                     video_query,
-                    torch.cat((sparse_history_key, current_key_value[0]), dim=1),
-                    torch.cat((sparse_history_value, current_key_value[1]), dim=1),
+                    torch.cat((sparse_history_key, key), dim=1),
+                    torch.cat((sparse_history_value, value), dim=1),
                 )
                 output = torch.cat((action_output, video_output), dim=1)
             else:
@@ -2332,12 +2402,36 @@ class CausalWanAttentionBlock(nn.Module):
         ) = None,
         history_indices_by_ratio: dict[float, torch.Tensor] | None = None,
         current_video_tokens_by_ratio: dict[float, int] | None = None,
+        maximum_current_x: torch.Tensor | None = None,
+        maximum_current_e0: torch.Tensor | None = None,
+        maximum_current_freqs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Keep a packed current-token state through one complete DiT block."""
 
         if e0.shape != (x.shape[0], x.shape[1], 6, self.dim):
             raise ValueError("packed e0 must have shape [B, L, 6, C]")
         modulation = (self.modulation.unsqueeze(1) + e0).chunk(6, dim=2)
+        maximum_attention_x: torch.Tensor | None = None
+        if maximum_current_x is not None:
+            if maximum_current_e0 is None or maximum_current_freqs is None:
+                raise ValueError(
+                    "Maximum action-current inputs require state, modulation, and RoPE"
+                )
+            if maximum_current_e0.shape != (
+                maximum_current_x.shape[0],
+                maximum_current_x.shape[1],
+                6,
+                self.dim,
+            ):
+                raise ValueError(
+                    "maximum_current_e0 must align with maximum_current_x"
+                )
+            maximum_modulation = (
+                self.modulation.unsqueeze(1) + maximum_current_e0
+            ).chunk(6, dim=2)
+            maximum_attention_x = self.norm1(maximum_current_x) * (
+                1 + maximum_modulation[1].squeeze(2)
+            ) + maximum_modulation[0].squeeze(2)
         y = self.self_attn.forward_packed(
             self.norm1(x) * (1 + modulation[1].squeeze(2))
             + modulation[0].squeeze(2),
@@ -2349,6 +2443,8 @@ class CausalWanAttentionBlock(nn.Module):
             head_groups=head_groups,
             history_indices_by_ratio=history_indices_by_ratio,
             current_video_tokens_by_ratio=current_video_tokens_by_ratio,
+            maximum_current_x=maximum_attention_x,
+            maximum_current_freqs=maximum_current_freqs,
         )
         x = x + y * modulation[2].squeeze(2)
         x = x + self.cross_attn(self.norm3(x), context)
@@ -2550,6 +2646,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_packed_middle = packed_middle_active
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
         self.anchor_sparse_dense_action_history = False
+        self.anchor_sparse_max_action_current = False
 
         if not 0.0 < anchor_sparse_current_keep_ratio <= 1.0:
             raise ValueError("anchor_sparse_current_keep_ratio must lie in (0, 1]")
@@ -2907,6 +3004,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         current_attention: bool = False,
         packed_middle: bool = False,
         dense_action_history: bool = False,
+        max_action_current: bool = False,
         record_diagnostics: bool = False,
     ) -> None:
         """Configure sparse routing after loading an upstream checkpoint.
@@ -2981,6 +3079,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_dense_action_history = (
             enabled and packed_middle_active and dense_action_history
         )
+        self.anchor_sparse_max_action_current = (
+            enabled and packed_middle_active and max_action_current
+        )
         self.anchor_sparse_record_diagnostics = record_diagnostics
         if not packed_middle_active:
             self._dynamic_packed_budget_table = None
@@ -2996,6 +3097,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             block.self_attn.anchor_sparse_config = block_config
             block.self_attn.packed_dense_action_history = (
                 self.anchor_sparse_dense_action_history
+                and dense_prefix_layers <= block_index < sparse_end
+            )
+            block.self_attn.packed_max_action_current = (
+                self.anchor_sparse_max_action_current
                 and dense_prefix_layers <= block_index < sparse_end
             )
             block.self_attn.record_anchor_diagnostics = (
@@ -3071,6 +3176,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if self.anchor_sparse_dense_action_history:
                 raise ValueError(
                     "Dense action history currently requires one shared head group"
+                )
+            if self.anchor_sparse_max_action_current:
+                raise ValueError(
+                    "Maximum action-current K/V currently requires one shared head group"
                 )
             if table.num_dit_steps != 8:
                 raise ValueError(
@@ -3851,6 +3960,26 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 block.self_attn.packed_dense_action_history = (
                     self._packed_dense_action_history_for_layer(block_index)
                 )
+                max_action_current_active = (
+                    block.self_attn.packed_max_action_current
+                    and packed_state.maximum_video_tokens
+                    > packed_current_video_tokens
+                )
+                maximum_action_current_x = (
+                    packed_state.packed_x
+                    if max_action_current_active
+                    else None
+                )
+                maximum_action_current_e0 = (
+                    packed_state.packed_e0
+                    if max_action_current_active
+                    else None
+                )
+                maximum_action_current_freqs = (
+                    packed_freqs
+                    if max_action_current_active
+                    else None
+                )
                 updated_packed = block.forward_packed(
                     packed_state.active_x(packed_current_video_tokens),
                     packed_state.active_e0(packed_current_video_tokens),
@@ -3871,6 +4000,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         if layer_head_groups is not None
                         else None
                     ),
+                    maximum_current_x=maximum_action_current_x,
+                    maximum_current_e0=maximum_action_current_e0,
+                    maximum_current_freqs=maximum_action_current_freqs,
                 )
                 packed_state.update_active(
                     updated_packed,
