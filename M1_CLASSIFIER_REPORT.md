@@ -236,6 +236,52 @@ a lightweight Packed observer is implemented, its proxy features are
 collected on real requests, and a matching bundle is retrained. This is a
 safety result, not a speed result.
 
+## Packed-path causal proxy implementation
+
+Commit `287a54e` implements the missing deployable observation path under the
+new, deliberately incompatible schema `dreamzero-packed-m1-proxy-v1`. It does
+not reconstruct Dense video attention or reuse the offline Oracle feature
+names. Each real DiT records only signals already available to the executor:
+
+- the per-Head mean/RMS signature of the 25 Dense action/state register
+  attention outputs before O projection;
+- adjacent-real-DiT register-output relative L2 and cosine;
+- conditional/unconditional disagreement and signature norm;
+- action-conditioned Router support turnover, normalized entropy, and maximum
+  mass when the lightweight Router is actually refreshed.
+
+The grouped Packed path reconstructs only the small `[B, 25, 40, head_dim]`
+register output from fixed-shape Head groups for observation. It does not
+scatter the video sequence. The observer advances only when the action head
+executes one of the eight real DiT calls; skipped scheduler steps do not
+advance history, and a Dense sentinel rerun overwrites the earlier sparse
+signature for the same DiT. Request start clears stale DiT indices and the
+last step is finalized at the existing request flush boundary.
+
+The DROID collector fixes 16 scheduler steps and eight real DiT calls, attaches
+the observer only after history warmup, and saves a reduced float32
+`[dit, layer, head, metric]` NPZ rather than activations. For teacher-feature
+collection it refreshes only the lightweight Router on every real DiT. Cached
+routes are never reported as artificial zero turnover. The NumPy-only artifact
+loader and strict one-to-one merge causally shift observation `t-1` into the
+Oracle-labelled row at `t`; a matching classifier mode excludes every legacy
+Dense `previous_vv_*` input and embeds the proxy schema into the fitted bundle.
+
+Local gates after the implementation commit are:
+
+| Gate | Result |
+| --- | ---: |
+| Packed observer/model integration | 32/32 passed |
+| online M1/group router/classifier/budget/merge | 30/30 passed |
+| proxy-schema training smoke test | passed; no Dense-history feature leakage |
+| Ruff, Python compilation, `git diff --check` | passed |
+
+H200 connectivity and the reserved Dense 2--3 / Sparse 5--6 services were
+recovered after these local gates. Real proxy collection, overhead timing,
+task-disjoint retraining, and held-out quality replay are not yet claimed in
+this section; they begin only after the implementation/report commits are
+pushed and the H200 checkout is fast-forwarded through the existing remote.
+
 ## Candidate comparison
 
 The following numbers describe the superseded feature-contaminated v2 run.
@@ -319,9 +365,9 @@ must therefore include calibrated downstream action sensitivity or a
 conservative proxy trained against it, while retaining Dense fallback for
 unscanned/uncertain cells.
 
-- implement a lightweight Packed history observer, collect its exact proxy
-  schema on real requests, retrain M1 against that schema, and connect the
-  resulting causal decisions to the model's per-DiT Packed-M2 table update;
+- collect the implemented Packed proxy schema on real requests, retrain M1
+  against that schema, and connect the resulting causal decisions to the
+  model's per-DiT Packed-M2 table update;
 - measure actual route/classifier overhead on GPU;
 - replace the current global profile family with finer shared-group dynamic
   budgets; request-level selection alone has an Oracle ceiling below target;
