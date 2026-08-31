@@ -133,3 +133,22 @@ policy despite improving the validation mean.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/`
+
+## Dynamic action-history layer gate
+
+The isolated checkpoint suggests that complete action history matters much
+more in early Transformer layers: layers 1--13 improve action relative L2 to
+1.515%, compared with 1.837% for layers 28--38, 1.703% for all packed layers,
+and 1.849% without protection. Video error is unchanged and full-budget
+video/action/cache exactness passes on both ranks.
+
+The task-disjoint validation replay again rejects checkpoint-only selection.
+Early-layer protection improves mean relative L2 only from 9.293% to 8.972%
+and mean cosine from 0.995541 to 0.995675. It improves L2 on 9/18 requests and
+cosine on 8/18, but zero requests satisfy both final-action gates. Minimum
+cosine is 0.977018 and maximum relative L2 is 21.385% on
+`validation_subset024_source018470_late`.
+
+The result supports layer-dependent routing but not the specific global
+early-layer schedule. M1 still needs request/head confidence and exact Dense
+fallback for the demonstrated regression case.

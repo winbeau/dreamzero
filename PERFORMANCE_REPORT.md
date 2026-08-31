@@ -202,3 +202,21 @@ is not promoted.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/`
+
+## Dynamic action-history layer schedule
+
+The fixed 8x40 action-history table restores most of the lost latency by
+protecting only early Transformer layers. At the same early-DiT checkpoint,
+layers 1--13 measure 154.57 ms Sparse p50 and 1.217x speedup, versus 157.91 ms
+and 1.202x for layers 28--38, and 164.43 ms and 1.147x for all 38 packed
+layers.
+
+On validation18, early-layer protection measures 1.3575 s mean target latency
+against 1.9034 s Dense: 1.402x ratio-of-means, 1.408x paired geometric mean,
+CI95 [1.345x, 1.461x], and 18/18 Sparse-faster requests. All 72 history/target
+calls retain exactly eight DiT model calls. The performance row clears the
+mean target but is rejected because final-action quality fails every request.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/`

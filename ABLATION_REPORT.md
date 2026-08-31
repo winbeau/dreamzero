@@ -27,6 +27,8 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | action-flow sentinel | test false-sparse 6.67%; triggers all safe requests | reject |
 | Dense action-history microbenchmark | +0.603 ms/layer attention; about +23 ms/38 layers | protected-action overhead |
 | Dense action-history validation18 | L2 9.293% -> 8.377%; 0/18 safe; 1.332x | reject global policy |
+| action history layers 1--13 vs 28--38 | checkpoint L2 1.515% vs 1.837%; 154.57 vs 157.91 ms | early layers favored locally |
+| early-layer action history validation18 | 1.402x; L2 8.972%; 0/18 safe | reject global schedule |
 
 ## Required remaining ablations
 

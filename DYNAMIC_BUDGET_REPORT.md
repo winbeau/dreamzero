@@ -592,3 +592,36 @@ Artifacts:
 dynamic_m1_m2/dynamic_budgets/20260831_dense_action_history/
 dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/
 ```
+
+## DiT/layer action-history scheduling
+
+Commit `69a32c6` adds a strict eight-DiT by forty-layer boolean schedule for
+the protected action-history call. This makes the mechanism compatible with
+the paper's `r(timestep, layer, head_class)` structure without introducing
+arbitrary token shapes: each cell selects either the existing sparse-history
+call or the existing 25-query Dense-history call.
+
+The first layer-bucket gate compares the same balanced current/history budget
+at real DiT index zero:
+
+| Protected layers | Sparse p50 | DiT speedup | Action cosine | Action rel-L2 |
+| --- | ---: | ---: | ---: | ---: |
+| 1--13 | 154.57 ms | 1.217x | 0.999920 | 1.515% |
+| 28--38 | 157.91 ms | 1.202x | 0.999842 | 1.837% |
+| all 1--38 | 164.43 ms | 1.147x | 0.999863 | 1.703% |
+| none | 154.98 ms | 1.228x | 0.999832 | 1.849% |
+
+Thus complete action history is not uniformly beneficial across layer depth;
+the early bucket dominates the late and all-layer variants on this input. The
+held-out validation18 replay reaches 1.402x mean speedup but only reduces mean
+relative L2 from 9.293% to 8.972%, with zero quality-safe requests. The layer
+effect is real enough to retain as an M1 feature, but the fixed early-layer
+schedule is rejected as a policy.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_dynamic_action_history/
+  checkpoint_early_vs_late_gpu01/
+dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/
+```

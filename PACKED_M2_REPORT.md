@@ -202,3 +202,30 @@ dynamic_m1_m2/packed_m2/20260831_dense_action_history_microbench/
 dynamic_m1_m2/dynamic_budgets/20260831_dense_action_history/
 dynamic_m1_m2/e2e/20260831_dense_action_history_balanced_validation18/
 ```
+
+## Dynamic action-history schedule
+
+Commit `69a32c6` replaces the all-layer boolean with an optional fixed 8x40
+DiT/layer table. The table changes only whether the 25 action/state queries use
+complete or sparse historical K/V; packed video shapes and the Router order do
+not change. Eight standardized schedules cover no protection, all middle
+layers, three layer buckets, and early/late DiT subsets.
+
+On the early-DiT checkpoint, protecting layers 1--13 gives 154.57 ms Sparse
+p50, action cosine 0.999920, and 1.515% relative L2. Protecting layers 28--38
+gives 157.91 ms, 0.999842, and 1.837%. The all-layer path was slower at 164.43
+ms and worse than the early-layer path at 1.703% L2. This establishes that
+action-history value is layer-dependent and can be non-monotonic.
+
+The real validation18 history chain does not validate the isolated gain.
+Early-layer protection reaches 1.402x mean end-to-end speedup with paired CI95
+[1.345x, 1.461x], but mean action relative L2 is 8.972%, worst L2 is 21.38%,
+and zero requests pass both action gates. It remains an ablation rather than a
+deployed M1 route.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_dynamic_action_history/
+dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/
+```
