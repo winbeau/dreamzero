@@ -670,7 +670,7 @@ def test_model_promotes_shared_packed_budgets_from_dynamic_m1_without_head_group
         enabled=True,
         keep_ratio=0.20,
         current_keep_ratio=0.25,
-        dense_prefix_layers=0,
+        dense_prefix_layers=1,
         dense_suffix_layers=0,
         propagate_radius=1,
         propagate_every=5,
