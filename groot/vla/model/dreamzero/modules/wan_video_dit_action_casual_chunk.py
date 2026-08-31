@@ -329,6 +329,7 @@ class CausalWanSelfAttention(nn.Module):
         self.num_state_per_block = num_state_per_block
         self.anchor_sparse_config = anchor_sparse_config
         self.record_anchor_diagnostics = record_anchor_diagnostics
+        self.packed_dense_action_history = False
         self.dynamic_oracle_collector: Any | None = None
         self.layer_index = -1
         self.last_anchor_route: AnchorRoute | None = None
@@ -968,19 +969,38 @@ class CausalWanSelfAttention(nn.Module):
         )
         if head_groups is None:
             if history_indices.numel():
-                history_key, history_value = self._get_sparse_history_kv(
+                sparse_history_key, sparse_history_value = self._get_sparse_history_kv(
                     history_key,
                     history_value,
                     history_indices,
                 )
             else:
-                history_key = history_key[:, :0]
-                history_value = history_value[:, :0]
-            output = self.attn(
-                query,
-                torch.cat((history_key, key), dim=1),
-                torch.cat((history_value, value), dim=1),
-            )
+                sparse_history_key = history_key[:, :0]
+                sparse_history_value = history_value[:, :0]
+            if (
+                self.packed_dense_action_history
+                and sparse_history_key.shape[1] < history_key.shape[1]
+            ):
+                action_query = query[:, :action_register_length]
+                video_query = query[:, action_register_length:]
+                current_key_value = (key, value)
+                action_output = self.attn(
+                    action_query,
+                    torch.cat((history_key, current_key_value[0]), dim=1),
+                    torch.cat((history_value, current_key_value[1]), dim=1),
+                )
+                video_output = self.attn(
+                    video_query,
+                    torch.cat((sparse_history_key, current_key_value[0]), dim=1),
+                    torch.cat((sparse_history_value, current_key_value[1]), dim=1),
+                )
+                output = torch.cat((action_output, video_output), dim=1)
+            else:
+                output = self.attn(
+                    query,
+                    torch.cat((sparse_history_key, key), dim=1),
+                    torch.cat((sparse_history_value, value), dim=1),
+                )
         else:
             if history_indices_by_ratio is None:
                 raise ValueError(
@@ -2528,6 +2548,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_current_attention = anchor_sparse_current_attention
         self.anchor_sparse_packed_middle = packed_middle_active
         self.anchor_sparse_record_diagnostics = anchor_sparse_record_diagnostics
+        self.anchor_sparse_dense_action_history = False
 
         if not 0.0 < anchor_sparse_current_keep_ratio <= 1.0:
             raise ValueError("anchor_sparse_current_keep_ratio must lie in (0, 1]")
@@ -2881,6 +2902,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         reuse_denoise: bool = True,
         current_attention: bool = False,
         packed_middle: bool = False,
+        dense_action_history: bool = False,
         record_diagnostics: bool = False,
     ) -> None:
         """Configure sparse routing after loading an upstream checkpoint.
@@ -2952,6 +2974,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.anchor_sparse_reuse_denoise = reuse_denoise
         self.anchor_sparse_current_attention = current_attention
         self.anchor_sparse_packed_middle = packed_middle_active
+        self.anchor_sparse_dense_action_history = (
+            enabled and packed_middle_active and dense_action_history
+        )
         self.anchor_sparse_record_diagnostics = record_diagnostics
         if not packed_middle_active:
             self._dynamic_packed_budget_table = None
@@ -2962,6 +2987,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             block_config = replace(block_config, keep_ratio=1.0)
         for block_index, block in enumerate(self.blocks):
             block.self_attn.anchor_sparse_config = block_config
+            block.self_attn.packed_dense_action_history = (
+                self.anchor_sparse_dense_action_history
+                and dense_prefix_layers <= block_index < sparse_end
+            )
             block.self_attn.record_anchor_diagnostics = (
                 enabled
                 and (
@@ -3031,6 +3060,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if not self.anchor_sparse_packed_middle:
                 raise ValueError(
                     "Dynamic packed head groups require an active Packed Middle Stack"
+                )
+            if self.anchor_sparse_dense_action_history:
+                raise ValueError(
+                    "Dense action history currently requires one shared head group"
                 )
             if table.num_dit_steps != 8:
                 raise ValueError(

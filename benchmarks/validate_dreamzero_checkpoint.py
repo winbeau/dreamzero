@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--dense-action-history",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Let packed action/state queries attend the full historical KV cache.",
+    )
     parser.add_argument("--dynamic-budget-table", type=Path)
     parser.add_argument(
         "--dynamic-budget-table-candidates",
@@ -582,6 +588,7 @@ def main() -> None:
             reuse_denoise=args.reuse_denoise,
             current_attention=args.current_attention,
             packed_middle=args.packed_middle,
+            dense_action_history=args.dense_action_history,
             record_diagnostics=True,
         )
         if dynamic_budget_table is not None:
@@ -774,6 +781,7 @@ def main() -> None:
         "reuse_denoise": args.reuse_denoise,
         "current_attention": args.current_attention,
         "packed_middle": args.packed_middle,
+        "dense_action_history": args.dense_action_history,
         "dynamic_budget_table": (
             str(candidate_dynamic_budget_table_path)
             if candidate_dynamic_budget_table_path is not None
