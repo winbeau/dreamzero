@@ -29,6 +29,7 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | Dense action-history validation18 | L2 9.293% -> 8.377%; 0/18 safe; 1.332x | reject global policy |
 | action history layers 1--13 vs 28--38 | checkpoint L2 1.515% vs 1.837%; 154.57 vs 157.91 ms | early layers favored locally |
 | early-layer action history validation18 | 1.402x; L2 8.972%; 0/18 safe | reject global schedule |
+| DiT-4 early-layer action history vs none | L2 1.457% vs 2.487%; 145.59 vs 132.31 ms | quality gain, too costly alone |
 
 ## Required remaining ablations
 

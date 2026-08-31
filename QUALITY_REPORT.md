@@ -152,3 +152,9 @@ cosine is 0.977018 and maximum relative L2 is 21.385% on
 The result supports layer-dependent routing but not the specific global
 early-layer schedule. M1 still needs request/head confidence and exact Dense
 fallback for the demonstrated regression case.
+
+The same layer bucket at DiT index 4 improves the isolated action relative L2
+from 2.487% to 1.457%, so late denoising also benefits. This rules out a simple
+"protect action history only on early DiT steps" explanation. The validation
+failure despite per-step action improvement points to accumulated video/cache
+state as the next quality target.

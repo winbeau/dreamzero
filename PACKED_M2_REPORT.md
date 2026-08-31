@@ -223,6 +223,12 @@ Early-layer protection reaches 1.402x mean end-to-end speedup with paired CI95
 and zero requests pass both action gates. It remains an ablation rather than a
 deployed M1 route.
 
+The late-step checkpoint confirms that the mechanism is not merely an
+early-denoise effect. At DiT index 4, early-layer protection improves action
+relative L2 from 2.487% to 1.457%, but adds 13.28 ms. The remaining trajectory
+failure therefore comes from state accumulated outside the protected action
+readout, especially sparse video-query history and packed hidden-state error.
+
 Artifacts:
 
 ```text

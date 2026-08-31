@@ -618,10 +618,21 @@ relative L2 from 9.293% to 8.972%, with zero quality-safe requests. The layer
 effect is real enough to retain as an M1 feature, but the fixed early-layer
 schedule is rejected as a policy.
 
+At real DiT index 4 (timestep 749), the same early-layer protection remains
+useful rather than changing sign: action relative L2 improves from 2.487% to
+1.457% and cosine from 0.999784 to 0.999902. The price is 132.31 to 145.59 ms
+Sparse p50, reducing DiT speedup from 1.417x to 1.308x. Therefore action-history
+protection is both layer- and timestep-sensitive, but restricting it to only
+early denoising steps would discard a large late-step quality gain. Since the
+all-eight-DiT early-layer service still fails 18/18 validation requests, the
+next budget experiment must protect the video-query history path that creates
+future cache state, not only the 25 action queries.
+
 Artifacts:
 
 ```text
 dynamic_m1_m2/dynamic_budgets/20260831_dynamic_action_history/
   checkpoint_early_vs_late_gpu01/
+  checkpoint_dit4_early_vs_none_gpu01/
 dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/
 ```

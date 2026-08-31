@@ -217,6 +217,12 @@ CI95 [1.345x, 1.461x], and 18/18 Sparse-faster requests. All 72 history/target
 calls retain exactly eight DiT model calls. The performance row clears the
 mean target but is rejected because final-action quality fails every request.
 
+At DiT index 4, early-layer protection costs 13.28 ms versus the same dynamic
+budget with no action-history protection (145.59 versus 132.31 ms), reducing
+paired DiT speedup from 1.417x to 1.308x. The measured quality gain is real,
+but a global action-readout fix cannot meet both trajectory quality and the
+Packed DiT target.
+
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/`
