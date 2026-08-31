@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from benchmarks.benchmark_downstream_head_sensitivity_droid import (
     intervention_control,
     run_chain,
     run_target,
+    validate_downstream_trace,
     video_sensitivity_metrics,
 )
 from benchmarks.benchmark_downstream_head_sensitivity_grid_droid import (
@@ -28,6 +30,7 @@ from benchmarks.analyze_downstream_oracle_alignment import (
 )
 from benchmarks.compare_dreamzero_server_e2e import compare_reports
 from benchmarks.summarize_dreamzero_server_log import summarize_log
+from benchmarks.validate_downstream_exactness import validate_exactness_report
 
 
 def test_make_request_is_deterministic_and_has_server_shapes():
@@ -93,6 +96,10 @@ def test_downstream_run_target_requests_and_parses_video_latent() -> None:
             return {
                 "action": np.asarray([[1.0, 2.0]]),
                 "video": np.asarray([[[3.0, 4.0]]]),
+                "downstream_trace": {
+                    "configured": False,
+                    "applied_count": 0,
+                },
             }
 
     client = FakeClient()
@@ -109,7 +116,36 @@ def test_downstream_run_target_requests_and_parses_video_latent() -> None:
     }
     np.testing.assert_array_equal(result.action, np.asarray([[1.0, 2.0]]))
     np.testing.assert_array_equal(result.video, np.asarray([[[3.0, 4.0]]]))
+    assert result.downstream_trace == {
+        "configured": False,
+        "applied_count": 0,
+    }
     assert result.latency_seconds >= 0.0
+
+
+def test_downstream_trace_requires_exactly_one_target_application() -> None:
+    control = intervention_control(
+        dit_index=0,
+        layer_index=39,
+        head_indices=(12, 13, 14, 15),
+        scale=1.0,
+        query_scope="all",
+    )
+    trace = {
+        "configured": True,
+        "dit_index": 0,
+        "layer_index": 39,
+        "head_indices": [12, 13, 14, 15],
+        "scale": 1.0,
+        "cfg_branches": ["conditional"],
+        "query_scope": "all",
+        "applied_count": 1,
+    }
+
+    validate_downstream_trace(trace, expected_control=control)
+    trace["applied_count"] = 2
+    with pytest.raises(ValueError, match="trace mismatch"):
+        validate_downstream_trace(trace, expected_control=control)
 
 
 def test_downstream_intervention_control_is_conditional_only() -> None:
@@ -294,6 +330,83 @@ def test_downstream_resume_rejects_mismatched_video_schema() -> None:
             [{"request_key": "action-only"}],
             record_video_sensitivity=True,
         )
+
+
+def _exactness_report() -> dict:
+    control = intervention_control(
+        dit_index=0,
+        layer_index=39,
+        head_indices=(12, 13, 14, 15),
+        scale=1.0,
+        query_scope="all",
+    )
+    return {
+        "record_video_sensitivity": True,
+        "reuse_history_snapshot": True,
+        "records": [
+            {
+                "request_key": "validation_early",
+                "candidate_label": "scale1",
+                "intervention": control,
+                "action_shape": [1, 2],
+                "baseline_action": [[1.0, 2.0]],
+                "intervention_action": [[1.0, 2.0]],
+                "action_cosine": 1.0,
+                "action_relative_l2": 0.0,
+                "action_max_abs": 0.0,
+                "video_shape": [1, 16, 4, 44, 80],
+                "video_cosine": 1.0,
+                "video_relative_l2": 0.0,
+                "video_max_abs": 0.0,
+                "baseline_downstream_trace": {
+                    "configured": False,
+                    "applied_count": 0,
+                },
+                "intervention_downstream_trace": {
+                    "configured": True,
+                    "dit_index": 0,
+                    "layer_index": 39,
+                    "head_indices": [12, 13, 14, 15],
+                    "scale": 1.0,
+                    "cfg_branches": ["conditional"],
+                    "query_scope": "all",
+                    "applied_count": 1,
+                },
+            }
+        ],
+    }
+
+
+def test_downstream_exactness_report_requires_all_gates() -> None:
+    assert validate_exactness_report(
+        _exactness_report(),
+        expected_records=1,
+    ) == {
+        "exact": True,
+        "records": 1,
+        "requests": 1,
+        "candidates": 1,
+        "action_elementwise_exact": True,
+        "video_difference_exact": True,
+        "intervention_applied_once": True,
+    }
+
+    action_failure = deepcopy(_exactness_report())
+    action_failure["records"][0]["intervention_action"][0][1] = 2.1
+    with pytest.raises(ValueError, match="action arrays"):
+        validate_exactness_report(action_failure)
+
+    video_failure = deepcopy(_exactness_report())
+    video_failure["records"][0]["video_relative_l2"] = 1e-8
+    with pytest.raises(ValueError, match="video output is not exact"):
+        validate_exactness_report(video_failure)
+
+    trace_failure = deepcopy(_exactness_report())
+    trace_failure["records"][0]["intervention_downstream_trace"][
+        "applied_count"
+    ] = 0
+    with pytest.raises(ValueError, match="trace mismatch"):
+        validate_exactness_report(trace_failure)
 
 
 def test_downstream_alignment_correlations_handle_ties() -> None:

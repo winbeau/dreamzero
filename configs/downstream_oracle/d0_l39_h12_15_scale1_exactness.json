@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Scale-one no-op gate for Dense-history snapshot action/video exactness",
+  "candidates": [
+    {
+      "label": "d0_l39_h12_15_all_scale1",
+      "dit_index": 0,
+      "layer_index": 39,
+      "head_indices": [12, 13, 14, 15],
+      "scale": 1.0,
+      "query_scope": "all"
+    }
+  ]
+}

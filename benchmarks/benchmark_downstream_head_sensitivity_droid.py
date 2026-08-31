@@ -30,6 +30,7 @@ class TargetResult:
     action: np.ndarray
     latency_seconds: float
     video: np.ndarray | None = None
+    downstream_trace: dict[str, Any] | None = None
 
 
 def _paired_sensitivity_metrics(
@@ -106,6 +107,39 @@ def intervention_control(
     }
 
 
+def validate_downstream_trace(
+    trace: dict[str, Any],
+    *,
+    expected_control: dict[str, Any] | None,
+) -> None:
+    if not isinstance(trace, dict):
+        raise TypeError("downstream intervention trace must be a mapping")
+    if expected_control is None:
+        if trace.get("configured") is not False:
+            raise ValueError("Dense baseline unexpectedly configured an intervention")
+        if int(trace.get("applied_count", -1)) != 0:
+            raise ValueError("Dense baseline unexpectedly applied an intervention")
+        return
+
+    expected = {
+        "configured": True,
+        "dit_index": int(expected_control["dit_index"]),
+        "layer_index": int(expected_control["layer_index"]),
+        "head_indices": [int(index) for index in expected_control["head_indices"]],
+        "scale": float(expected_control.get("scale", 0.0)),
+        "cfg_branches": list(expected_control.get("cfg_branches", ["conditional"])),
+        "query_scope": str(expected_control.get("query_scope", "all")),
+        "applied_count": 1,
+    }
+    mismatches = {
+        key: {"expected": expected_value, "actual": trace.get(key)}
+        for key, expected_value in expected.items()
+        if trace.get(key) != expected_value
+    }
+    if mismatches:
+        raise ValueError(f"downstream intervention trace mismatch: {mismatches}")
+
+
 def run_chain(
     client: WebsocketClientPolicy,
     observations: list[dict[str, Any]],
@@ -173,14 +207,24 @@ def run_target(
     if return_video:
         if not isinstance(response, dict):
             raise TypeError("video-return request expected a mapping response")
-        if set(response) != {"action", "video"}:
+        expected_response_fields = {"action", "video", "downstream_trace"}
+        if set(response) != expected_response_fields:
             raise ValueError(
-                "video-return response must contain exactly action and video"
+                "video-return response must contain exactly action, video, "
+                "and downstream_trace"
             )
+        downstream_trace = response["downstream_trace"]
+        if not isinstance(downstream_trace, dict):
+            raise TypeError("downstream intervention trace must be a mapping")
+        validate_downstream_trace(
+            downstream_trace,
+            expected_control=target_control,
+        )
         return TargetResult(
             action=np.asarray(response["action"]),
             latency_seconds=target_latency,
             video=np.asarray(response["video"]),
+            downstream_trace=downstream_trace,
         )
     return TargetResult(
         action=np.asarray(response),
@@ -314,6 +358,12 @@ def main() -> None:
             }
             if baseline_result.video is not None:
                 record["video_shape"] = list(baseline_result.video.shape)
+                record["baseline_downstream_trace"] = (
+                    baseline_result.downstream_trace
+                )
+                record["intervention_downstream_trace"] = (
+                    intervention_result.downstream_trace
+                )
             records.append(record)
             print(
                 json.dumps(

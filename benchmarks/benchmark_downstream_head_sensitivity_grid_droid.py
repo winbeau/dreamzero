@@ -331,6 +331,12 @@ def main() -> None:
                 }
                 if video_shape is not None:
                     record["video_shape"] = video_shape
+                    record["baseline_downstream_trace"] = (
+                        baseline_result.downstream_trace
+                    )
+                    record["intervention_downstream_trace"] = (
+                        intervention_result.downstream_trace
+                    )
                 records.append(record)
                 with jsonl_output.open("a") as handle:
                     handle.write(json.dumps(record) + "\n")

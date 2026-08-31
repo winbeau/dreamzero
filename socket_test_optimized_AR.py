@@ -423,9 +423,20 @@ class ARDroidRoboarenaPolicy:
         if return_video:
             if not isinstance(video_pred, torch.Tensor):
                 raise TypeError("final video prediction must be a tensor")
+            diffusion_model = self._policy.trained_model.action_head.model
+            get_downstream_trace = getattr(
+                diffusion_model,
+                "get_dynamic_downstream_head_intervention_trace",
+                None,
+            )
+            if get_downstream_trace is None:
+                raise RuntimeError(
+                    "Loaded diffusion model does not expose downstream trace"
+                )
             return {
                 "action": action,
                 "video": video_pred.detach().float().cpu().numpy(),
+                "downstream_trace": get_downstream_trace(),
             }
         return action
 
