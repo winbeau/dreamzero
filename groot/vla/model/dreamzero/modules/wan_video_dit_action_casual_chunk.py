@@ -341,6 +341,9 @@ class CausalWanSelfAttention(nn.Module):
         self._packed_head_index_cache: dict[
             tuple[tuple[int, ...], str, int | None], torch.Tensor
         ] = {}
+        self._packed_head_channel_index_cache: dict[
+            tuple[tuple[int, ...], str, int | None], torch.Tensor
+        ] = {}
         self._packed_query_position_cache: dict[
             tuple[int, int, int, str, int | None], torch.Tensor
         ] = {}
@@ -423,6 +426,229 @@ class CausalWanSelfAttention(nn.Module):
             self._packed_head_index_cache[cache_key] = cached
         return cached
 
+    def _packed_head_channel_indices(
+        self,
+        heads: tuple[int, ...],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Flatten head indices into their contiguous projection channels."""
+
+        cache_key = (heads, device.type, device.index)
+        cached = self._packed_head_channel_index_cache.get(cache_key)
+        if cached is None:
+            head_indices = self._packed_head_indices(heads, device)
+            channel_offsets = torch.arange(
+                self.head_dim,
+                device=device,
+                dtype=torch.long,
+            )
+            cached = (
+                head_indices[:, None] * self.head_dim + channel_offsets[None, :]
+            ).flatten()
+            self._packed_head_channel_index_cache[cache_key] = cached
+        return cached
+
+    @staticmethod
+    def _project_packed_head_group(
+        x: torch.Tensor,
+        projection: nn.Linear,
+        channel_indices: torch.Tensor,
+        norm: nn.Module | None = None,
+    ) -> torch.Tensor:
+        """Project only the output channels owned by one packed head group.
+
+        Video Q/K normalization uses the group's channels as an unbiased
+        estimate of the full-width RMS. Dense action/state registers take the
+        exact full-width projection path separately.
+        """
+
+        projected = F.linear(
+            x,
+            projection.weight.index_select(0, channel_indices),
+            (
+                projection.bias.index_select(0, channel_indices)
+                if projection.bias is not None
+                else None
+            ),
+        )
+        if norm is None or isinstance(norm, nn.Identity):
+            return projected
+        if not isinstance(norm, WanRMSNorm):
+            raise TypeError(
+                "Packed head-sliced Q/K projection only supports WanRMSNorm"
+            )
+        normalized = norm._norm(projected.float()).type_as(projected)
+        return normalized * norm.weight.index_select(0, channel_indices)
+
+    def _forward_packed_current_head_groups(
+        self,
+        x: torch.Tensor,
+        packed_freqs: torch.Tensor,
+        *,
+        action_register_length: int,
+        kv_cache: torch.Tensor,
+        history_token_count: int,
+        head_groups: tuple[tuple[tuple[int, ...], float, float], ...],
+        history_indices_by_ratio: dict[float, torch.Tensor],
+        current_video_tokens_by_ratio: dict[float, int],
+    ) -> torch.Tensor:
+        """Execute grouped current Q/K/V/O without full-width video GEMMs."""
+
+        batch, sequence, _ = x.shape
+        register_x = x[:, :action_register_length]
+        register_freqs = packed_freqs[:, :action_register_length]
+
+        # Action/state registers are few and quality critical. Keep their Q/K/V
+        # projections and full-width RMS normalization byte-identical to Dense.
+        register_query = self.norm_q(self.q(register_x)).view(
+            batch, action_register_length, self.num_heads, self.head_dim
+        )
+        register_key = self.norm_k(self.k(register_x)).view(
+            batch, action_register_length, self.num_heads, self.head_dim
+        )
+        register_value = self.v(register_x).view(
+            batch, action_register_length, self.num_heads, self.head_dim
+        )
+        register_query = apply_packed_rope(
+            register_query,
+            register_freqs,
+        ).type_as(register_value)
+        register_key = apply_packed_rope(
+            register_key,
+            register_freqs,
+        ).type_as(register_value)
+
+        history_key = (
+            kv_cache[0, :, -history_token_count:]
+            if history_token_count > 0
+            else kv_cache[0, :, :0]
+        )
+        history_value = (
+            kv_cache[1, :, -history_token_count:]
+            if history_token_count > 0
+            else kv_cache[1, :, :0]
+        )
+
+        projected_output = x.new_zeros(x.shape)
+        for group_heads, history_keep_ratio, current_keep_ratio in head_groups:
+            head_indices = self._packed_head_indices(group_heads, x.device)
+            channel_indices = self._packed_head_channel_indices(
+                group_heads,
+                x.device,
+            )
+            group_video_tokens = current_video_tokens_by_ratio.get(
+                current_keep_ratio
+            )
+            if group_video_tokens is None:
+                raise ValueError(
+                    "Missing packed current-token count for head-group ratio "
+                    f"{current_keep_ratio}"
+                )
+            group_length = action_register_length + group_video_tokens
+            group_video_x = x[
+                :,
+                action_register_length:group_length,
+            ]
+            group_video_freqs = packed_freqs[
+                :,
+                action_register_length:group_length,
+            ]
+            group_head_count = len(group_heads)
+
+            video_query = self._project_packed_head_group(
+                group_video_x,
+                self.q,
+                channel_indices,
+                self.norm_q,
+            ).view(batch, group_video_tokens, group_head_count, self.head_dim)
+            video_key = self._project_packed_head_group(
+                group_video_x,
+                self.k,
+                channel_indices,
+                self.norm_k,
+            ).view(batch, group_video_tokens, group_head_count, self.head_dim)
+            video_value = self._project_packed_head_group(
+                group_video_x,
+                self.v,
+                channel_indices,
+            ).view(batch, group_video_tokens, group_head_count, self.head_dim)
+            video_query = apply_packed_rope(
+                video_query,
+                group_video_freqs,
+            ).type_as(video_value)
+            video_key = apply_packed_rope(
+                video_key,
+                group_video_freqs,
+            ).type_as(video_value)
+
+            group_query = torch.cat(
+                (
+                    register_query.index_select(2, head_indices),
+                    video_query,
+                ),
+                dim=1,
+            )
+            group_current_key = torch.cat(
+                (
+                    register_key.index_select(2, head_indices),
+                    video_key,
+                ),
+                dim=1,
+            )
+            group_current_value = torch.cat(
+                (
+                    register_value.index_select(2, head_indices),
+                    video_value,
+                ),
+                dim=1,
+            )
+
+            if history_keep_ratio == 1.0:
+                group_history_key = history_key
+                group_history_value = history_value
+            else:
+                group_history_indices = history_indices_by_ratio.get(
+                    history_keep_ratio
+                )
+                if group_history_indices is None:
+                    raise ValueError(
+                        "Missing packed history indices for head-group ratio "
+                        f"{history_keep_ratio}"
+                    )
+                group_history_key, group_history_value = self._get_sparse_history_kv(
+                    history_key,
+                    history_value,
+                    group_history_indices,
+                )
+
+            group_output = self.attn(
+                group_query,
+                torch.cat(
+                    (
+                        group_history_key.index_select(2, head_indices),
+                        group_current_key,
+                    ),
+                    dim=1,
+                ),
+                torch.cat(
+                    (
+                        group_history_value.index_select(2, head_indices),
+                        group_current_value,
+                    ),
+                    dim=1,
+                ),
+            )
+            group_output_projection = F.linear(
+                group_output.flatten(2),
+                self.o.weight.index_select(1, channel_indices),
+                None,
+            )
+            projected_output[:, :group_length].add_(group_output_projection)
+
+        if self.o.bias is not None:
+            projected_output.add_(self.o.bias)
+        return projected_output
+
     def _packed_query_positions(
         self,
         *,
@@ -488,6 +714,35 @@ class CausalWanSelfAttention(nn.Module):
         if not 0 <= history_token_count <= kv_cache.shape[2]:
             raise ValueError("history_token_count exceeds the immutable KV cache")
         batch, sequence, _ = x.shape
+        if (
+            head_groups is not None
+            and history_indices_by_ratio is not None
+            and current_video_tokens_by_ratio is not None
+            and all(len(group) == 3 and group[2] is not None for group in head_groups)
+        ):
+            normalized_current_head_groups = tuple(
+                (group[0], float(group[1]), float(group[2]))
+                for group in head_groups
+            )
+            flattened_heads = sorted(
+                head
+                for group_heads, _, _ in normalized_current_head_groups
+                for head in group_heads
+            )
+            if flattened_heads != list(range(self.num_heads)):
+                raise ValueError(
+                    "Packed head groups must partition every attention head"
+                )
+            return self._forward_packed_current_head_groups(
+                x,
+                packed_freqs,
+                action_register_length=action_register_length,
+                kv_cache=kv_cache,
+                history_token_count=history_token_count,
+                head_groups=normalized_current_head_groups,
+                history_indices_by_ratio=history_indices_by_ratio,
+                current_video_tokens_by_ratio=current_video_tokens_by_ratio,
+            )
         query = self.norm_q(self.q(x)).view(
             batch, sequence, self.num_heads, self.head_dim
         )

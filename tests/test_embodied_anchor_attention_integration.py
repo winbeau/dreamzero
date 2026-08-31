@@ -333,6 +333,93 @@ def test_packed_head_groups_compress_current_qkv_but_keep_registers_dense():
     assert attention_shapes == [(5, 13, 1), (4, 8, 1)]
 
 
+def test_head_sliced_current_qkv_projects_dense_registers_and_sparse_video():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+    projected_lengths = []
+    hooks = [
+        projection.register_forward_pre_hook(
+            lambda _module, inputs: projected_lengths.append(inputs[0].shape[1])
+        )
+        for projection in (attention.q, attention.k, attention.v)
+    ]
+    attention_shapes = []
+    attention_hook = attention.attn.register_forward_pre_hook(
+        lambda _module, inputs: attention_shapes.append(
+            (inputs[0].shape[1], inputs[1].shape[1], inputs[0].shape[2])
+        )
+    )
+    try:
+        output = attention.forward_packed(
+            packed_x,
+            torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+            action_register_length=3,
+            kv_cache=cache,
+            history_indices=history_indices,
+            history_token_count=cache.shape[2],
+            head_groups=(((0,), 1.0, 1.0), ((1,), 0.5, 0.5)),
+            history_indices_by_ratio={0.5: history_indices},
+            current_video_tokens_by_ratio={1.0: 2, 0.5: 1},
+        )
+    finally:
+        for hook in hooks:
+            hook.remove()
+        attention_hook.remove()
+
+    assert output.shape == packed_x.shape
+    # Q/K/V modules execute only for the three Dense registers. Video GEMMs
+    # use channel-sliced F.linear calls with two and one selected video token.
+    assert projected_lengths == [3, 3, 3]
+    assert attention_shapes == [(5, 13, 1), (4, 8, 1)]
+
+
+def test_head_sliced_full_current_groups_match_single_call_without_qk_norm():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+        qk_norm=False,
+    )
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    packed_freqs = torch.ones((1, 5, 1, 2), dtype=torch.complex128)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+
+    single = attention.forward_packed(
+        packed_x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+    )
+    grouped = attention.forward_packed(
+        packed_x,
+        packed_freqs,
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+        head_groups=(((0,), 0.5, 1.0), ((1,), 0.5, 1.0)),
+        history_indices_by_ratio={0.5: history_indices},
+        current_video_tokens_by_ratio={1.0: 2},
+    )
+
+    assert torch.allclose(grouped, single, atol=1e-6, rtol=1e-6)
+
+
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
     module = _load_attention_module()
     attention = module.CausalWanSelfAttention(
