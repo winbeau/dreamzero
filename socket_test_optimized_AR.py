@@ -338,8 +338,20 @@ class ARDroidRoboarenaPolicy:
         )
         configure(intervention)
         logger.info("Per-request downstream intervention: %s", intervention)
+
+    def _pop_downstream_video_return(self, obs: dict) -> bool:
+        """Consume the research-only final-latent response selector."""
+
+        return_video = obs.pop("dynamic_downstream_return_video", False)
+        if type(return_video) is not bool:
+            raise ValueError("downstream video-return selector must be boolean")
+        if return_video and not self._allow_downstream_request_override:
+            raise ValueError(
+                "Per-request downstream video return is disabled"
+            )
+        return return_video
     
-    def infer(self, obs: dict) -> np.ndarray:
+    def infer(self, obs: dict) -> np.ndarray | dict[str, np.ndarray]:
         """Infer actions from observations.
         
         Args:
@@ -348,6 +360,8 @@ class ARDroidRoboarenaPolicy:
         Returns:
             action: (N, 8) action array
         """
+        return_video = self._pop_downstream_video_return(obs)
+
         # Check for session change - reset state if new session
         session_id = obs.get("session_id", None)
         if session_id is not None and session_id != self._current_session_id:
@@ -406,6 +420,13 @@ class ARDroidRoboarenaPolicy:
         if self._is_first_call:
             self._is_first_call = False
         
+        if return_video:
+            if not isinstance(video_pred, torch.Tensor):
+                raise TypeError("final video prediction must be a tensor")
+            return {
+                "action": action,
+                "video": video_pred.detach().float().cpu().numpy(),
+            }
         return action
 
     def _save_anchor_diagnostics(self) -> None:

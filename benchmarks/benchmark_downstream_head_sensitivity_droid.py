@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,29 +22,69 @@ from eval_utils.policy_client import WebsocketClientPolicy
 
 
 CONTROL_KEY = "dynamic_downstream_head_intervention"
+RETURN_VIDEO_KEY = "dynamic_downstream_return_video"
+
+
+@dataclass(frozen=True)
+class TargetResult:
+    action: np.ndarray
+    latency_seconds: float
+    video: np.ndarray | None = None
+
+
+def _paired_sensitivity_metrics(
+    baseline: np.ndarray,
+    intervened: np.ndarray,
+    *,
+    prefix: str,
+) -> dict[str, float]:
+    baseline_array = np.asarray(baseline, dtype=np.float64)
+    intervened_array = np.asarray(intervened, dtype=np.float64)
+    if baseline_array.shape != intervened_array.shape:
+        raise ValueError(f"paired {prefix} shapes do not match")
+    if baseline_array.size == 0:
+        raise ValueError(f"paired {prefix} arrays must be non-empty")
+    if not np.all(np.isfinite(baseline_array)) or not np.all(
+        np.isfinite(intervened_array)
+    ):
+        raise ValueError(f"paired {prefix} arrays must be finite")
+    baseline_flat = baseline_array.reshape(-1)
+    intervened_flat = intervened_array.reshape(-1)
+    baseline_norm = float(np.linalg.norm(baseline_flat))
+    intervened_norm = float(np.linalg.norm(intervened_flat))
+    denominator = max(baseline_norm * intervened_norm, 1e-12)
+    difference = intervened_flat - baseline_flat
+    return {
+        f"{prefix}_cosine": float(
+            np.dot(baseline_flat, intervened_flat) / denominator
+        ),
+        f"{prefix}_relative_l2": float(
+            np.linalg.norm(difference) / max(baseline_norm, 1e-12)
+        ),
+        f"{prefix}_max_abs": float(np.max(np.abs(difference))),
+    }
 
 
 def action_sensitivity_metrics(
     baseline: np.ndarray,
     intervened: np.ndarray,
 ) -> dict[str, float]:
-    baseline_flat = np.asarray(baseline, dtype=np.float64).reshape(-1)
-    intervened_flat = np.asarray(intervened, dtype=np.float64).reshape(-1)
-    if baseline_flat.shape != intervened_flat.shape:
-        raise ValueError("paired action shapes do not match")
-    baseline_norm = float(np.linalg.norm(baseline_flat))
-    intervened_norm = float(np.linalg.norm(intervened_flat))
-    denominator = max(baseline_norm * intervened_norm, 1e-12)
-    difference = intervened_flat - baseline_flat
-    return {
-        "action_cosine": float(
-            np.dot(baseline_flat, intervened_flat) / denominator
-        ),
-        "action_relative_l2": float(
-            np.linalg.norm(difference) / max(baseline_norm, 1e-12)
-        ),
-        "action_max_abs": float(np.max(np.abs(difference))),
-    }
+    return _paired_sensitivity_metrics(
+        baseline,
+        intervened,
+        prefix="action",
+    )
+
+
+def video_sensitivity_metrics(
+    baseline: np.ndarray,
+    intervened: np.ndarray,
+) -> dict[str, float]:
+    return _paired_sensitivity_metrics(
+        baseline,
+        intervened,
+        prefix="video",
+    )
 
 
 def intervention_control(
@@ -72,14 +113,32 @@ def run_chain(
     target_control: dict[str, Any] | None,
     session_id: str,
 ) -> tuple[np.ndarray, list[float], float]:
+    result, history_latencies = run_chain_result(
+        client,
+        observations,
+        target_control=target_control,
+        session_id=session_id,
+    )
+    return result.action, history_latencies, result.latency_seconds
+
+
+def run_chain_result(
+    client: WebsocketClientPolicy,
+    observations: list[dict[str, Any]],
+    *,
+    target_control: dict[str, Any] | None,
+    session_id: str,
+    return_video: bool = False,
+) -> tuple[TargetResult, list[float]]:
     history_latencies = run_history(client, observations[:-1])
-    action, target_latency = run_target(
+    result = run_target(
         client,
         observations[-1],
         target_control=target_control,
+        return_video=return_video,
     )
     client.reset({"session_id": session_id})
-    return action, history_latencies, target_latency
+    return result, history_latencies
 
 
 def run_history(
@@ -100,15 +159,33 @@ def run_target(
     observation: dict[str, Any],
     *,
     target_control: dict[str, Any] | None,
-) -> tuple[np.ndarray, float]:
+    return_video: bool = False,
+) -> TargetResult:
     target = dict(observation)
     target[CONTROL_KEY] = (
         {"enabled": False} if target_control is None else target_control
     )
+    if return_video:
+        target[RETURN_VIDEO_KEY] = True
     started = time.perf_counter()
-    action = np.asarray(client.infer(target))
+    response = client.infer(target)
     target_latency = time.perf_counter() - started
-    return action, target_latency
+    if return_video:
+        if not isinstance(response, dict):
+            raise TypeError("video-return request expected a mapping response")
+        if set(response) != {"action", "video"}:
+            raise ValueError(
+                "video-return response must contain exactly action and video"
+            )
+        return TargetResult(
+            action=np.asarray(response["action"]),
+            latency_seconds=target_latency,
+            video=np.asarray(response["video"]),
+        )
+    return TargetResult(
+        action=np.asarray(response),
+        latency_seconds=target_latency,
+    )
 
 
 def main() -> None:
@@ -146,6 +223,7 @@ def main() -> None:
     parser.add_argument("--history-blocks", type=int, default=3)
     parser.add_argument("--warmup-pairs", type=int, default=0)
     parser.add_argument("--max-requests", type=int)
+    parser.add_argument("--record-video-sensitivity", action="store_true")
     args = parser.parse_args()
     if args.warmup_pairs < 0:
         parser.error("--warmup-pairs must be non-negative")
@@ -180,24 +258,39 @@ def main() -> None:
                 history_blocks=args.history_blocks,
                 session_id=session_id,
             )
-            baseline, baseline_history, baseline_latency = run_chain(
+            baseline_result, baseline_history = run_chain_result(
                 client,
                 baseline_observations,
                 target_control=None,
                 session_id=session_id,
+                return_video=args.record_video_sensitivity,
             )
             intervention_observations = reader.observations(
                 request,
                 history_blocks=args.history_blocks,
                 session_id=session_id,
             )
-            intervened, intervention_history, intervention_latency = run_chain(
+            intervention_result, intervention_history = run_chain_result(
                 client,
                 intervention_observations,
                 target_control=control,
                 session_id=session_id,
+                return_video=args.record_video_sensitivity,
             )
+            baseline = baseline_result.action
+            intervened = intervention_result.action
             metrics = action_sensitivity_metrics(baseline, intervened)
+            if args.record_video_sensitivity:
+                if baseline_result.video is None:
+                    raise RuntimeError("baseline video result is missing")
+                if intervention_result.video is None:
+                    raise RuntimeError("intervention video result is missing")
+                metrics.update(
+                    video_sensitivity_metrics(
+                        baseline_result.video,
+                        intervention_result.video,
+                    )
+                )
             phase = "warmup" if request_index < args.warmup_pairs else "measured"
             record = {
                 "request_index": request_index,
@@ -210,13 +303,17 @@ def main() -> None:
                 ],
                 "baseline_history_latency_seconds": baseline_history,
                 "intervention_history_latency_seconds": intervention_history,
-                "baseline_latency_seconds": baseline_latency,
-                "intervention_latency_seconds": intervention_latency,
+                "baseline_latency_seconds": baseline_result.latency_seconds,
+                "intervention_latency_seconds": (
+                    intervention_result.latency_seconds
+                ),
                 "action_shape": list(baseline.shape),
                 "baseline_action": baseline.tolist(),
                 "intervention_action": intervened.tolist(),
                 **metrics,
             }
+            if baseline_result.video is not None:
+                record["video_shape"] = list(baseline_result.video.shape)
             records.append(record)
             print(
                 json.dumps(
@@ -243,6 +340,10 @@ def main() -> None:
         "dataset_path": str(args.dataset_path),
         "manifest": str(args.manifest),
         "history_blocks": args.history_blocks,
+        "record_video_sensitivity": args.record_video_sensitivity,
+        "target_latency_includes_video_transfer": (
+            args.record_video_sensitivity
+        ),
         "warmup_pairs": args.warmup_pairs,
         "measured_pairs": len(measured),
         "intervention": control,
@@ -265,6 +366,30 @@ def main() -> None:
         },
         "records": records,
     }
+    if args.record_video_sensitivity:
+        report["summary"].update(
+            {
+                "video_cosine_mean": float(
+                    np.mean([record["video_cosine"] for record in measured])
+                ),
+                "video_cosine_min": float(
+                    np.min([record["video_cosine"] for record in measured])
+                ),
+                "video_relative_l2_mean": float(
+                    np.mean(
+                        [record["video_relative_l2"] for record in measured]
+                    )
+                ),
+                "video_relative_l2_max": float(
+                    np.max(
+                        [record["video_relative_l2"] for record in measured]
+                    )
+                ),
+                "video_max_abs_max": float(
+                    np.max([record["video_max_abs"] for record in measured])
+                ),
+            }
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report["summary"], indent=2), flush=True)

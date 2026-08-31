@@ -6,6 +6,7 @@ import torch
 from groot.vla.model.dreamzero.action_head.wan_flow_matching_action_tf import (
     WANPolicyHead,
 )
+from socket_test_optimized_AR import ARDroidRoboarenaPolicy
 
 
 def _minimal_policy_head(*, sparse: bool = False) -> WANPolicyHead:
@@ -56,3 +57,28 @@ def test_downstream_oracle_state_restore_rejects_invalid_payload() -> None:
 
     with pytest.raises(ValueError, match="invalid"):
         head.restore_downstream_oracle_state({"current_start_frame": 0})
+
+
+def test_downstream_video_return_selector_is_research_gated() -> None:
+    policy = ARDroidRoboarenaPolicy.__new__(ARDroidRoboarenaPolicy)
+    policy._allow_downstream_request_override = True
+    observation = {"dynamic_downstream_return_video": True, "frame": 1}
+
+    assert policy._pop_downstream_video_return(observation) is True
+    assert observation == {"frame": 1}
+
+    policy._allow_downstream_request_override = False
+    with pytest.raises(ValueError, match="video return is disabled"):
+        policy._pop_downstream_video_return(
+            {"dynamic_downstream_return_video": True}
+        )
+
+
+def test_downstream_video_return_selector_rejects_non_boolean() -> None:
+    policy = ARDroidRoboarenaPolicy.__new__(ARDroidRoboarenaPolicy)
+    policy._allow_downstream_request_override = True
+
+    with pytest.raises(ValueError, match="must be boolean"):
+        policy._pop_downstream_video_return(
+            {"dynamic_downstream_return_video": 1}
+        )

@@ -15,9 +15,10 @@ if __package__ in {None, ""}:
 from benchmarks.benchmark_downstream_head_sensitivity_droid import (
     action_sensitivity_metrics,
     intervention_control,
-    run_chain,
+    run_chain_result,
     run_history,
     run_target,
+    video_sensitivity_metrics,
 )
 from benchmarks.benchmark_dreamzero_server_droid import (
     DroidRequestReader,
@@ -25,6 +26,27 @@ from benchmarks.benchmark_dreamzero_server_droid import (
     build_request_plan,
 )
 from eval_utils.policy_client import WebsocketClientPolicy
+
+
+VIDEO_METRIC_FIELDS = frozenset(
+    {"video_cosine", "video_relative_l2", "video_max_abs"}
+)
+
+
+def validate_resume_video_schema(
+    records: list[dict[str, Any]],
+    *,
+    record_video_sensitivity: bool,
+) -> None:
+    for record in records:
+        present_video_fields = VIDEO_METRIC_FIELDS.intersection(record)
+        if present_video_fields and present_video_fields != VIDEO_METRIC_FIELDS:
+            raise ValueError("resume JSONL contains partial video metrics")
+        if bool(present_video_fields) != record_video_sensitivity:
+            raise ValueError(
+                "resume JSONL video schema does not match "
+                "--record-video-sensitivity"
+            )
 
 
 def load_candidates(path: Path) -> list[dict[str, Any]]:
@@ -62,7 +84,7 @@ def summarize_candidate_records(
     by_stage: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         by_stage[record["trajectory_stage"]].append(record)
-    return {
+    summary = {
         "measured_requests": len(records),
         "action_cosine_mean": float(
             np.mean([record["action_cosine"] for record in records])
@@ -87,6 +109,52 @@ def summarize_candidate_records(
             for stage, stage_records in sorted(by_stage.items())
         },
     }
+    record_video_sensitivity = bool(VIDEO_METRIC_FIELDS.intersection(records[0]))
+    validate_resume_video_schema(
+        records,
+        record_video_sensitivity=record_video_sensitivity,
+    )
+    if record_video_sensitivity:
+        video_worst = max(
+            records,
+            key=lambda record: record["video_relative_l2"],
+        )
+        summary.update(
+            {
+                "video_cosine_mean": float(
+                    np.mean([record["video_cosine"] for record in records])
+                ),
+                "video_cosine_min": float(
+                    np.min([record["video_cosine"] for record in records])
+                ),
+                "video_relative_l2_mean": float(
+                    np.mean(
+                        [record["video_relative_l2"] for record in records]
+                    )
+                ),
+                "video_relative_l2_max": float(
+                    np.max(
+                        [record["video_relative_l2"] for record in records]
+                    )
+                ),
+                "video_max_abs_max": float(
+                    np.max([record["video_max_abs"] for record in records])
+                ),
+                "video_worst_request_key": video_worst["request_key"],
+                "stage_video_relative_l2_mean": {
+                    stage: float(
+                        np.mean(
+                            [
+                                record["video_relative_l2"]
+                                for record in stage_records
+                            ]
+                        )
+                    )
+                    for stage, stage_records in sorted(by_stage.items())
+                },
+            }
+        )
+    return summary
 
 
 def main() -> None:
@@ -105,6 +173,7 @@ def main() -> None:
     parser.add_argument("--jsonl-output", type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--reuse-history-snapshot", action="store_true")
+    parser.add_argument("--record-video-sensitivity", action="store_true")
     parser.add_argument("--label", required=True)
     parser.add_argument(
         "--splits",
@@ -147,6 +216,10 @@ def main() -> None:
         ]
     else:
         jsonl_output.write_text("")
+    validate_resume_video_schema(
+        records,
+        record_video_sensitivity=args.record_video_sensitivity,
+    )
     completed = {
         (record["request_key"], record["candidate_label"])
         for record in records
@@ -178,17 +251,19 @@ def main() -> None:
                     baseline_observations[:-1],
                 )
                 client.snapshot({"request_key": request["request_key"]})
-                baseline, baseline_latency = run_target(
+                baseline_result = run_target(
                     client,
                     baseline_observations[-1],
                     target_control=None,
+                    return_video=args.record_video_sensitivity,
                 )
             else:
-                baseline, baseline_history, baseline_latency = run_chain(
+                baseline_result, baseline_history = run_chain_result(
                     client,
                     baseline_observations,
                     target_control=None,
                     session_id=session_id,
+                    return_video=args.record_video_sensitivity,
                 )
             for candidate in remaining_candidates:
                 if args.reuse_history_snapshot:
@@ -198,10 +273,11 @@ def main() -> None:
                             "candidate_label": candidate["label"],
                         }
                     )
-                    intervened, intervention_latency = run_target(
+                    intervention_result = run_target(
                         client,
                         baseline_observations[-1],
                         target_control=candidate["control"],
+                        return_video=args.record_video_sensitivity,
                     )
                     intervention_history = []
                 else:
@@ -210,11 +286,26 @@ def main() -> None:
                         history_blocks=args.history_blocks,
                         session_id=session_id,
                     )
-                    intervened, intervention_history, intervention_latency = run_chain(
+                    intervention_result, intervention_history = run_chain_result(
                         client,
                         intervention_observations,
                         target_control=candidate["control"],
                         session_id=session_id,
+                        return_video=args.record_video_sensitivity,
+                    )
+                baseline = baseline_result.action
+                intervened = intervention_result.action
+                video_metrics = {}
+                video_shape = None
+                if args.record_video_sensitivity:
+                    if baseline_result.video is None:
+                        raise RuntimeError("baseline video result is missing")
+                    if intervention_result.video is None:
+                        raise RuntimeError("intervention video result is missing")
+                    video_shape = list(baseline_result.video.shape)
+                    video_metrics = video_sensitivity_metrics(
+                        baseline_result.video,
+                        intervention_result.video,
                     )
                 record = {
                     "request_index": request_index,
@@ -228,13 +319,18 @@ def main() -> None:
                     "intervention": candidate["control"],
                     "baseline_history_latency_seconds": baseline_history,
                     "intervention_history_latency_seconds": intervention_history,
-                    "baseline_latency_seconds": baseline_latency,
-                    "intervention_latency_seconds": intervention_latency,
+                    "baseline_latency_seconds": baseline_result.latency_seconds,
+                    "intervention_latency_seconds": (
+                        intervention_result.latency_seconds
+                    ),
                     "action_shape": list(baseline.shape),
                     "baseline_action": baseline.tolist(),
                     "intervention_action": intervened.tolist(),
                     **action_sensitivity_metrics(baseline, intervened),
+                    **video_metrics,
                 }
+                if video_shape is not None:
+                    record["video_shape"] = video_shape
                 records.append(record)
                 with jsonl_output.open("a") as handle:
                     handle.write(json.dumps(record) + "\n")
@@ -280,6 +376,10 @@ def main() -> None:
         "stages": args.stages,
         "history_blocks": args.history_blocks,
         "reuse_history_snapshot": args.reuse_history_snapshot,
+        "record_video_sensitivity": args.record_video_sensitivity,
+        "target_latency_includes_video_transfer": (
+            args.record_video_sensitivity
+        ),
         "requests": len(plan),
         "candidates": len(candidates),
         "baseline_trajectory_count": len(plan),

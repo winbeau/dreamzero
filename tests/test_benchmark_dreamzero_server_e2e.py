@@ -10,13 +10,17 @@ from benchmarks.benchmark_dreamzero_server_droid import (
     split_state,
 )
 from benchmarks.benchmark_downstream_head_sensitivity_droid import (
+    RETURN_VIDEO_KEY,
     action_sensitivity_metrics,
     intervention_control,
     run_chain,
+    run_target,
+    video_sensitivity_metrics,
 )
 from benchmarks.benchmark_downstream_head_sensitivity_grid_droid import (
     load_candidates,
     summarize_candidate_records,
+    validate_resume_video_schema,
 )
 from benchmarks.analyze_downstream_oracle_alignment import (
     average_tie_ranks,
@@ -61,6 +65,51 @@ def test_downstream_action_sensitivity_metrics_are_paired() -> None:
     assert metrics["action_cosine"] == pytest.approx(0.9701425)
     assert metrics["action_relative_l2"] == pytest.approx(np.sqrt(0.08))
     assert metrics["action_max_abs"] == pytest.approx(0.2)
+
+
+def test_downstream_video_sensitivity_metrics_are_paired() -> None:
+    baseline = np.asarray([[[1.0, 0.0], [0.0, 1.0]]])
+    intervened = np.asarray([[[0.8, 0.2], [0.1, 0.9]]])
+
+    metrics = video_sensitivity_metrics(baseline, intervened)
+
+    assert metrics["video_cosine"] == pytest.approx(1.7 / np.sqrt(3.0))
+    assert metrics["video_relative_l2"] == pytest.approx(np.sqrt(0.1) / np.sqrt(2))
+    assert metrics["video_max_abs"] == pytest.approx(0.2)
+
+    with pytest.raises(ValueError, match="shapes do not match"):
+        video_sensitivity_metrics(np.zeros((2, 4)), np.zeros((4, 2)))
+    with pytest.raises(ValueError, match="must be finite"):
+        video_sensitivity_metrics(np.asarray([1.0]), np.asarray([np.nan]))
+
+
+def test_downstream_run_target_requests_and_parses_video_latent() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.request = None
+
+        def infer(self, observation):
+            self.request = observation.copy()
+            return {
+                "action": np.asarray([[1.0, 2.0]]),
+                "video": np.asarray([[[3.0, 4.0]]]),
+            }
+
+    client = FakeClient()
+    result = run_target(
+        client,
+        {"frame": 7},
+        target_control=None,
+        return_video=True,
+    )
+
+    assert client.request[RETURN_VIDEO_KEY] is True
+    assert client.request["dynamic_downstream_head_intervention"] == {
+        "enabled": False
+    }
+    np.testing.assert_array_equal(result.action, np.asarray([[1.0, 2.0]]))
+    np.testing.assert_array_equal(result.video, np.asarray([[[3.0, 4.0]]]))
+    assert result.latency_seconds >= 0.0
 
 
 def test_downstream_intervention_control_is_conditional_only() -> None:
@@ -185,6 +234,66 @@ def test_downstream_grid_summary_records_worst_and_stage_means() -> None:
         "early": pytest.approx(0.04),
         "late": pytest.approx(0.01),
     }
+
+
+def test_downstream_grid_summary_includes_video_worst_case() -> None:
+    records = [
+        {
+            "request_key": "early",
+            "trajectory_stage": "early",
+            "action_cosine": 0.999,
+            "action_relative_l2": 0.01,
+            "action_max_abs": 0.1,
+            "video_cosine": 0.98,
+            "video_relative_l2": 0.08,
+            "video_max_abs": 0.4,
+        },
+        {
+            "request_key": "late",
+            "trajectory_stage": "late",
+            "action_cosine": 0.9999,
+            "action_relative_l2": 0.002,
+            "action_max_abs": 0.02,
+            "video_cosine": 0.995,
+            "video_relative_l2": 0.02,
+            "video_max_abs": 0.2,
+        },
+    ]
+
+    summary = summarize_candidate_records(records)
+
+    assert summary["video_cosine_min"] == pytest.approx(0.98)
+    assert summary["video_relative_l2_mean"] == pytest.approx(0.05)
+    assert summary["video_relative_l2_max"] == pytest.approx(0.08)
+    assert summary["video_worst_request_key"] == "early"
+    assert summary["stage_video_relative_l2_mean"] == {
+        "early": pytest.approx(0.08),
+        "late": pytest.approx(0.02),
+    }
+
+
+def test_downstream_resume_rejects_mismatched_video_schema() -> None:
+    validate_resume_video_schema([], record_video_sensitivity=False)
+    validate_resume_video_schema(
+        [
+            {
+                "video_cosine": 1.0,
+                "video_relative_l2": 0.0,
+                "video_max_abs": 0.0,
+            }
+        ],
+        record_video_sensitivity=True,
+    )
+    with pytest.raises(ValueError, match="partial video metrics"):
+        validate_resume_video_schema(
+            [{"video_cosine": 1.0}],
+            record_video_sensitivity=True,
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        validate_resume_video_schema(
+            [{"request_key": "action-only"}],
+            record_video_sensitivity=True,
+        )
 
 
 def test_downstream_alignment_correlations_handle_ties() -> None:
