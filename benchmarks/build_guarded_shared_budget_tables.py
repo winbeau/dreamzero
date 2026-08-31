@@ -19,6 +19,9 @@ from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicPackedBudgetTable,
     canonical_budget,
 )
+from benchmarks.build_dynamic_propagation_sentinel_tables import (
+    propagation_segments,
+)
 
 
 def lowest_sensitivity_indices(
@@ -45,6 +48,42 @@ def lowest_sensitivity_indices(
     return tuple(sorted(selected[index_column].astype(int).tolist()))
 
 
+def lowest_sensitivity_segments(
+    summary: pd.DataFrame,
+    *,
+    expected_count: int,
+    selected_count: int,
+    dense_prefix_layers: int,
+    dense_suffix_layers: int,
+    propagate_every: int,
+    risk_reduction: str = "max",
+) -> tuple[tuple[int, ...], ...]:
+    """Select complete propagation segments using conservative Oracle risk."""
+
+    ordered = summary.sort_values("layer_index")
+    if ordered["layer_index"].tolist() != list(range(expected_count)):
+        raise ValueError(f"layer_index summary must cover {expected_count} indices")
+    if risk_reduction not in {"max", "mean"}:
+        raise ValueError("risk_reduction must be 'max' or 'mean'")
+    segments = propagation_segments(
+        num_layers=expected_count,
+        dense_prefix_layers=dense_prefix_layers,
+        dense_suffix_layers=dense_suffix_layers,
+        propagate_every=propagate_every,
+    )
+    if not 0 < selected_count <= len(segments):
+        raise ValueError("selected_count exceeds the eligible propagation segments")
+
+    oracle_by_layer = ordered.set_index("layer_index")["oracle_mean"]
+    scored: list[tuple[float, int, tuple[int, ...]]] = []
+    for segment_index, segment in enumerate(segments):
+        values = oracle_by_layer.loc[list(segment)].to_numpy(dtype=np.float64)
+        risk = float(values.max() if risk_reduction == "max" else values.mean())
+        scored.append((risk, segment_index, segment))
+    selected = sorted(scored, key=lambda row: (row[0], row[1]))[:selected_count]
+    return tuple(row[2] for row in sorted(selected, key=lambda row: row[1]))
+
+
 def build_guarded_tables(
     timestep_summary: pd.DataFrame,
     layer_summary: pd.DataFrame,
@@ -54,6 +93,11 @@ def build_guarded_tables(
     dense_dit_prefix: int = 2,
     sparse_history_keep_ratio: float = 0.75,
     sparse_current_keep_ratio: float = 0.75,
+    sparse_segment_count: int | None = None,
+    dense_prefix_layers: int = 1,
+    dense_suffix_layers: int = 1,
+    propagate_every: int = 5,
+    segment_risk_reduction: str = "max",
 ) -> tuple[dict[str, DynamicPackedBudgetTable], dict[str, object]]:
     """Return history-only and joint tables with one shared sparse cell shape."""
 
@@ -68,19 +112,39 @@ def build_guarded_tables(
         selected_count=sparse_timestep_count,
         minimum_index=dense_dit_prefix,
     )
-    layers = lowest_sensitivity_indices(
-        layer_summary,
-        index_column="layer_index",
-        expected_count=40,
-        selected_count=sparse_layer_count,
-    )
+    selected_segments: tuple[tuple[int, ...], ...] = ()
+    if sparse_segment_count is None:
+        layers = lowest_sensitivity_indices(
+            layer_summary,
+            index_column="layer_index",
+            expected_count=40,
+            selected_count=sparse_layer_count,
+        )
+        selection_mode = "individual_layers"
+    else:
+        selected_segments = lowest_sensitivity_segments(
+            layer_summary,
+            expected_count=40,
+            selected_count=sparse_segment_count,
+            dense_prefix_layers=dense_prefix_layers,
+            dense_suffix_layers=dense_suffix_layers,
+            propagate_every=propagate_every,
+            risk_reduction=segment_risk_reduction,
+        )
+        layers = tuple(layer for segment in selected_segments for layer in segment)
+        selection_mode = "propagation_segments"
 
     sparse_mask = np.zeros((8, 40), dtype=bool)
     sparse_mask[np.ix_(timesteps, layers)] = True
     dense = np.ones((8, 40), dtype=np.float64)
     history = np.where(sparse_mask, history_ratio, dense)
     joint_current = np.where(sparse_mask, current_ratio, dense)
-    prefix = f"oracle_guarded_t{len(timesteps)}_l{len(layers)}"
+    layer_tag = (
+        f"s{len(selected_segments)}"
+        if selected_segments
+        else f"l{len(layers)}"
+    )
+    prefix = f"oracle_guarded_t{len(timesteps)}_{layer_tag}"
     tables = {
         "history_only": DynamicPackedBudgetTable(
             history_keep_ratios=tuple(map(tuple, history.tolist())),
@@ -97,6 +161,14 @@ def build_guarded_tables(
         "dense_dit_prefix": dense_dit_prefix,
         "selected_timesteps": list(timesteps),
         "selected_layers": list(layers),
+        "selection_mode": selection_mode,
+        "selected_segments": [list(segment) for segment in selected_segments],
+        "segment_risk_reduction": (
+            segment_risk_reduction if selected_segments else None
+        ),
+        "dense_prefix_layers": dense_prefix_layers,
+        "dense_suffix_layers": dense_suffix_layers,
+        "propagate_every": propagate_every,
         "sparse_cell_count": int(sparse_mask.sum()),
         "sparse_cell_fraction": float(sparse_mask.mean()),
         "sparse_history_keep_ratio": history_ratio,
@@ -117,6 +189,19 @@ def main() -> None:
     parser.add_argument("--dense-dit-prefix", type=int, default=2)
     parser.add_argument("--sparse-history-keep-ratio", type=float, default=0.75)
     parser.add_argument("--sparse-current-keep-ratio", type=float, default=0.75)
+    parser.add_argument(
+        "--sparse-segment-count",
+        type=int,
+        help="Select complete packed propagation segments instead of layers.",
+    )
+    parser.add_argument("--dense-prefix-layers", type=int, default=1)
+    parser.add_argument("--dense-suffix-layers", type=int, default=1)
+    parser.add_argument("--propagate-every", type=int, default=5)
+    parser.add_argument(
+        "--segment-risk-reduction",
+        choices=("max", "mean"),
+        default="max",
+    )
     args = parser.parse_args()
 
     tables, summary = build_guarded_tables(
@@ -127,6 +212,11 @@ def main() -> None:
         dense_dit_prefix=args.dense_dit_prefix,
         sparse_history_keep_ratio=args.sparse_history_keep_ratio,
         sparse_current_keep_ratio=args.sparse_current_keep_ratio,
+        sparse_segment_count=args.sparse_segment_count,
+        dense_prefix_layers=args.dense_prefix_layers,
+        dense_suffix_layers=args.dense_suffix_layers,
+        propagate_every=args.propagate_every,
+        segment_risk_reduction=args.segment_risk_reduction,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     paths = {}
