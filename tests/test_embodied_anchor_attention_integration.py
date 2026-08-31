@@ -352,12 +352,22 @@ def test_head_sliced_current_qkv_projects_dense_registers_and_sparse_video():
         )
         for projection in (attention.q, attention.k, attention.v)
     ]
-    attention_shapes = []
-    attention_hook = attention.attn.register_forward_pre_hook(
-        lambda _module, inputs: attention_shapes.append(
-            (inputs[0].shape[1], inputs[1].shape[1], inputs[0].shape[2])
+    varlen_calls = []
+    original_varlen = attention.attn.forward_varlen_head_sequences
+
+    def record_varlen(q, k, v, **kwargs):
+        varlen_calls.append(
+            (
+                kwargs["q_lens"].tolist(),
+                kwargs["k_lens"].tolist(),
+                q.shape,
+                k.shape,
+                v.shape,
+            )
         )
-    )
+        return original_varlen(q, k, v, **kwargs)
+
+    attention.attn.forward_varlen_head_sequences = record_varlen
     try:
         output = attention.forward_packed(
             packed_x,
@@ -373,13 +383,21 @@ def test_head_sliced_current_qkv_projects_dense_registers_and_sparse_video():
     finally:
         for hook in hooks:
             hook.remove()
-        attention_hook.remove()
+        attention.attn.forward_varlen_head_sequences = original_varlen
 
     assert output.shape == packed_x.shape
     # Q/K/V modules execute only for the three Dense registers. Video GEMMs
     # use channel-sliced F.linear calls with two and one selected video token.
     assert projected_lengths == [3, 3, 3]
-    assert attention_shapes == [(5, 13, 1), (4, 8, 1)]
+    assert varlen_calls == [
+        (
+            [5, 4],
+            [13, 8],
+            torch.Size([9, 1, 4]),
+            torch.Size([21, 1, 4]),
+            torch.Size([21, 1, 4]),
+        )
+    ]
 
 
 def test_head_sliced_full_current_groups_match_single_call_without_qk_norm():

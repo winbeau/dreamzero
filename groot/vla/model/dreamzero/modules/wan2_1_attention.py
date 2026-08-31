@@ -236,6 +236,13 @@ class AttentionModule(torch.nn.Module):
 
         assert backend in ["torch", "FA2", "FA3", "TE", "torch_onnx"]
         self.backend = backend
+        self.dropout_p = dropout_p
+        self.softmax_scale = softmax_scale
+        self.q_scale = q_scale
+        self.causal = causal
+        self.window_size = window_size if window_size is not None else (-1, -1)
+        self.deterministic = deterministic
+        self.compute_dtype = dtype
 
         if backend == "torch":
             def _torch_impl(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -346,3 +353,106 @@ class AttentionModule(torch.nn.Module):
             return self.attn_func(q, k, v)  # type: ignore[call-arg]
         else:
             return self.attn_func(q, k, v, q_lens, k_lens)  # type: ignore[call-arg]
+
+    def forward_varlen_head_sequences(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        q_lens: torch.Tensor,
+        k_lens: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Run one varlen kernel with each original head as a batch sequence.
+
+        Inputs are already packed as ``[total_tokens, 1, head_dim]``. This
+        lets heterogeneous M1 head groups share one FA2 launch without padding
+        different history/current budgets to a common shape.
+        """
+
+        if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
+            raise ValueError("varlen head sequences must be [T, 1, D]")
+        if q.shape[1] != 1 or k.shape[1] != 1 or v.shape[1] != 1:
+            raise ValueError("varlen head sequences require one kernel head")
+        if k.shape != v.shape:
+            raise ValueError("varlen key and value shapes must match")
+        if q_lens.ndim != 1 or k_lens.ndim != 1:
+            raise ValueError("varlen sequence lengths must be vectors")
+        if q_lens.shape != k_lens.shape:
+            raise ValueError("varlen query/key batches must align")
+
+        use_flash = (
+            q.device.type == "cuda"
+            and _gpu_supports_flash_attention()
+            and self.backend in ("FA2", "FA3")
+        )
+        if use_flash:
+            half_dtypes = (torch.float16, torch.bfloat16)
+            q = q if q.dtype in half_dtypes else q.to(self.compute_dtype)
+            k = k if k.dtype in half_dtypes else k.to(self.compute_dtype)
+            v = v if v.dtype in half_dtypes else v.to(self.compute_dtype)
+            q = q.to(v.dtype)
+            k = k.to(v.dtype)
+            if self.q_scale is not None:
+                q = q * self.q_scale
+            q_lens = q_lens.to(device=q.device, dtype=torch.int32)
+            k_lens = k_lens.to(device=q.device, dtype=torch.int32)
+            zeros = torch.zeros(1, device=q.device, dtype=torch.int32)
+            cu_seqlens_q = torch.cat((zeros, q_lens)).cumsum(0).to(torch.int32)
+            cu_seqlens_k = torch.cat((zeros, k_lens)).cumsum(0).to(torch.int32)
+            if self.backend == "FA3" and FLASH_ATTN_3_AVAILABLE:
+                return flash_attn_interface.flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.softmax_scale,
+                    causal=self.causal,
+                    deterministic=self.deterministic,
+                )[0]
+            if not FLASH_ATTN_2_AVAILABLE:
+                raise RuntimeError("FA2 varlen head sequences require flash-attn")
+            return flash_attn.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                dropout_p=self.dropout_p,
+                softmax_scale=self.softmax_scale,
+                causal=self.causal,
+                window_size=self.window_size,
+                deterministic=self.deterministic,
+            )
+
+        # CPU and non-FA backends are correctness fallbacks used by unit tests.
+        outputs = []
+        q_offset = 0
+        k_offset = 0
+        for query_length, key_length in zip(
+            q_lens.tolist(),
+            k_lens.tolist(),
+            strict=True,
+        ):
+            query = q[q_offset:q_offset + query_length].transpose(0, 1)
+            key = k[k_offset:k_offset + key_length].transpose(0, 1)
+            value = v[k_offset:k_offset + key_length].transpose(0, 1)
+            output = torch.nn.functional.scaled_dot_product_attention(
+                query.unsqueeze(0),
+                key.unsqueeze(0),
+                value.unsqueeze(0),
+                dropout_p=self.dropout_p,
+                is_causal=self.causal,
+                scale=self.softmax_scale,
+            )
+            outputs.append(output.squeeze(0).transpose(0, 1))
+            q_offset += query_length
+            k_offset += key_length
+        return torch.cat(outputs, dim=0)

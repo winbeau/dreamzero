@@ -614,7 +614,16 @@ class CausalWanSelfAttention(nn.Module):
             else kv_cache[1, :, :0]
         )
 
-        projected_output = x.new_zeros(x.shape)
+        group_attention_inputs: list[
+            tuple[
+                int,
+                int,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+            ]
+        ] = []
         for group_heads, history_keep_ratio, current_keep_ratio in head_groups:
             head_indices = self._packed_head_indices(group_heads, x.device)
             channel_indices = self._packed_head_channel_indices(
@@ -717,29 +726,127 @@ class CausalWanSelfAttention(nn.Module):
                     group_history_indices,
                 )
 
-            group_output = self.attn(
-                group_query,
-                torch.cat(
-                    (
-                        group_history_key.index_select(2, head_indices),
-                        group_current_key,
-                    ),
-                    dim=1,
+            group_key = torch.cat(
+                (
+                    group_history_key.index_select(2, head_indices),
+                    group_current_key,
                 ),
-                torch.cat(
-                    (
-                        group_history_value.index_select(2, head_indices),
-                        group_current_value,
-                    ),
-                    dim=1,
-                ),
+                dim=1,
             )
+            group_value = torch.cat(
+                (
+                    group_history_value.index_select(2, head_indices),
+                    group_current_value,
+                ),
+                dim=1,
+            )
+            group_attention_inputs.append(
+                (
+                    group_length,
+                    group_head_count,
+                    group_query,
+                    group_key,
+                    group_value,
+                    group_output_weight,
+                )
+            )
+
+        # Treat each original attention head as an independent varlen batch
+        # sequence. Heterogeneous M1 budgets then share one FA2 launch instead
+        # of paying one launch plus gather/scatter chain per head group.
+        packed_queries = []
+        packed_keys = []
+        packed_values = []
+        query_lengths = []
+        key_lengths = []
+        max_query_length = 0
+        max_key_length = 0
+        for (
+            group_length,
+            group_head_count,
+            group_query,
+            group_key,
+            group_value,
+            _group_output_weight,
+        ) in group_attention_inputs:
+            group_key_length = group_key.shape[1]
+            group_sequence_count = batch * group_head_count
+            packed_queries.append(
+                group_query.permute(0, 2, 1, 3).reshape(
+                    group_sequence_count * group_length,
+                    1,
+                    self.head_dim,
+                )
+            )
+            packed_keys.append(
+                group_key.permute(0, 2, 1, 3).reshape(
+                    group_sequence_count * group_key_length,
+                    1,
+                    self.head_dim,
+                )
+            )
+            packed_values.append(
+                group_value.permute(0, 2, 1, 3).reshape(
+                    group_sequence_count * group_key_length,
+                    1,
+                    self.head_dim,
+                )
+            )
+            query_lengths.append(
+                torch.full(
+                    (group_sequence_count,),
+                    group_length,
+                    device=x.device,
+                    dtype=torch.int32,
+                )
+            )
+            key_lengths.append(
+                torch.full(
+                    (group_sequence_count,),
+                    group_key_length,
+                    device=x.device,
+                    dtype=torch.int32,
+                )
+            )
+            max_query_length = max(max_query_length, group_length)
+            max_key_length = max(max_key_length, group_key_length)
+
+        packed_output = self.attn.forward_varlen_head_sequences(
+            torch.cat(packed_queries, dim=0),
+            torch.cat(packed_keys, dim=0),
+            torch.cat(packed_values, dim=0),
+            q_lens=torch.cat(query_lengths),
+            k_lens=torch.cat(key_lengths),
+            max_seqlen_q=max_query_length,
+            max_seqlen_k=max_key_length,
+        )
+
+        projected_output = x.new_zeros(x.shape)
+        output_offset = 0
+        for (
+            group_length,
+            group_head_count,
+            _group_query,
+            _group_key,
+            _group_value,
+            group_output_weight,
+        ) in group_attention_inputs:
+            group_output_tokens = batch * group_head_count * group_length
+            group_output = packed_output[
+                output_offset:output_offset + group_output_tokens
+            ].reshape(
+                batch,
+                group_head_count,
+                group_length,
+                self.head_dim,
+            ).permute(0, 2, 1, 3)
             group_output_projection = F.linear(
                 group_output.flatten(2),
                 group_output_weight,
                 None,
             )
             projected_output[:, :group_length].add_(group_output_projection)
+            output_offset += group_output_tokens
 
         if self.o.bias is not None:
             projected_output.add_(self.o.bias)
