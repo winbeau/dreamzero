@@ -209,5 +209,7 @@ Primary artifact roots:
 
 All benchmark clients completed and their logs are retained in the artifact
 directories. Resident Dense/Sparse service processes are idle model holders,
-not active experiments. The last pre-closure repository synchronization point
-was clean at `2bc2643` on local, origin, and H200.
+not active experiments. Closure content commit `b2f2f44` was pushed and
+fast-forwarded cleanly on local, origin, and H200. At verification time Dense
+service `6102` remained resident on GPUs 2--3 and Sparse service `6105`
+remained resident on GPUs 5--6; no DreamZero benchmark client was running.
