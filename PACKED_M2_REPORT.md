@@ -1,6 +1,6 @@
 # Packed M2 report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
@@ -154,3 +154,18 @@ recovery.
   complete WebSocket benchmark;
 - validate dynamic video/action quality and closed-loop success before making a
   main-result claim.
+
+## Heterogeneous-head checkpoint
+
+Packed M2 now supports separate nested historical-KV and current-QKV budgets
+for a small number of shared head groups. Video Q/K/V/O channels are sliced,
+QKV/O weights are prepacked, all action/state registers stay Dense, and the
+heterogeneous groups can share one FA2 varlen launch.
+
+This closes the correctness question but rejects naive per-head varlen as the
+paper fast path. One-head varlen batch sequences remain slower than a regular
+40-head fixed-shape FA2 call. The real 14B 35% trunk reaches only 1.317x p50;
+the 50% trunk reaches 1.063x p50 and 1.38x on its final warmed sample. Both
+pass local action gates and fail video quality. The fixed-20% one-group result
+remains the valid 2.42--2.82x executor ceiling; final grouping must be
+kernel-aware and collapse unprofitable head splits to shared fixed shapes.

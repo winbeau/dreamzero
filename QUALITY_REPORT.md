@@ -1,6 +1,6 @@
 # Dynamic M1/M2 quality report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
@@ -94,3 +94,15 @@ test it misses one of 15 unsafe requests (false-sparse 6.67%) and triggers all
 three safe requests. The missed early-stage request has action cosine 0.99358
 and relative L2 11.48%, so this is a material safety failure rather than a
 borderline threshold case.
+
+## Two-group current-QKV checkpoint quality
+
+| Candidate | Action cosine | Action rel-L2 | Video cosine | Video rel-L2 |
+| --- | ---: | ---: | ---: | ---: |
+| trunk 50%, critical H100/Q50, normal H35/Q25 | 0.999908 | 1.451% | 0.9532 | 32.26% |
+| trunk 35%, critical H100/Q35, normal H25/Q20 | 0.999901 | 1.543% | 0.8783 | 54.51% |
+
+Full-budget video/action/cache exactness passes on both ranks. Critical-head
+protection preserves the isolated action gate, but neither video result is
+acceptable and isolated first-step quality cannot override the accumulated
+DROID failures. No candidate is promoted.

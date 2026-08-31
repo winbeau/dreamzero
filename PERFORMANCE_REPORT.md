@@ -1,6 +1,6 @@
 # Dynamic M1/M2 performance report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
@@ -159,3 +159,17 @@ The online flow sentinel record-only test keeps exactly eight model calls. Its
 validation-frozen threshold is rejected on safety, so the optional Dense
 recomputation path is excluded from the main performance result; it would add
 an estimated 1.33 model calls per request.
+
+## Heterogeneous current-QKV performance ablation
+
+The two-group executor performs real channel-sliced current Q/K/V/O and one
+packed varlen FA2 launch. It reduces the matched old two-group attention
+microbenchmark from 2.20 to 2.11 ms, but a regular fixed-shape 40-head call is
+still 1.54 ms. On the released early timestep, 50% and 35% outer trunks reach
+only 1.063x and 1.317x p50 DiT speedup. The most favorable final warmed 50%
+sample is 135.73 ms versus 187.52 ms Dense, or 1.38x. Neither row is promoted
+to the 100-request run.
+
+Artifact:
+
+`dynamic_m1_m2/dynamic_budgets/20260831_two_group_qkv/checkpoint_early_gpu01_varlen_lowtrunk/`

@@ -1,6 +1,6 @@
 # Dynamic timestep/layer/head budget report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
@@ -524,4 +524,43 @@ dynamic_m1_m2/e2e/20260830_droid_108_round1/
   request_gate_validation18/
   request_gate_balanced_val_test/
   early2_dense_then_balanced_val_test/
+```
+
+## Two-group current-QKV executor gate
+
+The deployment-safe v3 M1 prior was quantized into critical and normal head
+groups with separate historical-KV and current-QKV prefixes. The executor
+slices video Q/K/V/O channels, keeps all 25 action/state registers Dense,
+prepackages fused QKV/O weights, and combines heterogeneous head sequences in
+one FA2 varlen launch. It passes 29 focused tests, and the released 14B
+full-budget video/action/all-layer-KV path remains exactly equal to Dense.
+
+The systems result is negative. At the released geometry with 12 critical and
+28 normal heads, one regular 40-head call is 1.54 ms, the old two-group path is
+2.20 ms, temporary sliced projections are 2.36 ms, prepacked two-call
+projections are 2.31 ms, and the final one-launch head-as-batch varlen path is
+2.11 ms. Reducing the critical set to 4 or 8 heads does not help: varlen p50 is
+2.13 and 2.33 ms versus 1.48 and 1.53 ms for regular FA2.
+
+| Outer trunk / head budgets | DiT speedup | Action cosine / rel-L2 | Video cosine / rel-L2 |
+| --- | ---: | ---: | ---: |
+| 50%; critical H100/Q50, normal H35/Q25 | 1.063x p50 | 0.999908 / 1.451% | 0.9532 / 32.26% |
+| 35%; critical H100/Q35, normal H25/Q20 | 1.317x p50 | 0.999901 / 1.543% | 0.8783 / 54.51% |
+
+The 50% samples continue from 176.45 to 135.73 ms after the measured p50; even
+the last sample is only 1.38x against the paired Dense median. Per-head varlen
+is therefore retained as an ablation/fallback, not the main kernel. Main-path
+M1/M2 must merge heads to shared fixed shapes whenever a measured cost model
+predicts that heterogeneous execution loses throughput.
+
+Implementation commits: `24bff11`, `b9dd2f6`, `6e68569`, `f6c3ff4`,
+`ee775fb`, and `42330a8`.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/packed_m2/20260831_head_sliced_microbench/
+dynamic_m1_m2/dynamic_budgets/20260831_two_group_qkv/
+  checkpoint_early_gpu01/
+  checkpoint_early_gpu01_varlen_lowtrunk/
 ```
