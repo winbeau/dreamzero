@@ -962,3 +962,55 @@ dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
   sparse_dynamic_headk_q100_a4427db_droid_validation4.json
   comparison_dynamic_headk_q100_a4427db_droid_validation3.json
 ```
+
+## Oracle-guarded shared timestep/layer pilot
+
+Commit `f9429d2` adds a deployment-safe table builder that ranks Dense-Oracle
+timestep/layer cells, preserves an explicit Dense DiT prefix, and emits only
+shared shapes.  The first table selects DiT indices 5--7 and 20 low-risk
+layers, or 60/320 (18.75%) of all DiT/layer cells.  It therefore avoids the
+3--4 per-Head kernel groups that made the unguarded online-M1 replay slower
+than Dense.
+
+The following real-DROID pilot reuses the same three measured task keys and
+Dense baseline as the axis-separation study.  Every row executes all eight
+real DiTs inside the fixed 16-step scheduler.
+
+| Guarded shared policy | Paired E2E geometric speedup | 95% CI lower | Faster | Action cosine mean/min | Action rel-L2 mean/max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| history K75, current Q100 | 1.223x | 1.003x | 3/3 | 0.999775 / 0.999447 | 1.90% / 3.34% |
+| history K75, current Q75, radius3/every5 | 1.222x | 1.003x | 3/3 | 0.999932 / 0.999907 | 1.17% / 1.38% |
+| history K75, current Q50, radius3/every5 | 1.241x | 1.029x | 3/3 | 0.999754 / 0.999483 | 2.14% / 3.40% |
+| history K75, current Q35, radius3/every5 | 1.216x | 1.009x | 3/3 | 0.999536 / 0.999400 | 3.06% / 3.63% |
+
+All four rows pass the preliminary action cosine and relative-L2 gates.  Q35
+is the most aggressive quality-safe bucket tested so far.  Its lower timing
+than Q50 is not evidence that extra arithmetic is faster: with the current
+propagation contract, only complete five-layer sparse segments retain the
+requested current-token shape.  Non-contiguous selected cells inside a mixed
+segment are promoted to the segment maximum, while their historical K/V can
+still use K75.  The current table therefore exposes only a small amount of
+Q35 work, and three requests are far too few to resolve the remaining launch
+and system noise.
+
+This result validates the shared timestep/layer fallback direction but does
+not validate the final dynamic policy.  The next builder revision must score
+and select propagation-aligned contiguous layer segments so that the Oracle
+budget equals the shape actually executed by Packed M2.  Q25 is also retained
+as a boundary ablation.  Neither result will be promoted without task-disjoint
+coverage, at least 100 paired requests, GPU exchange rounds, video gates, and
+closed-loop evaluation.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/
+  20260831_guarded_shared_late3_safe20/
+  20260831_guarded_shared_late3_safe20_h75q50/
+  20260831_guarded_shared_late3_safe20_h75q35/
+dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
+  comparison_guarded_history_late3_safe20_f9429d2_droid_validation3.json
+  comparison_guarded_joint_late3_safe20_r3e5_f9429d2_droid_validation3.json
+  comparison_guarded_joint_late3_safe20_h75q50_r3e5_f9429d2_droid_validation3.json
+  comparison_guarded_joint_late3_safe20_h75q35_r3e5_f9429d2_droid_validation3.json
+```

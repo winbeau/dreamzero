@@ -42,6 +42,32 @@ Artifacts:
 
 `dynamic_m1_m2/e2e/20260830_balanced_smoke/`
 
+## Oracle-guarded shared-shape pilot
+
+An Oracle-ranked shared timestep/layer table was evaluated on the same three
+measured real-DROID history-chain requests used for the current runtime
+diagnosis.  The first five real DiTs and every unselected layer remain Dense;
+the selected 60/320 cells use 75% historical K/V and a swept current-token
+budget.  All rows still execute eight real DiTs.
+
+| Current Q/FFN in selected cells | Action cosine mean/min | Action rel-L2 mean/max | Preliminary gate |
+| ---: | ---: | ---: | --- |
+| 100% | 0.999775 / 0.999447 | 1.90% / 3.34% | pass |
+| 75% | 0.999932 / 0.999907 | 1.17% / 1.38% | pass |
+| 50% | 0.999754 / 0.999483 | 2.14% / 3.40% | pass |
+| 35% | 0.999536 / 0.999400 | 3.06% / 3.63% | pass |
+
+Q35 is the current pilot boundary and its worst request remains inside both
+the 0.999 cosine and 5% relative-L2 thresholds.  This is materially safer than
+the unguarded global or per-Head schedules, but the sample count is only three
+and the table was selected from Oracle evidence.  It does not satisfy the
+task-disjoint M1, video, 100-request, GPU-swap, or closed-loop gates, so no
+final quality or non-inferiority claim is made.
+
+Artifacts:
+
+`dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/`
+
 ## Real DROID history-chain gate
 
 The candidate policies were next evaluated on real frames, robot state, and

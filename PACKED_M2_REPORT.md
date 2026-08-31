@@ -389,3 +389,43 @@ dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
   sparse_dynamic_headk_q100_a4427db_droid_validation4.json
   comparison_dynamic_headk_q100_a4427db_droid_validation3.json
 ```
+
+## Oracle-guarded shared-shape Packed pilot
+
+The first runtime-safe dynamic schedule uses one shared shape per selected
+timestep/layer cell rather than one kernel per predicted Head class.  Dense
+Oracle evidence selects 20 low-risk layers at DiT indices 5--7, covering
+60/320 cells.  All other cells, including the first five real DiTs, fall back
+Dense.  Historical K/V uses a nested 75% anchor prefix; current packed compute
+was swept through 100%, 75%, 50%, and 35%.
+
+| Historical K/V | Requested current Q/FFN | Paired E2E speedup | Action cosine mean/min | Action rel-L2 mean/max |
+| ---: | ---: | ---: | ---: | ---: |
+| 75% | 100% | 1.223x | 0.999775 / 0.999447 | 1.90% / 3.34% |
+| 75% | 75% | 1.222x | 0.999932 / 0.999907 | 1.17% / 1.38% |
+| 75% | 50% | 1.241x | 0.999754 / 0.999483 | 2.14% / 3.40% |
+| 75% | 35% | 1.216x | 0.999536 / 0.999400 | 3.06% / 3.63% |
+
+The Q35 row passes the preliminary action gates and all four rows are faster
+on 3/3 paired requests.  This is the first real-DROID pilot in which both
+history and current hidden-state work are reduced while preserving the action
+gate.  It remains a small pilot, not a performance claim.
+
+The sweep also exposes a shape-contract inefficiency.  Propagation currently
+stabilizes the current-token allocation to the maximum budget in each
+five-layer segment.  Because the Oracle builder selected individual safe
+layers, only fully selected contiguous segments actually execute the requested
+Q bucket; isolated cells are promoted back toward Dense current compute.  K/V
+still follows the per-cell K75 table, which explains why more aggressive Q
+buckets have nearly identical E2E timing.
+
+The next executor/table step is therefore propagation-aligned segment
+selection, followed by a Q25 boundary replay.  This should increase the amount
+of real packed work without introducing per-Head kernels or per-layer
+gather/scatter.  The current services remain resident at about 67.2 GiB per
+GPU, confirming that the bounded-KV lifetime fix also holds for the guarded
+dynamic tables.
+
+Artifacts:
+
+`dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/`
