@@ -71,3 +71,26 @@ The demonstrated late request is a mandatory Dense-fallback regression case.
 Artifacts:
 
 `dynamic_m1_m2/e2e/20260830_droid_108_round1/`
+
+## Expanded task-disjoint quality gate
+
+Across 72 train, 18 validation, and 18 test requests, the balanced profile
+passes the action cosine/L2 gates for only 8/72, 0/18, and 2/18 requests. The
+75%-current/Dense-history profile improves those counts to 36/72, 7/18, and
+11/18, but still has worst relative L2 of 17.11%, 25.35%, and 28.59%.
+
+Making the first two real DiT evaluations Dense does not solve accumulated
+error: only 1/18 validation and 3/18 test requests pass, with test minimum
+cosine 0.96760 and maximum relative L2 25.39%.
+
+The corrected deployment-safe request gate avoids every final-action failure
+only by falling back Dense on all 18 test requests. It therefore passes safety
+but fails performance. The current global profile set must be replaced by a
+finer dynamic executor policy before quality and acceleration can pass
+together.
+
+The validation-calibrated action-flow sentinel is also rejected. On untouched
+test it misses one of 15 unsafe requests (false-sparse 6.67%) and triggers all
+three safe requests. The missed early-stage request has action cosine 0.99358
+and relative L2 11.48%, so this is a material safety failure rather than a
+borderline threshold case.

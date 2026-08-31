@@ -135,3 +135,27 @@ they fail action quality. The conservative rows show that indiscriminately
 buying quality with shared history/current floors also erases too much of the
 speed target. The performance path now depends on confident per-request or
 shared-group sparse routing plus Dense fallback, not a single global table.
+
+## Expanded DROID performance and profile ceiling
+
+The real-history replay now covers 108 request keys across the immutable
+train/validation/test split. Balanced Packed M2 measures 1.453x, 1.476x, and
+1.493x mean end-to-end speedup on the three splits; the 75%-current/Dense-
+history profile measures 1.191x, 1.194x, and 1.173x. Every request in both
+global sparse arms is faster than its Dense pair and every call retains eight
+real DiT evaluations.
+
+These are performance ablations, not accepted policies, because their action
+quality fails. A request-level Oracle choosing the fastest quality-safe arm
+from balanced/conservative/Dense reaches only 1.1085x train, 1.0683x
+validation, and 1.1254x test speedup. The present global-profile family cannot
+meet the 1.35x target regardless of classifier accuracy.
+
+The first-two-DiT-Dense table reaches 1.373x validation and 1.425x test mean
+speedup with all 36 requests faster, but fails action quality on 32 of 36
+requests. It is rejected rather than promoted to the 100-request timing run.
+
+The online flow sentinel record-only test keeps exactly eight model calls. Its
+validation-frozen threshold is rejected on safety, so the optional Dense
+recomputation path is excluded from the main performance result; it would add
+an estimated 1.33 model calls per request.

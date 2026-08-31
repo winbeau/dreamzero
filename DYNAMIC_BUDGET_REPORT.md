@@ -478,3 +478,50 @@ decision rather than remaining the aggressive Oracle average.
 Artifacts:
 
 `dynamic_m1_m2/e2e/20260830_droid_108_round1/`
+
+## Expanded 108-request global-profile gate
+
+The global profiles were replayed over 72 train, 18 validation, and 18
+untouched test requests. Every target has three real history calls and every
+history/target call executes eight real DiT evaluations.
+
+| Profile / split | Requests | Mean speedup | Quality-safe | Cosine mean / min | Relative-L2 mean / max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| balanced / train | 72 | 1.453x | 8 / 72 | 0.99455 / 0.97130 | 9.95% / 25.01% |
+| balanced / validation | 18 | 1.476x | 0 / 18 | 0.99554 / 0.98323 | 9.29% / 18.35% |
+| balanced / test | 18 | 1.493x | 2 / 18 | 0.99332 / 0.97178 | 10.60% / 23.60% |
+| 75% current + Dense history / train | 72 | 1.191x | 36 / 72 | 0.99793 / 0.98578 | 5.84% / 17.11% |
+| 75% current + Dense history / validation | 18 | 1.194x | 7 / 18 | 0.99660 / 0.97059 | 6.71% / 25.35% |
+| 75% current + Dense history / test | 18 | 1.173x | 11 / 18 | 0.99675 / 0.95834 | 5.73% / 28.59% |
+
+All sparse requests are faster, but neither global sparse table is a
+quality-safe policy. An Oracle request selector over `balanced`,
+`conservative`, and `dense` reaches only 1.1085x/1.0683x/1.1254x mixed
+end-to-end speedup on train/validation/test. The current global-profile family
+has a hard performance ceiling below target even with perfect classification.
+
+## First-two-DiT Dense ablation
+
+Making DiT indices 0 and 1 Dense and applying the balanced table to the last
+six real evaluations tests whether only the earliest denoising steps require
+high budget.
+
+| Split | Speedup | Quality-safe | Cosine mean / min | Relative-L2 mean / max |
+| --- | ---: | ---: | ---: | ---: |
+| validation | 1.373x | 1 / 18 | 0.99607 / 0.98526 | 9.01% / 17.11% |
+| test | 1.425x | 3 / 18 | 0.99414 / 0.96760 | 9.77% / 25.39% |
+
+This rejects a static “first two Dense, remaining six sparse” mask. Early
+budget is important but insufficient; later packed-trajectory error must be
+controlled by finer layer/head routing or propagation, not only a timestep
+prefix.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/e2e/20260830_droid_108_round1/
+  request_gate_train72/
+  request_gate_validation18/
+  request_gate_balanced_val_test/
+  early2_dense_then_balanced_val_test/
+```

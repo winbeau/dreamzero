@@ -11,11 +11,11 @@ trajectory-length, and instruction-position annotations. Those values are
 available in the Oracle dataset but are not available to the online router at
 decision time. The old bundle must therefore not support a paper Claim.
 
-The training and request-gate feature contracts now exclude those fields.
-Retraining and recalibration on the reduced deployment-observable feature set
-are pending, so the M1 phase is open. The prior v2 metrics below are retained
-only to document the superseded ablation and must be replaced before M1 can
-pass.
+The training and request-gate feature contracts now exclude those fields. The
+corrected v3 per-head classifier has been retrained and passes its statistical
+gates. The complete M1 phase remains open because the corrected request-level
+gate and real dynamic-routing final-action replay are not yet accepted. The
+prior v2 metrics below are retained only to document the superseded ablation.
 
 Implementation commits:
 
@@ -26,6 +26,7 @@ Implementation commits:
 - `c577622`: portable runtime `RoutePolicy` type for direct bundle loading.
 - `4ce658e`: request-level final-action safety gate from first-two-DiT state.
 - `df04445`: distinguish request-gate safety from performance acceptance.
+- `1510f4b`: remove future-action and offline trajectory annotations from M1.
 
 All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and
 the H200 checkout was fast-forwarded through them.
@@ -83,6 +84,82 @@ mass, current Qa/Qv correlation, and all current worst-query quality metrics
 cannot enter the feature matrix. Missing temporal history remains missing at
 the first two DiT evaluations and is handled by the fitted imputer; it is not
 filled with current Oracle evidence.
+
+## Corrected deployment-safe v3 result
+
+The complete candidate comparison was rerun on the same task-disjoint rows,
+with 200 task-level bootstrap repeats and no future-action or offline
+trajectory metadata in the feature matrix.
+
+| Candidate | Test macro-F1 | Test false-sparse | Mean keep | Confidence fallback | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| original 3-component GMM | 0.061 | 0.000% | 100.00% | 0.00% | reject: degenerate Dense |
+| supervised logistic | 0.191 | 0.260% | 83.90% | 0.00% | reject: no confidence fallback |
+| Gradient Boosting | 0.570 | 1.026% | 83.52% | 33.29% | reject: false-sparse >1% |
+| small MLP | 0.160 | 0.197% | 84.90% | 0.00% | reject: macro-F1 and no fallback |
+| cost-sensitive Gradient Boosting | 0.557 | 0.694% | 83.92% | 33.25% | selected |
+
+Selected-v3 test gates:
+
+| Metric | Result | Gate | Status |
+| --- | ---: | ---: | --- |
+| false-sparse rate | 0.694% | <1% | pass |
+| macro-F1 | 0.557 | >=0.50 | pass |
+| p05 mass >=0.90 rate | 99.984% | >=95% | pass |
+| local attention-output gate | 99.310% | diagnostic | recorded |
+| confidence fallback rate | 33.250% | >0% | pass |
+| Dense route rate | 56.039% | diagnostic | recorded |
+| route-confidence ECE | 0.03562 | calibrated | pass |
+
+The 200-repeat bootstrap gives false-sparse 0.689% with 95% interval
+[0.570%, 0.805%], mean keep 83.918% [83.690%, 84.102%], and mass-retention
+rate 99.983% [99.956%, 99.998%]. The test route counts are 123,362 critical,
+76,608 uncertain, 21,688 slow-changing, 8,706 stable, and 36
+predictable-late head states.
+
+The corrected artifact is:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/m1_classifier/20260831_deployment_safe_v3/
+```
+
+Its `summary.json` deliberately reports `passed: false`: classifier statistics
+do not substitute for the required final-action and closed-loop gates.
+
+## Corrected request-level safety gate
+
+The request-level gate was regenerated from the corrected v3 per-head bundle.
+It sees only robot-state magnitudes and M1/history features available after the
+first two mandatory real DiT evaluations; offline stage, fraction, and complete
+trajectory length are absent.
+
+The selected cost-sensitive logistic rule is safe but collapses to Dense on
+the untouched test split:
+
+| Metric | Validation | Test | Gate |
+| --- | ---: | ---: | --- |
+| false-sparse rate | 0% | 0% | safety pass |
+| Dense fallback rate | 94.44% | 100.00% | diagnostic |
+| final-action quality failures | 0 / 18 | 0 / 18 | safety pass |
+| mixed end-to-end speedup | 1.009x | 1.000x | performance fail |
+| strictly faster requests | 5.56% | 0.00% | performance fail |
+
+The result correctly reports `safety_gates_passed: true`,
+`performance_gates_passed: false`, and `passed: false`.
+
+More importantly, an Oracle that chooses the fastest quality-safe profile for
+every request reaches only 1.1085x/1.0683x/1.1254x mixed end-to-end speedup on
+train/validation/test. Thus no classifier over the current three global
+profiles (`balanced`, `conservative`, `dense`) can reach the 1.35x target.
+This is a profile-family ceiling, not merely a classifier error.
+
+Artifact:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/request_gate/20260831_deployment_safe_v3/
+```
 
 ## Candidate comparison
 
@@ -157,12 +234,10 @@ to Git.
 
 ## Remaining M1 work
 
-- retrain every candidate after removing future-action and offline trajectory
-  annotations;
-- regenerate the request-level gate from the corrected per-head bundle without
-  trajectory-stage/fraction/length features;
 - integrate the selected bundle into timestep/layer/head-group budget routing;
 - measure actual route/classifier overhead on GPU;
+- replace the current global profile family with finer shared-group dynamic
+  budgets; request-level selection alone has an Oracle ceiling below target;
 - replay held-out requests through the real DreamZero policy;
 - require final action cosine >=0.999 and relative L2 <=5%;
 - save the worst false-sparse/fallback cases and connect them to downstream
