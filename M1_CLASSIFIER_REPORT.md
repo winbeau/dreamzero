@@ -316,6 +316,62 @@ Superseded pilot artifacts:
   dynamic_m1_m2/m1_proxy/20260831_proxy_v1_full_287a54e/
 ```
 
+## Full Packed-proxy-v2 collection and classifier
+
+The accepted H200 collection covers all 108 task-disjoint requests (72 train,
+18 validation, 18 test) on GPUs 2 and 3, with 54 requests per worker. Global
+audit found 108 unique artifacts, no duplicates, no missing or extra Oracle
+request keys, and no structural gate failure. Every artifact has eight real
+DiT observations with `40 x 40` layer/Head geometry. Mean target-request time
+in this independent one-GPU collection was 3.6816 seconds (p50 3.6923, p95
+3.7385), maximum allocated memory was 61.6182 GiB, and the strict merge added
+the causal proxy features to all 1,382,400 Oracle-labelled rows one-to-one.
+
+The aggregate proxy statistics do not support a hard-coded monotonic late-step
+rule. Median per-request action-register output relative L2 across real DiTs
+1--7 is `[0.336, 0.337, 0.456, 0.397, 0.441, 0.380, 0.478]`; it does not
+decrease late. Conditional/unconditional disagreement does decrease from
+0.110 at DiT 0 to 0.071 at DiT 7, while support turnover remains high and
+non-monotonic. This is direct evidence for supervised per-state routing and
+fallback rather than a fixed "late is sparse" table.
+
+Commit `07e0a58` versions the classifier mode as `packed-proxy-v2`, preventing
+the superseded v1 name from appearing in a v2 bundle. All five requested model
+families were trained with task-disjoint splits and the frozen validation
+policy:
+
+| Candidate | Test macro-F1 | Test false-sparse | Mean keep | Confidence fallback | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| original 3-component GMM | 0.0613 | 0.000% | 100.00% | 0.00% | reject: degenerate Dense |
+| supervised logistic | 0.1919 | 0.291% | 83.93% | 0.00% | reject: no confidence fallback |
+| Gradient Boosting | 0.5643 | 1.067% | 83.70% | 33.82% | reject: false-sparse >1% |
+| small MLP | 0.1612 | 0.208% | 84.89% | 0.00% | reject: no confidence fallback |
+| cost-sensitive Gradient Boosting | 0.5589 | 0.720% | 83.87% | 33.38% | selected |
+
+The selected v2 classifier retains 99.9787% of held-out rows at or above 0.9
+Dense mass and passes the local attention-output gate on 99.2839% of rows. Its
+200-repeat task-level bootstrap is:
+
+| Metric | Mean | 95% CI |
+| --- | ---: | ---: |
+| false-sparse rate | 0.7141% | [0.5793%, 0.8338%] |
+| mean keep ratio | 83.8672% | [83.6535%, 84.0314%] |
+| p05 mass >=0.90 rate | 99.9787% | [99.9470%, 99.9957%] |
+
+The statistical gates pass, but the classifier summary correctly remains
+`passed: false` pending actual DreamZero action/video replay. The strict route
+semantics currently produce 122,909 critical, 76,898 uncertain, and 30,593
+slow-changing states; no state satisfies the stable or predictable-late rule.
+Therefore v2 grants no linear-extrapolation permission yet.
+
+Accepted artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/m1_proxy/20260831_proxy_v2_full_287f8a8/
+  dynamic_m1_m2/m1_classifier/20260831_packed_proxy_v2_07e0a58/
+```
+
 ## Candidate comparison
 
 The following numbers describe the superseded feature-contaminated v2 run.
