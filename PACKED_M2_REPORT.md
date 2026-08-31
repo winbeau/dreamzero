@@ -155,6 +155,34 @@ recovery.
 - validate dynamic video/action quality and closed-loop success before making a
   main-result claim.
 
+## Online Packed-proxy M1 bridge
+
+Commits `d163fff`, `194220e`, and `390ac95` connect the calibrated proxy-v2
+classifier to the real two-rank Packed executor. The bridge preserves eight
+real DiT calls, joins the CFG proxy signals across ranks, passes raw state
+features with their training-time semantics, and changes the active nested
+prefix immediately before each real DiT. First-two-DiT, missing-history,
+schema, confidence, and downstream-risk fallbacks remain Dense.
+
+The fully Q/K-coupled four-group pilot is a negative executor result. It uses
+3.4--3.5 groups per middle layer at an 84--86% mean keep ratio, runs at 0.841x
+paired end-to-end geomean speedup, and fails action quality. More than half of
+the Heads are Dense, so the shared packed activation and FFN remain near full
+length while the varlen projection/packing overhead is paid anyway.
+
+Dynamic Head membership initially retained a new prepacked QKV/O slice set at
+each DiT and OOMed on the next request. `390ac95` evicts only layers whose
+membership partition changed and retains at most the current partition. Two
+successive four-target validation passes then complete without OOM; memory
+plateaus near 126.8/128.7 GiB and the repeated target latencies remain within
+2.620--2.627 s. This is a memory-correct negative ablation, not the final fast
+path.
+
+The next Packed M2 variant will use Head-dependent historical K/V budgets but
+a small layer-shared current Q/FFN bucket. This avoids both per-Head query holes
+and the rule that one critical Dense Head forces every shared current compute
+stage back to full length.
+
 ## Heterogeneous-head checkpoint
 
 Packed M2 now supports separate nested historical-KV and current-QKV budgets

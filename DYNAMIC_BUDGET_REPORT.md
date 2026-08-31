@@ -21,7 +21,12 @@ must stay fixed within a propagation segment. Segment-max budgets reach 0.9749
 video cosine at 1.552x early-DiT speedup, while a 75% segment floor reaches
 0.9970 at 1.378x. The confidence-controlled M1 router now exists, but its
 online history-feature connection and a full eight-DiT policy replay are still
-required before this phase can pass its quality gate.
+required before this phase can pass its quality gate. The Packed-proxy v2
+classifier is now connected to the two-rank executor and does produce causal
+per-request Head groups, but its first validation pilot is a negative result:
+the Q/K-coupled four-group realization is slower than Dense and fails the
+action gate. It is retained as the required `timestep + layer + head`
+ablation, not promoted as the main path.
 
 Implementation commits:
 
@@ -43,6 +48,13 @@ Implementation commits:
   groups with downstream unknown/unsafe Dense fallback.
 - `fa1d945`: causal online M1 feature state with first-two-DiT, missing-history,
   and observer-schema Dense fallback.
+- `d163fff`: connect the Packed-proxy classifier, raw state conditions, causal
+  observations, and live Head-group decisions to each of eight real DiTs.
+- `194220e`: aggregate conditional and unconditional proxy signatures across
+  the two inference-parallel ranks and fail Dense on non-finite required
+  online signals.
+- `390ac95`: bound prepacked QKV/O weight slices to the current membership
+  partition instead of retaining a new full set for every DiT.
 
 All listed commits are pushed to
 `origin/codex/dreamzero-anchor-sparse-opt`, and the H200 checkout is
@@ -237,11 +249,81 @@ online observation schema. Twenty-seven focused and existing online-state,
 M1, and dynamic-budget tests pass together with Ruff, compilation, and diff
 checks.
 
-There is deliberately no new speed or quality row here yet. H200 and its
-video-enabled downstream artifacts were unreachable, so the calibrated risk
-table and real Packed-M2 replay have not run. Until they do, unknown cells
-route Dense and `22a8a3d` is an implemented contract rather than an accepted
-performance result.
+At that commit boundary there was deliberately no speed or quality row because
+H200 was unreachable. The following section records the later online replay;
+unknown downstream cells still route Dense in the default safe configuration,
+and the coverage-disabled pilot is explicitly an ablation rather than an
+accepted result.
+
+### Packed-proxy v2 online runtime pilot
+
+The server path now loads `selected_m1_bundle.joblib`, computes the raw
+pre-normalization `state_l2` and `state_abs_mean` features used at training,
+and routes immediately before each actual DiT call. Scheduler skips do not
+advance M1. DiT 0 and 1 are forced Dense; DiT `t` can consume only observations
+completed by DiTs `< t`. Missing state, observer schema mismatch, incomplete
+CFG aggregation, non-finite required one-step history, low confidence, and
+unknown/unsafe downstream evidence each remain explicit Dense fallbacks.
+
+The first two-rank pilot exposed two deployment bugs before a sparse claim was
+allowed:
+
+- each rank saw only one CFG branch, so the single-rank observer produced zero
+  valid observations and every step correctly fell back Dense;
+- after CFG aggregation was added, request-dependent Head membership retained
+  a new prepacked QKV/O weight set at each DiT, growing by roughly 8.4 GiB per
+  dynamic step and causing an H200 OOM on the following request.
+
+Commits `194220e` and `390ac95` close those bugs. Fifty-one focused H200 tests
+pass. In the corrected real service every request records 8/8 valid proxy
+observations. The measured example routes DiTs 0--1 Dense, then uses the
+following grouped budgets:
+
+| real DiT | Mean keep | Dense Head fraction | Confidence fallback | Mean groups/layer |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 84.41% | 55.00% | 30.94% | 3.50 |
+| 3 | 84.55% | 56.38% | 32.62% | 3.48 |
+| 4 | 84.81% | 55.88% | 32.62% | 3.42 |
+| 5 | 84.92% | 57.06% | 35.19% | 3.48 |
+| 6 | 85.98% | 60.69% | 39.12% | 3.38 |
+| 7 | 86.45% | 61.69% | 41.00% | 3.50 |
+
+This pilot deliberately disabled the incomplete downstream-coverage gate to
+measure the classifier policy; it is not a safe main result. On three paired
+validation targets it gives:
+
+| Policy | Dense mean | Dynamic mean | Paired geomean speedup | Faster fraction | Action cosine mean/min | Action rel-L2 mean/max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| proxy-v2 Q/K-coupled four groups | 2.325 s | 2.667 s | 0.841x | 33.3% | 0.98096 / 0.95802 | 17.00% / 29.16% |
+
+The latency and quality gates both fail decisively. The result explains why:
+3.4--3.5 varlen groups add projection/packing overhead, while 55--62% Dense
+Heads force the shared packed activation and FFN close to full current length.
+Sparse Heads still lose query outputs, so compute does not fall enough to pay
+for the quality loss.
+
+The bounded-cache stress repeats four target trajectories after the first
+four without an OOM. GPU memory plateaus near 126.8/128.7 GiB instead of the
+unbounded version's 139.8 GiB failure, and the second pass latency is stable at
+2.620--2.627 s. This validates the cache fix, not the policy.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
+    dense_validation4.json
+    sparse_validation4_v3.json
+    sparse_validation4_v3_repeat.json
+    comparison_validation3_v3.json
+    dense_server.log
+    sparse_server_v3.log
+```
+
+The next executor revision will therefore separate the axes: Head class will
+control historical K/V, while current Q/FFN uses a small layer-shared bucket
+chosen conservatively from the routed Heads. Per-Head Q compression remains
+as the negative ablation above.
 
 ## Segmented packed spatial propagation gate
 
