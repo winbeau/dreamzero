@@ -663,6 +663,88 @@ def test_model_uses_live_dynamic_m1_head_groups_and_rejects_static_conflicts():
     model.configure_dynamic_m1_runtime(None)
 
 
+def test_model_promotes_shared_packed_budgets_from_dynamic_m1_without_head_groups():
+    module = _load_attention_module()
+    model = _small_model(module)
+    model.configure_anchor_sparse_attention(
+        enabled=True,
+        keep_ratio=0.20,
+        current_keep_ratio=0.25,
+        dense_prefix_layers=0,
+        dense_suffix_layers=0,
+        propagate_radius=1,
+        propagate_every=5,
+        reuse_denoise=False,
+        packed_middle=True,
+        probe_dim=2,
+        num_router_heads=1,
+        smooth_radius=0,
+    )
+    model.configure_dynamic_packed_budget_table(
+        DynamicPackedBudgetTable.constant(
+            num_dit_steps=8,
+            num_layers=2,
+            history_keep_ratio=0.20,
+            current_keep_ratio=0.25,
+        )
+    )
+
+    class Decision:
+        keep_ratios = torch.tensor(((0.25, 0.50), (0.25, 1.00))).numpy()
+        fallback = torch.tensor(((False, False), (False, True))).numpy()
+        route_confidence = torch.tensor(((0.90, 0.80), (0.95, 0.10))).numpy()
+
+    class Runtime:
+        num_dit_steps = 8
+        num_layers = 2
+        num_heads = 2
+        observer = PackedM1CausalObserver(num_layers=2, num_heads=2)
+        current_decision = Decision()
+
+        @staticmethod
+        def trace():
+            return {"decision_count": 1}
+
+    runtime = Runtime()
+    with pytest.raises(ValueError, match="conflict"):
+        model.configure_dynamic_m1_runtime(runtime)
+    with pytest.raises(ValueError, match="already controls"):
+        model.configure_dynamic_m1_runtime(
+            runtime,
+            layer_shared_current_keep_ratio=0.75,
+            shared_budget_promotion=True,
+        )
+
+    model.configure_dynamic_m1_runtime(runtime, shared_budget_promotion=True)
+    model._dynamic_sparse_dit_index = 2
+    assert model._packed_budget_ratios_for_layer(0) == (0.50, 0.50)
+    assert model._packed_budget_ratios_for_layer(1) == (1.00, 1.00)
+    assert model._packed_head_groups_for_layer(0) is None
+    assert model._packed_head_groups_for_layer(1) is None
+    trace = model.get_dynamic_m1_runtime_trace()
+    assert trace["shared_budget_promotion"] == {
+        "enabled": True,
+        "aggregation": "maximum_head_budget",
+        "observed_cell_count": 2,
+        "history_promoted_cell_count": 2,
+        "current_promoted_cell_count": 2,
+        "effective_dense_cell_count": 1,
+        "fallback_head_count": 1,
+        "minimum_route_confidence": pytest.approx(0.10),
+    }
+
+    model.configure_dynamic_packed_budget_table(
+        DynamicPackedBudgetTable.constant(
+            num_dit_steps=8,
+            num_layers=2,
+            history_keep_ratio=1.0,
+            current_keep_ratio=1.0,
+        )
+    )
+    assert model._packed_budget_ratios_for_layer(0) == (1.0, 1.0)
+    model.configure_dynamic_m1_runtime(None)
+
+
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
     module = _load_attention_module()
     attention = module.CausalWanSelfAttention(

@@ -64,6 +64,7 @@ class Args:
     anchor_sparse_dynamic_m1_require_downstream_coverage: bool = True
     anchor_sparse_dynamic_m1_support_ratio: float = 0.20
     anchor_sparse_dynamic_m1_layer_shared_current_keep_ratio: float | None = None
+    anchor_sparse_dynamic_m1_shared_budget_promotion: bool = False
     anchor_sparse_dynamic_action_history_table: str | None = None
     anchor_sparse_dynamic_max_action_current_table: str | None = None
     anchor_sparse_record_diagnostics: bool = False
@@ -1123,9 +1124,14 @@ def main(args: Args) -> None:
             layer_shared_current_keep_ratio=(
                 args.anchor_sparse_dynamic_m1_layer_shared_current_keep_ratio
             ),
+            shared_budget_promotion=(
+                args.anchor_sparse_dynamic_m1_shared_budget_promotion
+            ),
         )
     elif args.anchor_sparse_dynamic_m1_downstream_risk_table is not None:
         raise ValueError("A downstream risk table requires a Dynamic M1 bundle")
+    elif args.anchor_sparse_dynamic_m1_shared_budget_promotion:
+        raise ValueError("Shared budget promotion requires a Dynamic M1 bundle")
     if args.anchor_sparse_dynamic_action_history_table is not None:
         from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
             DynamicDenseActionHistoryTable,
@@ -1195,7 +1201,7 @@ def main(args: Args) -> None:
         "dynamic_budget_table=%s dynamic_head_group_budget_table=%s "
         "dynamic_m1_bundle=%s dynamic_m1_risk_table=%s "
         "dynamic_m1_require_coverage=%s dynamic_m1_support_ratio=%.3f "
-        "dynamic_m1_layer_shared_current=%s "
+        "dynamic_m1_layer_shared_current=%s dynamic_m1_shared_budget_promotion=%s "
         "dynamic_action_history_table=%s dynamic_max_action_current_table=%s "
         "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
@@ -1218,6 +1224,7 @@ def main(args: Args) -> None:
         args.anchor_sparse_dynamic_m1_require_downstream_coverage,
         args.anchor_sparse_dynamic_m1_support_ratio,
         args.anchor_sparse_dynamic_m1_layer_shared_current_keep_ratio,
+        args.anchor_sparse_dynamic_m1_shared_budget_promotion,
         args.anchor_sparse_dynamic_action_history_table,
         args.anchor_sparse_dynamic_max_action_current_table,
         args.anchor_sparse_record_diagnostics,

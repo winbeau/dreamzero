@@ -2894,6 +2894,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_m1_packed_observations: list[Any | None] = []
         self._dynamic_m1_runtime: Any | None = None
         self._dynamic_m1_layer_shared_current_keep_ratio: float | None = None
+        self._dynamic_m1_shared_budget_promotion = False
+        self._dynamic_m1_shared_budget_trace: dict[
+            tuple[int, int], dict[str, object]
+        ] = {}
         self._dynamic_m1_request_condition: tuple[float, float] | None = None
 
         max_num_embodiments = 1
@@ -3113,6 +3117,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_scheduler_steps = None
         self._dynamic_attention_oracle_cfg_branch = None
         self._dynamic_m1_packed_observations = []
+        self._dynamic_m1_shared_budget_trace = {}
         runtime = self._dynamic_m1_runtime
         if runtime is not None:
             condition = self._dynamic_m1_request_condition
@@ -3323,15 +3328,21 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         runtime: Any | None,
         *,
         layer_shared_current_keep_ratio: float | None = None,
+        shared_budget_promotion: bool = False,
     ) -> None:
         """Attach causal M1 decisions directly to the Packed-M2 executor."""
 
         previous = self._dynamic_m1_runtime
+        shared_budget_promotion = bool(shared_budget_promotion)
         if layer_shared_current_keep_ratio is not None and (
             float(layer_shared_current_keep_ratio) not in (0.25, 0.50, 0.75, 1.00)
         ):
             raise ValueError(
                 "Dynamic M1 layer-shared current ratio must use an executor bucket"
+            )
+        if shared_budget_promotion and layer_shared_current_keep_ratio is not None:
+            raise ValueError(
+                "Dynamic M1 shared budget promotion already controls the current budget"
             )
         if runtime is not None:
             if not self.anchor_sparse_packed_middle:
@@ -3347,7 +3358,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 raise ValueError(
                     "Dynamic M1 Head groups do not support maximum action-current K/V"
                 )
-            if self._dynamic_packed_budget_table is not None:
+            if (
+                self._dynamic_packed_budget_table is not None
+                and not shared_budget_promotion
+            ):
                 raise ValueError("Dynamic M1 runtime conflicts with a static budget table")
             if self._dynamic_packed_head_group_budget_table is not None:
                 raise ValueError("Dynamic M1 runtime conflicts with a static Head-group table")
@@ -3361,6 +3375,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if runtime is None or layer_shared_current_keep_ratio is None
             else float(layer_shared_current_keep_ratio)
         )
+        self._dynamic_m1_shared_budget_promotion = bool(
+            runtime is not None and shared_budget_promotion
+        )
+        self._dynamic_m1_shared_budget_trace = {}
         if runtime is not None:
             self.configure_dynamic_m1_packed_observer(runtime.observer)
         elif previous is not None and self._dynamic_m1_packed_observer is previous.observer:
@@ -3390,11 +3408,48 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
     def get_dynamic_m1_runtime_trace(self) -> dict[str, object]:
         runtime = self._dynamic_m1_runtime
-        return {"configured": False} if runtime is None else {
+        if runtime is None:
+            return {"configured": False}
+        shared_cells = tuple(self._dynamic_m1_shared_budget_trace.values())
+        shared_summary: dict[str, object] = {
+            "enabled": self._dynamic_m1_shared_budget_promotion,
+            "aggregation": "maximum_head_budget",
+            "observed_cell_count": len(shared_cells),
+        }
+        if shared_cells:
+            shared_summary.update(
+                {
+                    "history_promoted_cell_count": sum(
+                        float(cell["effective_history_keep_ratio"])
+                        > float(cell["base_history_keep_ratio"])
+                        for cell in shared_cells
+                    ),
+                    "current_promoted_cell_count": sum(
+                        float(cell["effective_current_keep_ratio"])
+                        > float(cell["base_current_keep_ratio"])
+                        for cell in shared_cells
+                    ),
+                    "effective_dense_cell_count": sum(
+                        float(cell["effective_history_keep_ratio"]) == 1.0
+                        and float(cell["effective_current_keep_ratio"]) == 1.0
+                        for cell in shared_cells
+                    ),
+                    "fallback_head_count": sum(
+                        int(cell["fallback_head_count"])
+                        for cell in shared_cells
+                    ),
+                    "minimum_route_confidence": min(
+                        float(cell["minimum_route_confidence"])
+                        for cell in shared_cells
+                    ),
+                }
+            )
+        return {
             "configured": True,
             "layer_shared_current_keep_ratio": (
                 self._dynamic_m1_layer_shared_current_keep_ratio
             ),
+            "shared_budget_promotion": shared_summary,
             **runtime.trace(),
         }
 
@@ -3576,7 +3631,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         """Attach an eight-DiT by layer fixed-bucket budget table."""
 
         if table is not None:
-            if self._dynamic_m1_runtime is not None:
+            if (
+                self._dynamic_m1_runtime is not None
+                and not self._dynamic_m1_shared_budget_promotion
+            ):
                 raise ValueError("Static dynamic budgets conflict with Dynamic M1 runtime")
             if not self.anchor_sparse_packed_middle:
                 raise ValueError(
@@ -3727,6 +3785,51 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             return 1.0, 1.0
         runtime = self._dynamic_m1_runtime
         shared_current = self._dynamic_m1_layer_shared_current_keep_ratio
+        table = self._dynamic_packed_budget_table
+        if self._dynamic_sparse_dit_index is None and table is not None:
+            raise RuntimeError(
+                "Dynamic packed budget table is active before the real DiT index was set"
+            )
+        config = self.anchor_sparse_config
+        if config is None:
+            raise RuntimeError("Packed budgets require an anchor sparse config")
+        base_ratios = (
+            (config.keep_ratio, self.anchor_sparse_current_keep_ratio)
+            if table is None
+            else table.ratios(self._dynamic_sparse_dit_index, layer_index)
+        )
+        if runtime is not None and self._dynamic_m1_shared_budget_promotion:
+            decision = runtime.current_decision
+            if decision is None:
+                raise RuntimeError(
+                    "Dynamic M1 runtime is active before the real DiT was routed"
+                )
+            layer_keep_ratios = decision.keep_ratios[layer_index]
+            promotion_ratio = max(float(value) for value in layer_keep_ratios)
+            effective_ratios = (
+                max(base_ratios[0], promotion_ratio),
+                max(base_ratios[1], promotion_ratio),
+            )
+            if self._dynamic_sparse_dit_index is None:
+                raise RuntimeError(
+                    "Dynamic M1 shared promotion is active before the real DiT index was set"
+                )
+            self._dynamic_m1_shared_budget_trace[
+                (self._dynamic_sparse_dit_index, layer_index)
+            ] = {
+                "dit_index": self._dynamic_sparse_dit_index,
+                "layer_index": layer_index,
+                "base_history_keep_ratio": base_ratios[0],
+                "base_current_keep_ratio": base_ratios[1],
+                "m1_promotion_keep_ratio": promotion_ratio,
+                "effective_history_keep_ratio": effective_ratios[0],
+                "effective_current_keep_ratio": effective_ratios[1],
+                "fallback_head_count": int(decision.fallback[layer_index].sum()),
+                "minimum_route_confidence": float(
+                    decision.route_confidence[layer_index].min()
+                ),
+            }
+            return effective_ratios
         if runtime is not None and shared_current is not None:
             decision = runtime.current_decision
             if decision is None:
@@ -3739,21 +3842,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 if all(float(value) == 1.0 for value in layer_keep_ratios)
                 else shared_current
             )
-            config = self.anchor_sparse_config
-            if config is None:
-                raise RuntimeError("Dynamic M1 Packed budgets require anchor config")
             return config.keep_ratio, current_keep_ratio
-        table = self._dynamic_packed_budget_table
-        if table is None:
-            config = self.anchor_sparse_config
-            if config is None:
-                raise RuntimeError("Packed budgets require an anchor sparse config")
-            return config.keep_ratio, self.anchor_sparse_current_keep_ratio
-        if self._dynamic_sparse_dit_index is None:
-            raise RuntimeError(
-                "Dynamic packed budget table is active before the real DiT index was set"
-            )
-        return table.ratios(self._dynamic_sparse_dit_index, layer_index)
+        return base_ratios
 
     def _packed_head_groups_for_layer(
         self,
@@ -3763,6 +3853,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             return None
         runtime = self._dynamic_m1_runtime
         if runtime is not None:
+            if self._dynamic_m1_shared_budget_promotion:
+                return None
             decision = runtime.current_decision
             if decision is None:
                 raise RuntimeError(
@@ -4348,6 +4440,20 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 packed_layer_ratios = dict(
                     zip(middle_layer_indices, stable_ratios, strict=True)
                 )
+            if self._dynamic_m1_shared_budget_promotion:
+                if self._dynamic_sparse_dit_index is None:
+                    raise RuntimeError(
+                        "Dynamic M1 trace is active before the real DiT index was set"
+                    )
+                for layer_index, (history_ratio, current_ratio) in (
+                    packed_layer_ratios.items()
+                ):
+                    trace_cell = self._dynamic_m1_shared_budget_trace.get(
+                        (self._dynamic_sparse_dit_index, layer_index)
+                    )
+                    if trace_cell is not None:
+                        trace_cell["effective_history_keep_ratio"] = history_ratio
+                        trace_cell["effective_current_keep_ratio"] = current_ratio
         packed_has_sparse_layer = any(
             history_ratio < 1.0 or current_ratio < 1.0
             for history_ratio, current_ratio in packed_layer_ratios.values()
