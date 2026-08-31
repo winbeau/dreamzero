@@ -255,6 +255,40 @@ Artifacts:
   dynamic_m1_m2/downstream_oracle/20260831_same_process_pair/
 ```
 
+### Task-disjoint timestep validation
+
+The early/late DiT contrast was then expanded to all 18 validation requests
+(six source episodes, each with early/middle/late stages). Every intervention
+still removes only head 14 once at layer 39, and every paired trajectory keeps
+the complete three-block history and eight real DiT evaluations.
+
+| Real DiT | Mean action rel-L2 | Max action rel-L2 | Min cosine |
+| ---: | ---: | ---: | ---: |
+| 0 | 1.268% | 4.518% | 0.999235 |
+| 7 | 0.0427% | 0.0662% | 0.9999998 |
+
+The mean downstream sensitivity differs by 29.7x. For DiT 0, early/middle/late
+mean relative L2 is 1.996%/0.438%/1.371%; for DiT 7 all three stage means are
+below 0.047%. The worst DiT-0 request is
+`validation_subset024_source018470_early` ("Move the pineapple plushy
+backwards"), with cosine 0.999235, relative L2 4.518%, and maximum absolute
+action difference 0.16815. Thus a single false-sparse critical-head decision
+can violate the required action-cosine gate even though its average error is
+much smaller.
+
+Commits `8975854`, `185a642`, and `c144652` add a tested resumable grid runner
+and the first deployment-shaped four-head shared-group scan configuration.
+The grid writes every request/candidate row incrementally before final
+aggregation, so an interrupted long Oracle run can resume without discarding
+completed trajectories.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/downstream_oracle/20260831_validation18/
+```
+
 ## Exactness and tests
 
 Observer-enabled Dense execution preserves video output, action output, and
