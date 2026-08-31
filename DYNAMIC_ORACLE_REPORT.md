@@ -195,6 +195,66 @@ Trajectory-stage mean budgets are close: early 69.19%, middle 68.81%, late
 68.74%. Stage alone is therefore a weak router feature compared with
 timestep/layer/head and temporal dynamics.
 
+## Same-noise downstream final-action intervention pilot
+
+Commits `2d0e8f5` and `232ec62` add a Dense-only intervention immediately
+before the attention output projection and a same-process DROID paired runner.
+The runner executes the complete Dense history and target, resets the policy,
+then repeats the identical history with an intervention only on the second
+target. Both trajectories use the released fixed action/video noise seed and
+the same physical GPUs. Request-level overrides are disabled unless the server
+is launched with the explicit research flag.
+
+A scale-one control at `(DiT 0, layer 39, head 14)` is exactly equal after the
+complete history and eight real DiT evaluations:
+
+| Control gate | Result |
+| --- | ---: |
+| final action cosine | 1.000000 |
+| final action relative L2 | 0% |
+| final action maximum absolute difference | 0 |
+| target intervention count | 1 |
+
+This same-process control was necessary. Comparing independently launched
+services produced a nonzero difference despite a scale-one tensor no-op,
+because cross-process/GPU execution is not a sufficiently strict causal
+control for this measurement.
+
+The first scale-zero pilot uses one untouched test episode at its early,
+middle, and late task stages. Each row removes one attention head only once in
+the full denoising trajectory:
+
+| Intervention | Mean action rel-L2 | Max action rel-L2 | Min cosine |
+| --- | ---: | ---: | ---: |
+| DiT 0 / layer 39 / head 14 / all queries | 1.693% | 3.154% | 0.999516 |
+| DiT 7 / layer 39 / head 14 / all queries | 0.061% | 0.069% | 1.000000 |
+| DiT 0 / layer 0 / head 14 / all queries | 0.652% | 1.164% | 0.999933 |
+| DiT 0 / layer 20 / head 14 / all queries | 2.137% | 3.146% | 0.999524 |
+| DiT 0 / layer 39 / head 28 / all queries | 1.661% | 2.530% | 0.999717 |
+| DiT 0 / layer 39 / head 14 / registers only | 1.940% | 2.924% | 0.999587 |
+| DiT 0 / layer 39 / head 14 / video queries only | 1.212% | 2.396% | 0.999734 |
+
+Four conclusions are already supported, although this is not yet the complete
+Oracle scan:
+
+1. The first real DiT evaluation is about 27.7x more action-sensitive than the
+   last for the same layer/head under mean relative L2.
+2. Layer sensitivity is non-monotonic: layer 20 exceeds both layer 0 and layer
+   39 in this controlled final-action measurement.
+3. The local-budget head ordering is not a downstream-action ordering. Head 14
+   has the highest mean local Oracle budget and head 28 the lowest, but their
+   controlled action errors at DiT 0/layer 39 are similar.
+4. Query type interacts with trajectory stage. Register-query removal is
+   strongest at the early stage, while video-query removal is strongest at the
+   late stage; neither path can be discarded globally.
+
+Artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/downstream_oracle/20260831_same_process_pair/
+```
+
 ## Exactness and tests
 
 Observer-enabled Dense execution preserves video output, action output, and
@@ -205,8 +265,9 @@ primitives.
 
 ## Remaining Oracle work
 
-- perform controlled downstream head/group interventions and record final
-  action/video sensitivity rather than inferring it from local output error;
+- expand the controlled downstream intervention from this pilot to a
+  task-disjoint `(timestep, layer, shared-head-group, query-type)` scan and add
+  final-video sensitivity;
 - replay the calibrated M1 policy through the real model and require final
   action cosine >=0.999;
 - save worst requests and connect classifier false-sparse events to downstream

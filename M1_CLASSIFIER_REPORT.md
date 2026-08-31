@@ -234,12 +234,23 @@ to Git.
 
 ## Remaining M1 work
 
+The same-noise downstream pilot in `DYNAMIC_ORACLE_REPORT.md` changes the M1
+supervision requirement. A head's local mass/output budget cannot be used as a
+standalone criticality label: locally highest-budget head 14 and lowest-budget
+head 28 have similar final-action sensitivity at DiT 0/layer 39, and layer 20
+is more sensitive than both layer 0 and layer 39 for head 14. Query-path
+importance also changes across trajectory stage. The next classifier revision
+must therefore include calibrated downstream action sensitivity or a
+conservative proxy trained against it, while retaining Dense fallback for
+unscanned/uncertain cells.
+
 - integrate the selected bundle into timestep/layer/head-group budget routing;
 - measure actual route/classifier overhead on GPU;
 - replace the current global profile family with finer shared-group dynamic
   budgets; request-level selection alone has an Oracle ceiling below target;
 - replay held-out requests through the real DreamZero policy;
 - require final action cosine >=0.999 and relative L2 <=5%;
-- save the worst false-sparse/fallback cases and connect them to downstream
+- expand same-noise downstream labels across task-disjoint shared head groups,
+  save the worst false-sparse/fallback cases, and connect them to final
   action/video changes;
 - recheck calibration after fixed-shape head-group quantization.
