@@ -266,3 +266,20 @@ warmup/history/target calls with exactly eight DiT evaluations per call.
 The final-layer recovery ablation is complete and rejected as the primary
 quality mechanism.  Packed M2 should retain a small suffix and spend recovery
 budget at propagation boundaries or within sensitive segments instead.
+
+## Wider propagation recovery
+
+The radius-two/every-five boundary was compared with radius two/every three
+and radius three/every five under the same balanced packed shapes.  More
+frequent radius-two recovery is neutral: checkpoint video L2 changes from
+8.758% to 8.830%, action L2 from 1.849% to 1.863%, and DiT speedup remains
+1.226x.  Wider radius-three recovery is locally strong, reducing video L2 to
+4.233% while retaining 1.272x checkpoint DiT speedup and 1.839% action L2.
+
+The validation18 trajectory rejects that local proxy.  Radius three/every five
+is fast at 1.516x paired geometric mean end-to-end speedup, but mean action L2
+is 9.553%, worst L2 is 20.289%, and zero requests are safe.  All 76 calls retain
+the required eight DiT evaluations.  Because wider interpolation repairs video
+without repairing the action registers, further M2 recovery must operate on
+action-sensitive packed state within the segment rather than on the final
+spatial field alone.

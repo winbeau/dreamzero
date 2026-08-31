@@ -182,3 +182,20 @@ Thus final Dense layers can cosmetically repair video output without undoing
 the hidden-state/action error accumulated through earlier packed segments.
 Suffix recovery is rejected as a fallback; low-confidence routes still need
 earlier budget promotion or exact Dense execution.
+
+## Propagation-radius quality gate
+
+Increasing propagation frequency from radius two/every five to radius
+two/every three does not improve the released checkpoint: action/video
+relative L2 changes from 1.849%/8.758% to 1.863%/8.830%.  Increasing spatial
+radius to three is locally much better for video, reaching cosine 0.999155 and
+4.233% relative L2, while action remains at 0.999834 cosine and 1.839% L2.
+
+The validation18 trajectory disproves video-output recovery as an action
+safety proxy.  Radius three/every five has mean action cosine 0.995300, minimum
+cosine 0.979434, mean relative L2 9.553%, maximum L2 20.289%, and zero safe
+requests.  Its worst request is again
+`validation_subset024_source018470_late`.  Spatial interpolation can make the
+video tensor substantially closer to Dense while the action registers retain
+earlier packed-state error.  Radius three is therefore rejected as a global
+quality policy despite its strong checkpoint video row.

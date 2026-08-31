@@ -698,3 +698,42 @@ dynamic_m1_m2/dynamic_budgets/20260831_dense_suffix_recovery/
 dynamic_m1_m2/e2e/20260831_balanced_suffix3_validation18/
 dynamic_m1_m2/e2e/20260831_balanced_suffix5_validation18/
 ```
+
+## Propagation frequency and spatial-radius recovery
+
+After rejecting deeper suffix recovery, the same balanced suffix-one executor
+was tested with a shorter propagation segment and a wider spatial update.  The
+released early-step checkpoint gives:
+
+| Propagation | Boundaries | Sparse p50 | DiT speedup | Action rel-L2 | Video cosine | Video rel-L2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| radius 2 / every 5 | 8 | 154.98 ms | 1.228x | 1.849% | 0.996166 | 8.758% |
+| radius 2 / every 3 | 13 | 153.07 ms | 1.226x | 1.863% | 0.996098 | 8.830% |
+| radius 3 / every 5 | 8 | 147.14 ms | 1.272x | 1.839% | 0.999155 | 4.233% |
+
+Frequency alone is ineffective: thirteen radius-two recoveries are slightly
+worse than eight.  A radius-three update, however, cuts the local video error
+by 51.7% without changing the packed token budgets.  This result independently
+passes full-budget video, action, and cache exactness and was promoted to the
+complete validation replay.
+
+The trajectory result again separates video reconstruction from action-state
+safety.  Radius three/every five measures 1.2563 s mean target latency versus
+1.9034 s Dense, with 1.516x paired geometric mean speedup and CI95 [1.485x,
+1.542x].  All 18 targets are faster and all 76 warmup/history/target calls
+execute exactly eight DiT evaluations.  Nevertheless mean action relative L2
+regresses to 9.553%, minimum cosine is 0.979434, maximum L2 is 20.289%, and no
+request passes both action gates.
+
+The spatial-radius sweep is therefore closed as a global recovery mechanism.
+Wider propagation can repair the observable video field while failing to
+repair the action-sensitive packed register/hidden-state trajectory.  The next
+executor change must target action-conditioned state inside a segment rather
+than continue increasing propagation radius or frequency.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_propagation_recovery/
+dynamic_m1_m2/e2e/20260831_balanced_r3e5_validation18/
+```

@@ -258,3 +258,21 @@ Artifacts:
 dynamic_m1_m2/e2e/20260831_balanced_suffix3_validation18/
 dynamic_m1_m2/e2e/20260831_balanced_suffix5_validation18/
 ```
+
+## Radius-three propagation performance
+
+The promoted radius-three/every-five service uses the original suffix-one
+balanced table.  Against the unchanged Dense validation18 reference it
+measures 1.2563 s mean target latency, 1.515x ratio-of-means speedup, and 1.516x
+paired geometric mean speedup with CI95 [1.485x, 1.542x].  Every target is
+faster, the minimum paired speedup is 1.351x, and all 76 service calls contain
+exactly eight DiT evaluations.
+
+This is the fastest validation18 row in the current propagation family, but it
+is not an accepted performance claim because action quality fails 18/18.  The
+executor should not trade on the favorable radius timing until an
+action-sensitive recovery path passes quality.
+
+Artifact:
+
+`dynamic_m1_m2/e2e/20260831_balanced_r3e5_validation18/`
