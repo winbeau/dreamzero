@@ -119,6 +119,7 @@ class GroupedM1StepDecision:
     keep_ratios: np.ndarray
     route_confidence: np.ndarray
     classifier_fallback: np.ndarray
+    feature_fallback: np.ndarray
     downstream_unknown_fallback: np.ndarray
     downstream_unsafe_fallback: np.ndarray
     fallback: np.ndarray
@@ -136,6 +137,7 @@ class GroupedM1StepDecision:
             "raw_keep_ratios",
             "route_confidence",
             "classifier_fallback",
+            "feature_fallback",
             "downstream_unknown_fallback",
             "downstream_unsafe_fallback",
             "fallback",
@@ -157,6 +159,7 @@ class GroupedM1StepDecision:
             )
         for field_name in (
             "classifier_fallback",
+            "feature_fallback",
             "downstream_unknown_fallback",
             "downstream_unsafe_fallback",
             "fallback",
@@ -203,9 +206,7 @@ class GroupedM1StepDecision:
                     "minimum_route_confidence": float(
                         np.min(self.route_confidence[layer_index, heads])
                     ),
-                    "fallback_heads": int(
-                        np.sum(self.fallback[layer_index, heads])
-                    ),
+                    "fallback_heads": int(np.sum(self.fallback[layer_index, heads])),
                 }
             )
         if len(groups) > len(EXECUTOR_BUDGET_BUCKETS):
@@ -226,9 +227,8 @@ class GroupedM1StepDecision:
             "shape": [self.num_layers, self.num_heads],
             "mean_keep_ratio": float(np.mean(self.keep_ratios)),
             "dense_head_fraction": float(np.mean(self.keep_ratios == 1.0)),
-            "classifier_fallback_rate": float(
-                np.mean(self.classifier_fallback)
-            ),
+            "classifier_fallback_rate": float(np.mean(self.classifier_fallback)),
+            "feature_fallback_rate": float(np.mean(self.feature_fallback)),
             "downstream_unknown_fallback_rate": float(
                 np.mean(self.downstream_unknown_fallback)
             ),
@@ -373,6 +373,7 @@ class DynamicM1GroupedRouter:
         downstream_risk_table: DownstreamHeadRiskTable | None = None,
         downstream_scanned: np.ndarray | None = None,
         downstream_safe: np.ndarray | None = None,
+        external_dense_fallback: np.ndarray | None = None,
     ) -> GroupedM1StepDecision:
         feature_frame, shape, feature_arrays = self._feature_frame(features)
         probabilities = np.asarray(
@@ -419,14 +420,19 @@ class DynamicM1GroupedRouter:
         raw_keep = BUDGET_BUCKETS[promoted].reshape(shape)
         confidence = route_confidence.reshape(shape)
         classifier_fallback = confidence < self.policy.confidence_threshold
+        feature_fallback = (
+            np.zeros(shape, dtype=bool)
+            if external_dense_fallback is None
+            else np.asarray(external_dense_fallback, dtype=bool)
+        )
+        if feature_fallback.shape != shape:
+            raise ValueError("external Dense fallback does not match M1 route shape")
         if downstream_risk_table is not None:
             if downstream_scanned is not None or downstream_safe is not None:
                 raise ValueError(
                     "Pass either downstream_risk_table or explicit masks, not both"
                 )
-            downstream_scanned, downstream_safe = downstream_risk_table.masks(
-                dit_index
-            )
+            downstream_scanned, downstream_safe = downstream_risk_table.masks(dit_index)
         scanned, safe = self._downstream_masks(
             shape,
             downstream_scanned=downstream_scanned,
@@ -435,7 +441,12 @@ class DynamicM1GroupedRouter:
         )
         downstream_unknown = ~scanned
         downstream_unsafe = scanned & ~safe
-        fallback = classifier_fallback | downstream_unknown | downstream_unsafe
+        fallback = (
+            classifier_fallback
+            | feature_fallback
+            | downstream_unknown
+            | downstream_unsafe
+        )
 
         effective = raw_keep.copy()
         effective[fallback] = 1.0
@@ -481,6 +492,7 @@ class DynamicM1GroupedRouter:
             keep_ratios=grouped,
             route_confidence=confidence,
             classifier_fallback=classifier_fallback,
+            feature_fallback=feature_fallback,
             downstream_unknown_fallback=downstream_unknown,
             downstream_unsafe_fallback=downstream_unsafe,
             fallback=fallback,
@@ -544,8 +556,10 @@ def grouped_route_metrics(
         ),
         "unknown_or_unsafe_sparse_count": int(
             np.sum(
-                (decision.downstream_unknown_fallback
-                 | decision.downstream_unsafe_fallback)
+                (
+                    decision.downstream_unknown_fallback
+                    | decision.downstream_unsafe_fallback
+                )
                 & (decision.keep_ratios < 1.0)
             )
         ),
