@@ -19,6 +19,28 @@ from groot.vla.data.schema import DatasetMetadata, EmbodimentTag
 from groot.vla.data.transform import ComposedModalityTransform
 
 
+def _raw_state_condition_summary(
+    observation: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Match the Dense-Oracle state feature definition before normalization."""
+
+    values = []
+    for key, value in observation.items():
+        if not str(key).startswith("state."):
+            continue
+        if torch.is_tensor(value):
+            array = value.detach().float().cpu().numpy()
+        else:
+            array = np.asarray(value, dtype=np.float64)
+        values.append(np.asarray(array, dtype=np.float64).reshape(-1))
+    if not values:
+        return None, None
+    state = np.concatenate(values)
+    if not np.all(np.isfinite(state)):
+        return None, None
+    return float(np.linalg.norm(state)), float(np.mean(np.abs(state)))
+
+
 class ModelManager:
     """
     Manages model loading/offloading to handle memory efficiently when using multiple models.
@@ -683,6 +705,9 @@ class GrootSimPolicy(BaseGrootSimPolicy):
         # Save original observation before any modification (for relative action conversion)
         original_obs_for_relative = {k: v.copy() if isinstance(v, np.ndarray) else v.clone() if torch.is_tensor(v) else v 
                                      for k, v in batch.obs.items()}
+        dynamic_m1_state_l2, dynamic_m1_state_abs_mean = (
+            _raw_state_condition_summary(original_obs_for_relative)
+        )
 
         # 1. Check if input is batched and add batch dimension if needed
         is_batched = self._check_state_is_batched(batch.obs)
@@ -711,6 +736,19 @@ class GrootSimPolicy(BaseGrootSimPolicy):
                 normalized_input[k] = v.to(dtype=torch.bfloat16)
 
         model_start_time = time.perf_counter()
+
+        action_head = getattr(self.trained_model, "action_head", None)
+        diffusion_model = getattr(action_head, "model", None)
+        set_dynamic_m1_condition = getattr(
+            diffusion_model,
+            "set_dynamic_m1_request_condition",
+            None,
+        )
+        if set_dynamic_m1_condition is not None:
+            set_dynamic_m1_condition(
+                state_l2=dynamic_m1_state_l2,
+                state_abs_mean=dynamic_m1_state_abs_mean,
+            )
 
         # 3. Model inference
         with torch.inference_mode():

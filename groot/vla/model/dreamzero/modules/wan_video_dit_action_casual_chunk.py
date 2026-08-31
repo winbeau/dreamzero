@@ -2880,6 +2880,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_attention_oracle_cfg_branch: str | None = None
         self._dynamic_m1_packed_observer: Any | None = None
         self._dynamic_m1_packed_observations: list[Any | None] = []
+        self._dynamic_m1_runtime: Any | None = None
+        self._dynamic_m1_request_condition: tuple[float, float] | None = None
 
         max_num_embodiments = 1
 
@@ -3095,8 +3097,16 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_scheduler_steps = None
         self._dynamic_attention_oracle_cfg_branch = None
         self._dynamic_m1_packed_observations = []
-        if self._dynamic_m1_packed_observer is not None:
+        runtime = self._dynamic_m1_runtime
+        if runtime is not None:
+            condition = self._dynamic_m1_request_condition
+            runtime.begin_request(
+                state_l2=None if condition is None else condition[0],
+                state_abs_mean=None if condition is None else condition[1],
+            )
+        elif self._dynamic_m1_packed_observer is not None:
             self._dynamic_m1_packed_observer.begin_request()
+        self._dynamic_m1_request_condition = None
         intervention = self._dynamic_downstream_head_intervention
         if intervention is not None:
             block = self.blocks[intervention.layer_index]
@@ -3124,8 +3134,26 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         # evaluation even when Oracle collection is disabled.  Reuse that exact
         # execution context for dynamic sparse budgets; skipped scheduler steps
         # never advance ``dit_index``.
+        runtime = self._dynamic_m1_runtime
         observer = self._dynamic_m1_packed_observer
-        if observer is not None:
+        if runtime is not None:
+            if torch.is_tensor(timestep):
+                diffusion_timestep = int(timestep.reshape(-1)[0].item())
+            else:
+                diffusion_timestep = int(timestep)
+            previous_observation, _decision = runtime.begin_step(
+                scheduler_index=int(scheduler_index),
+                dit_index=int(dit_index),
+                scheduler_steps=int(scheduler_steps),
+                diffusion_timestep=diffusion_timestep,
+            )
+            if dit_index > 0:
+                self._dynamic_m1_packed_observations.append(previous_observation)
+            if len(self._dynamic_m1_packed_observations) != dit_index:
+                raise RuntimeError(
+                    "Dynamic M1 observations do not align with real DiT order"
+                )
+        elif observer is not None:
             if observer.step_active:
                 self._dynamic_m1_packed_observations.append(
                     observer.finish_step()
@@ -3221,8 +3249,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         }
 
     def flush_dynamic_attention_oracle_request(self):
+        runtime = self._dynamic_m1_runtime
         observer = self._dynamic_m1_packed_observer
-        if observer is not None:
+        if runtime is not None:
+            runtime.finish_request()
+            self._dynamic_m1_packed_observations = list(runtime.observations)
+        elif observer is not None:
             if observer.step_active:
                 self._dynamic_m1_packed_observations.append(
                     observer.finish_step()
@@ -3236,6 +3268,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     def configure_dynamic_m1_packed_observer(self, observer: Any | None) -> None:
         """Attach a low-overhead causal observer to Dense and Packed paths."""
 
+        runtime = self._dynamic_m1_runtime
+        if runtime is not None and observer is not runtime.observer:
+            raise ValueError(
+                "A Dynamic M1 runtime owns its Packed observer; detach it first"
+            )
         if observer is not None:
             if observer.num_layers != len(self.blocks):
                 raise ValueError("Packed M1 observer layer count differs from model")
@@ -3246,6 +3283,63 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.self_attn.dynamic_m1_packed_observer = observer
             block.self_attn.dynamic_m1_cfg_branch = None
+
+    def set_dynamic_m1_request_condition(
+        self,
+        *,
+        state_l2: float | None,
+        state_abs_mean: float | None,
+    ) -> None:
+        """Stage raw, pre-normalization state statistics for the next request."""
+
+        if state_l2 is None or state_abs_mean is None:
+            self._dynamic_m1_request_condition = None
+            return
+        values = (float(state_l2), float(state_abs_mean))
+        if not all(math.isfinite(value) and value >= 0.0 for value in values):
+            self._dynamic_m1_request_condition = None
+            return
+        self._dynamic_m1_request_condition = values
+
+    def configure_dynamic_m1_runtime(self, runtime: Any | None) -> None:
+        """Attach causal M1 decisions directly to the Packed-M2 executor."""
+
+        previous = self._dynamic_m1_runtime
+        if runtime is not None:
+            if not self.anchor_sparse_packed_middle:
+                raise ValueError("Dynamic M1 runtime requires Packed Middle Stack")
+            if self.anchor_sparse_reuse_denoise:
+                raise ValueError(
+                    "Packed-proxy M1 requires reuse_denoise=False so each real DiT "
+                    "observes a fresh action-conditioned route"
+                )
+            if self.anchor_sparse_dense_action_history:
+                raise ValueError("Dynamic M1 Head groups do not support dense action history")
+            if self.anchor_sparse_max_action_current:
+                raise ValueError(
+                    "Dynamic M1 Head groups do not support maximum action-current K/V"
+                )
+            if self._dynamic_packed_budget_table is not None:
+                raise ValueError("Dynamic M1 runtime conflicts with a static budget table")
+            if self._dynamic_packed_head_group_budget_table is not None:
+                raise ValueError("Dynamic M1 runtime conflicts with a static Head-group table")
+            if runtime.num_dit_steps != 8:
+                raise ValueError("DreamZero Dynamic M1 must cover exactly 8 real DiTs")
+            if runtime.num_layers != len(self.blocks) or runtime.num_heads != self.num_heads:
+                raise ValueError("Dynamic M1 runtime geometry differs from the model")
+        self._dynamic_m1_runtime = runtime
+        if runtime is not None:
+            self.configure_dynamic_m1_packed_observer(runtime.observer)
+        elif previous is not None and self._dynamic_m1_packed_observer is previous.observer:
+            self.configure_dynamic_m1_packed_observer(None)
+        self.clear_anchor_sparse_route_cache()
+
+    def get_dynamic_m1_runtime_trace(self) -> dict[str, object]:
+        runtime = self._dynamic_m1_runtime
+        return {"configured": False} if runtime is None else {
+            "configured": True,
+            **runtime.trace(),
+        }
 
     def get_dynamic_m1_packed_observations(self) -> tuple[Any | None, ...]:
         return tuple(self._dynamic_m1_packed_observations)
@@ -3425,6 +3519,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         """Attach an eight-DiT by layer fixed-bucket budget table."""
 
         if table is not None:
+            if self._dynamic_m1_runtime is not None:
+                raise ValueError("Static dynamic budgets conflict with Dynamic M1 runtime")
             if not self.anchor_sparse_packed_middle:
                 raise ValueError(
                     "Dynamic packed budgets require an active Packed Middle Stack"
@@ -3447,6 +3543,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         """Attach per-head history budgets collapsed to at most four groups."""
 
         if table is not None:
+            if self._dynamic_m1_runtime is not None:
+                raise ValueError("Static Head groups conflict with Dynamic M1 runtime")
             if not self.anchor_sparse_packed_middle:
                 raise ValueError(
                     "Dynamic packed head groups require an active Packed Middle Stack"
@@ -3587,6 +3685,21 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     ) -> tuple[tuple[tuple[int, ...], float, float | None], ...] | None:
         if self._dynamic_sparse_force_dense:
             return None
+        runtime = self._dynamic_m1_runtime
+        if runtime is not None:
+            decision = runtime.current_decision
+            if decision is None:
+                raise RuntimeError(
+                    "Dynamic M1 runtime is active before the real DiT was routed"
+                )
+            return tuple(
+                (
+                    group["head_indices"],
+                    group["history_keep_ratio"],
+                    group["current_keep_ratio"],
+                )
+                for group in decision.execution_groups_for_layer(layer_index)
+            )
         table = self._dynamic_packed_head_group_budget_table
         if table is None:
             return None

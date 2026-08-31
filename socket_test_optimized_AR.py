@@ -59,6 +59,10 @@ class Args:
     anchor_sparse_max_action_current: bool = False
     anchor_sparse_dynamic_budget_table: str | None = None
     anchor_sparse_dynamic_head_group_budget_table: str | None = None
+    anchor_sparse_dynamic_m1_bundle: str | None = None
+    anchor_sparse_dynamic_m1_downstream_risk_table: str | None = None
+    anchor_sparse_dynamic_m1_require_downstream_coverage: bool = True
+    anchor_sparse_dynamic_m1_support_ratio: float = 0.20
     anchor_sparse_dynamic_action_history_table: str | None = None
     anchor_sparse_dynamic_max_action_current_table: str | None = None
     anchor_sparse_record_diagnostics: bool = False
@@ -1071,6 +1075,53 @@ def main(args: Args) -> None:
                 args.anchor_sparse_dynamic_head_group_budget_table
             )
         )
+    if args.anchor_sparse_dynamic_m1_bundle is not None:
+        import joblib
+
+        from groot.vla.model.dreamzero.modules.dynamic_m1_group_router import (
+            DownstreamHeadRiskTable,
+        )
+        from groot.vla.model.dreamzero.modules.dynamic_m1_runtime import (
+            DynamicM1RuntimeController,
+        )
+
+        if args.anchor_sparse_dynamic_head_group_budget_table is not None:
+            raise ValueError(
+                "Choose either a static Head-group table or Dynamic M1, not both"
+            )
+        if not 0.0 < args.anchor_sparse_dynamic_m1_support_ratio <= 1.0:
+            raise ValueError("Dynamic M1 support ratio must lie in (0, 1]")
+        configure_dynamic_m1 = getattr(
+            diffusion_model,
+            "configure_dynamic_m1_runtime",
+            None,
+        )
+        if configure_dynamic_m1 is None:
+            raise RuntimeError("Loaded diffusion model does not support Dynamic M1")
+        risk_table = (
+            None
+            if args.anchor_sparse_dynamic_m1_downstream_risk_table is None
+            else DownstreamHeadRiskTable.from_json(
+                args.anchor_sparse_dynamic_m1_downstream_risk_table
+            )
+        )
+        bundle = joblib.load(args.anchor_sparse_dynamic_m1_bundle)
+        configure_dynamic_m1(
+            DynamicM1RuntimeController(
+                bundle,
+                num_dit_steps=8,
+                num_layers=diffusion_model.num_layers,
+                num_heads=diffusion_model.num_heads,
+                force_dense_steps=2,
+                support_ratio=args.anchor_sparse_dynamic_m1_support_ratio,
+                downstream_risk_table=risk_table,
+                require_downstream_coverage=(
+                    args.anchor_sparse_dynamic_m1_require_downstream_coverage
+                ),
+            )
+        )
+    elif args.anchor_sparse_dynamic_m1_downstream_risk_table is not None:
+        raise ValueError("A downstream risk table requires a Dynamic M1 bundle")
     if args.anchor_sparse_dynamic_action_history_table is not None:
         from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
             DynamicDenseActionHistoryTable,
@@ -1138,6 +1189,8 @@ def main(args: Args) -> None:
         "dense_action_history=%s max_action_current=%s "
         "recent_dense_frames=%d "
         "dynamic_budget_table=%s dynamic_head_group_budget_table=%s "
+        "dynamic_m1_bundle=%s dynamic_m1_risk_table=%s "
+        "dynamic_m1_require_coverage=%s dynamic_m1_support_ratio=%.3f "
         "dynamic_action_history_table=%s dynamic_max_action_current_table=%s "
         "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
@@ -1155,6 +1208,10 @@ def main(args: Args) -> None:
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_dynamic_budget_table,
         args.anchor_sparse_dynamic_head_group_budget_table,
+        args.anchor_sparse_dynamic_m1_bundle,
+        args.anchor_sparse_dynamic_m1_downstream_risk_table,
+        args.anchor_sparse_dynamic_m1_require_downstream_coverage,
+        args.anchor_sparse_dynamic_m1_support_ratio,
         args.anchor_sparse_dynamic_action_history_table,
         args.anchor_sparse_dynamic_max_action_current_table,
         args.anchor_sparse_record_diagnostics,

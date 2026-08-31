@@ -1590,6 +1590,20 @@ class WANPolicyHead(ActionHead):
         if flush_oracle_request is not None:
             flush_oracle_request()
 
+        if self.ip_rank == 0:
+            get_dynamic_m1_trace = getattr(
+                self.model,
+                "get_dynamic_m1_runtime_trace",
+                None,
+            )
+            if get_dynamic_m1_trace is not None:
+                dynamic_m1_trace = get_dynamic_m1_trace()
+                if dynamic_m1_trace.get("configured"):
+                    print(
+                        "Dynamic M1 Runtime Trace "
+                        + json.dumps(dynamic_m1_trace, sort_keys=True)
+                    )
+
         return BatchFeature(data={"action_pred": latents_action, "video_pred": output.transpose(1, 2)})
     
     def cache_predict_order1(self, current_timestep, timestep_1, f1, timestep_2, f2):

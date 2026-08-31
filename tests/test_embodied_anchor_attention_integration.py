@@ -580,6 +580,65 @@ def test_model_lifecycle_finalizes_one_proxy_observation_per_real_dit():
     ).shape == (2, 2)
 
 
+def test_model_uses_live_dynamic_m1_head_groups_and_rejects_static_conflicts():
+    module = _load_attention_module()
+    model = _small_model(module)
+    model.configure_anchor_sparse_attention(
+        enabled=True,
+        keep_ratio=0.25,
+        current_keep_ratio=0.25,
+        dense_prefix_layers=1,
+        dense_suffix_layers=0,
+        reuse_denoise=False,
+        packed_middle=True,
+        probe_dim=2,
+        num_router_heads=1,
+        smooth_radius=0,
+    )
+
+    class Decision:
+        @staticmethod
+        def execution_groups_for_layer(layer_index):
+            assert layer_index == 1
+            return (
+                {
+                    "head_indices": (0,),
+                    "history_keep_ratio": 1.0,
+                    "current_keep_ratio": 1.0,
+                },
+                {
+                    "head_indices": (1,),
+                    "history_keep_ratio": 0.25,
+                    "current_keep_ratio": 0.25,
+                },
+            )
+
+    class Runtime:
+        num_dit_steps = 8
+        num_layers = 2
+        num_heads = 2
+        observer = PackedM1CausalObserver(num_layers=2, num_heads=2)
+        current_decision = Decision()
+
+    runtime = Runtime()
+    model.configure_dynamic_m1_runtime(runtime)
+    assert model._packed_head_groups_for_layer(1) == (
+        ((0,), 1.0, 1.0),
+        ((1,), 0.25, 0.25),
+    )
+
+    with pytest.raises(ValueError, match="conflict"):
+        model.configure_dynamic_packed_head_group_budget_table(
+            DynamicPackedHeadGroupBudgetTable(
+                head_keep_ratios=tuple(
+                    tuple((1.0, 0.25) for _ in range(2)) for _ in range(8)
+                )
+            )
+        )
+    model.configure_dynamic_m1_runtime(None)
+    assert model._dynamic_m1_packed_observer is None
+
+
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
     module = _load_attention_module()
     attention = module.CausalWanSelfAttention(
