@@ -15,10 +15,13 @@ TRACE_PREFIX = "Flow Sentinel Trace "
 
 def parse_flow_sentinel_traces(path: Path) -> list[list[dict[str, Any]]]:
     traces = []
+    decoder = json.JSONDecoder()
     for line in path.read_text(errors="replace").splitlines():
         position = line.find(TRACE_PREFIX)
         if position >= 0:
-            traces.append(json.loads(line[position + len(TRACE_PREFIX) :]))
+            payload = line[position + len(TRACE_PREFIX) :]
+            trace, _ = decoder.raw_decode(payload)
+            traces.append(trace)
     return traces
 
 

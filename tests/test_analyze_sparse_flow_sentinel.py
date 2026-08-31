@@ -27,7 +27,8 @@ def test_parse_flow_sentinel_traces_accepts_prefixed_server_lines(tmp_path):
     expected = _trace(0.5)
     path.write_text(
         "unrelated log line\n"
-        + f"[rank0] {TRACE_PREFIX}{json.dumps(expected)}\n"
+        + f"[rank0] {TRACE_PREFIX}{json.dumps(expected)}"
+        + "concurrent worker log suffix\n"
     )
 
     assert parse_flow_sentinel_traces(path) == [expected]
