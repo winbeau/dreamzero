@@ -452,6 +452,8 @@ def main() -> None:
     dit_mask = np.arange(2, 8)[:, None, None, None, None] >= args.late_dit_start
     layer_mask = np.arange(40)[None, :, None, None, None] >= args.late_layer_start
     eligible &= dit_mask & layer_mask
+    executable_per_branch = eligible.all(axis=3)
+    executable_both_branches = executable_per_branch.all(axis=2)
 
     validation_safe = (
         validation_cosine >= args.minimum_cosine
@@ -477,6 +479,10 @@ def main() -> None:
     candidate_cells = int((dit_mask & layer_mask).sum()) * len(BRANCHES) * len(
         MODALITIES
     ) * 40
+    candidate_branch_head_cells = (
+        int((dit_mask & layer_mask).sum()) * len(BRANCHES) * 40
+    )
+    candidate_full_head_cells = int((dit_mask & layer_mask).sum()) * 40
     payload = {
         "schema_version": 1,
         "oracle_root": str(args.oracle_root),
@@ -491,6 +497,32 @@ def main() -> None:
             "candidate_cells": candidate_cells,
             "eligible_cells": int(eligible.sum()),
             "eligible_cell_fraction": float(eligible.sum() / candidate_cells),
+            "executable_branch_head_cells": int(executable_per_branch.sum()),
+            "executable_branch_head_fraction": float(
+                executable_per_branch.sum() / candidate_branch_head_cells
+            ),
+            "executable_both_branch_head_cells": int(
+                executable_both_branches.sum()
+            ),
+            "executable_both_branch_head_fraction": float(
+                executable_both_branches.sum() / candidate_full_head_cells
+            ),
+            "eligible_cells_by_dit": {
+                str(dit_index): int(eligible[dit_index - 2].sum())
+                for dit_index in range(args.late_dit_start, 8)
+            },
+            "executable_branch_heads_by_dit": {
+                str(dit_index): int(
+                    executable_per_branch[dit_index - 2].sum()
+                )
+                for dit_index in range(args.late_dit_start, 8)
+            },
+            "executable_both_branch_heads_by_dit": {
+                str(dit_index): int(
+                    executable_both_branches[dit_index - 2].sum()
+                )
+                for dit_index in range(args.late_dit_start, 8)
+            },
         },
         "alpha": {
             "mean_by_dit": {
