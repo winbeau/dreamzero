@@ -1,10 +1,10 @@
 # Late-step VV extrapolation and online sentinel report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
-Late-step VV extrapolation is not accepted yet. The first online safety module
+Late-step VV extrapolation is rejected for the current executor. The first online safety module
 uses the conditional action-flow sequence as a deployment-observable proxy for
 two-step linear predictability. It is implemented and tested, but a
 validation-frozen threshold fails the untouched test safety gate. Dense rerun
@@ -17,6 +17,8 @@ Implementation commits:
 - `d01f9b6`: validation calibration and trace alignment;
 - `51b25c8`: robust parsing of interleaved distributed logs;
 - `0742329`: frozen-validation threshold evaluation without test retuning.
+- `5e6f614`: train/validation/test Dense-VV alpha calibration and sentinel analysis;
+- `7b86d88`: executable joint video/action/CFG coverage accounting.
 
 All commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and the
 H200 checkout is fast-forwarded through them. The focused H200 suite passes 12
@@ -120,3 +122,52 @@ Artifacts:
   with false-sparse below 1%;
 - preserve a fixed-eight-call future-step promotion path if a predictive
   signal is found, rather than hiding recomputation inside the main speedup.
+
+## Dense-Oracle VV extrapolation gate
+
+The schema-3 Dense Oracle already stores the real VV output signature for all
+108 requests, eight DiT evaluations, 40 layers, 40 heads, conditional and
+unconditional CFG branches, and video/action query kinds. This permits an
+actual VV extrapolation test without another model run.
+
+Alpha is fitted only on the 72-request train split, independently for each
+`(dit, layer, branch, modality, head)`, then clipped to `[0, 2]`. Eligibility
+is frozen by requiring both train and validation p05 cosine >=0.999 and p95
+relative L2 <=5% in the proposed late region (DiT 5--7, layers 28--39). Test
+contains 18 untouched requests.
+
+The fitted dynamics do not follow scheduler spacing. Mean fitted alpha by DiT
+2--7 is `[0.326, 0.509, 0.130, 0.170, 0.157, 0.522]`, while the nonuniform
+scheduler formula gives `[1.077, 2.000, 1.788, 1.497, 0.556, 1.403]`. Across
+all late-region test signatures, fitted alpha is best among reuse, alpha=1,
+and scheduler alpha, but only 4.04% of signatures pass the local quality gate;
+mean cosine/L2 are 0.9803/17.07%.
+
+Validation freezes only 45 of 5,760 late signature cells (0.781%). On test,
+those selected signatures have 0.864% false extrapolation, mean cosine
+0.999862, and mean relative L2 1.481%. A previous-residual sentinel calibrated
+at relative L2 0.09933 reduces test false extrapolation to 0.745%, but still
+leaves a worst relative L2 of 5.54%.
+
+The decisive systems gate is joint executability:
+
+| Unit required to skip compute | Eligible | Fraction |
+| --- | ---: | ---: |
+| one modality/branch/head signature | 45 / 5,760 | 0.781% |
+| one branch/head with both video and action safe | 1 / 2,880 | 0.0347% |
+| one head with both modalities and both CFG branches safe | 0 / 1,440 | 0% |
+
+No full Head Attention unit can therefore be skipped while satisfying the
+frozen quality rule. Caching two full VV histories and adding extrapolation
+buffers would create memory and control overhead with zero executable compute
+saving. Runtime VV extrapolation is not implemented or included in Sparse
+Attention timing. The offline analyzer and alpha table are retained as the
+required negative ablation.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/vv_extrapolation/
+  20260831_dense_oracle_alpha_v1/
+  20260831_dense_oracle_alpha_v2/
+```
