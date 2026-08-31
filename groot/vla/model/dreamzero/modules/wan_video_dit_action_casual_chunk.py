@@ -1140,7 +1140,14 @@ class CausalWanSelfAttention(nn.Module):
             else kv_cache[1, :, :0]
         )
         if head_groups is None:
-            if history_indices.numel():
+            if history_indices.shape[1] == history_key.shape[1]:
+                # A 100% nested profile is only a permutation of the immutable
+                # Dense history.  Attention is invariant to a joint K/V
+                # permutation, while gathering it would retain another full
+                # history copy per layer and per denoise route.
+                sparse_history_key = history_key
+                sparse_history_value = history_value
+            elif history_indices.numel():
                 sparse_history_key, sparse_history_value = self._get_sparse_history_kv(
                     history_key,
                     history_value,
@@ -4488,30 +4495,38 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     if max_action_current_active
                     else None
                 )
-                updated_packed = block.forward_packed(
-                    packed_state.active_x(packed_current_video_tokens),
-                    packed_state.active_e0(packed_current_video_tokens),
-                    packed_freqs[:, :active_length],
-                    action_register_length=action_register_length,
-                    context=context,
-                    kv_cache=kv_cache[block_index],
-                    history_indices=packed_history_indices[history_keep_ratio],
-                    history_token_count=packed_history_token_count,
-                    head_groups=layer_head_groups,
-                    history_indices_by_ratio=(
-                        packed_history_indices
-                        if layer_head_groups is not None
-                        else None
-                    ),
-                    current_video_tokens_by_ratio=(
-                        layer_current_video_tokens_by_ratio
-                        if layer_head_groups is not None
-                        else None
-                    ),
-                    maximum_current_x=maximum_action_current_x,
-                    maximum_current_e0=maximum_action_current_e0,
-                    maximum_current_freqs=maximum_action_current_freqs,
-                )
+                try:
+                    updated_packed = block.forward_packed(
+                        packed_state.active_x(packed_current_video_tokens),
+                        packed_state.active_e0(packed_current_video_tokens),
+                        packed_freqs[:, :active_length],
+                        action_register_length=action_register_length,
+                        context=context,
+                        kv_cache=kv_cache[block_index],
+                        history_indices=packed_history_indices[history_keep_ratio],
+                        history_token_count=packed_history_token_count,
+                        head_groups=layer_head_groups,
+                        history_indices_by_ratio=(
+                            packed_history_indices
+                            if layer_head_groups is not None
+                            else None
+                        ),
+                        current_video_tokens_by_ratio=(
+                            layer_current_video_tokens_by_ratio
+                            if layer_head_groups is not None
+                            else None
+                        ),
+                        maximum_current_x=maximum_action_current_x,
+                        maximum_current_e0=maximum_action_current_e0,
+                        maximum_current_freqs=maximum_action_current_freqs,
+                    )
+                finally:
+                    # Fresh per-DiT routing produces fresh index tensors.  A
+                    # cache keyed by those pointers cannot hit on the next
+                    # denoise call and otherwise retains every gathered K/V
+                    # generation for the whole trajectory.
+                    if not self.anchor_sparse_reuse_denoise:
+                        block.self_attn.clear_anchor_sparse_history_cache()
                 packed_state.update_active(
                     updated_packed,
                     packed_current_video_tokens,

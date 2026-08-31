@@ -690,6 +690,32 @@ def test_packed_attention_does_not_expand_dense_history_window() -> None:
     assert torch.equal(attention._anchor_sparse_history_k, expected)
 
 
+def test_packed_full_history_reuses_dense_kv_without_gather_cache() -> None:
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    _, cache, _ = _inputs()
+    history_indices = torch.arange(cache.shape[2] - 1, -1, -1).unsqueeze(0)
+
+    attention.forward_packed(
+        torch.randn(1, 5, 8),
+        torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+        action_register_length=3,
+        kv_cache=cache,
+        history_indices=history_indices,
+        history_token_count=cache.shape[2],
+    )
+
+    assert attention._anchor_sparse_history_k is None
+    assert attention._anchor_sparse_history_v is None
+    assert attention._anchor_sparse_history_cache == {}
+
+
 def test_packed_dense_action_history_only_expands_register_attention():
     module = _load_attention_module()
     attention = module.CausalWanSelfAttention(
