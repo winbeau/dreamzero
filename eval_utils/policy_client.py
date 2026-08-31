@@ -43,6 +43,7 @@ class WebsocketClientPolicy(BasePolicy):
                 self._uri, 
                 compression=None, 
                 max_size=None,
+                proxy=None,
                 ping_interval=PING_INTERVAL_SECS,
                 ping_timeout=PING_TIMEOUT_SECS,
             )
@@ -56,6 +57,7 @@ class WebsocketClientPolicy(BasePolicy):
             self._uri, 
             compression=None, 
             max_size=None,
+            proxy=None,
             ping_interval=PING_INTERVAL_SECS,
             ping_timeout=PING_TIMEOUT_SECS,
         )
