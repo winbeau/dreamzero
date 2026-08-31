@@ -238,8 +238,9 @@ safety result, not a speed result.
 
 ## Packed-path causal proxy implementation
 
-Commit `287a54e` implements the missing deployable observation path under the
-new, deliberately incompatible schema `dreamzero-packed-m1-proxy-v1`. It does
+Commits `287a54e` and `287f8a8` implement the missing deployable observation
+path under the deliberately incompatible schema
+`dreamzero-packed-m1-proxy-v2`. It does
 not reconstruct Dense video attention or reuse the offline Oracle feature
 names. Each real DiT records only signals already available to the executor:
 
@@ -281,6 +282,39 @@ recovered after these local gates. Real proxy collection, overhead timing,
 task-disjoint retraining, and held-out quality replay are not yet claimed in
 this section; they begin only after the implementation/report commits are
 pushed and the H200 checkout is fast-forwarded through the existing remote.
+
+### H200 proxy smoke and route-confidence calibration
+
+The first two-request H200 smoke on commit `287a54e` passed the structural
+gate on both GPUs 2 and 3: every request executed 16 scheduler steps and eight
+real DiT calls, produced eight valid `40 x 40` observations, retained the
+expected first-step missing history, and had finite later history. Target
+request latency was 3.63--3.72 seconds in the independent one-GPU collector,
+peak allocated memory was 61.62 GiB, and each compressed observation artifact
+was about 188 KiB.
+
+The smoke also exposed a semantic failure before the first full collection
+was accepted. Directly softmaxing raw cosine Router scores yielded normalized
+entropy near `0.99996` and maximum mass near `0.0012` on both requests, so the
+two proposed concentration features were almost constant despite non-trivial
+support turnover (`0.40--1.00`). The partial v1 collection was stopped and
+retained as superseded evidence rather than merged into training data.
+
+Commit `287f8a8` standardizes Router scores independently within each frame
+before computing entropy and maximum mass, while leaving support selection and
+turnover on the original scores. Because this changes feature semantics, the
+artifact/bundle schema is bumped to `dreamzero-packed-m1-proxy-v2`; the loader
+rejects all v1 artifacts. The revised route metric has explicit uniform and
+peaked-distribution tests, and the complete local gate remains 32/32 Torch plus
+30/30 CPU tests with Ruff and `git diff --check` passing.
+
+Superseded pilot artifacts:
+
+```text
+/data/chenjiayu/wenbiao_zhao/dreamzero-anchor-sparse-artifacts/
+  dynamic_m1_m2/m1_proxy/20260831_proxy_v1_smoke_287a54e/
+  dynamic_m1_m2/m1_proxy/20260831_proxy_v1_full_287a54e/
+```
 
 ## Candidate comparison
 
