@@ -128,6 +128,25 @@ def test_low_confidence_route_falls_back_dense():
     assert metrics["mass_p05_at_least_0_9_rate"] == 1.0
 
 
+def test_m1_features_exclude_future_action_and_offline_trajectory_metadata():
+    from benchmarks.train_dynamic_m1_classifier import FEATURE_COLUMNS
+    from benchmarks.train_request_level_m1_gate import REQUEST_FEATURE_COLUMNS
+
+    forbidden = {
+        "trajectory_stage_code",
+        "trajectory_fraction",
+        "trajectory_length_log",
+        "length_bucket_code",
+        "instruction_position",
+        "action_l2",
+        "action_std",
+        "action_temporal_delta_l2",
+    }
+
+    assert forbidden.isdisjoint(FEATURE_COLUMNS)
+    assert forbidden.isdisjoint(REQUEST_FEATURE_COLUMNS)
+
+
 def test_small_task_disjoint_training_pipeline(tmp_path):
     rows = []
     split_episodes = {"train": (0, 1), "val": (2,), "test": (3,)}

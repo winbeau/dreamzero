@@ -4,14 +4,18 @@ Date: 2026-08-30
 
 ## Status
 
-The leakage-safe statistical M1 gate is complete. A calibrated,
-cost-sensitive HistGradientBoosting classifier is selected on the validation
-split and passes the untouched test-set false-sparse, mass-retention,
-macro-F1, confidence-fallback, and 200-repeat task-bootstrap requirements.
+The earlier v2 statistical result is now classified as a contaminated
+ablation, not a deployment-safe M1 result. A feature audit found that it used
+ground-truth DROID action magnitude/variation and offline trajectory-stage,
+trajectory-length, and instruction-position annotations. Those values are
+available in the Oracle dataset but are not available to the online router at
+decision time. The old bundle must therefore not support a paper Claim.
 
-The complete M1 phase remains open until the selected policy is replayed
-through DreamZero and achieves final action cosine >=0.999. Local Oracle
-attention-output metrics are not substituted for that model-level gate.
+The training and request-gate feature contracts now exclude those fields.
+Retraining and recalibration on the reduced deployment-observable feature set
+are pending, so the M1 phase is open. The prior v2 metrics below are retained
+only to document the superseded ablation and must be replaced before M1 can
+pass.
 
 Implementation commits:
 
@@ -20,11 +24,13 @@ Implementation commits:
 - `3e8e4fb`: persisted deployment prior table and bundle metadata;
 - `2b8d64d`: calibrated fallback and minimum-macro-F1 model selection.
 - `c577622`: portable runtime `RoutePolicy` type for direct bundle loading.
+- `4ce658e`: request-level final-action safety gate from first-two-DiT state.
+- `df04445`: distinguish request-gate safety from performance acceptance.
 
 All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and
 the H200 checkout was fast-forwarded through them.
 
-The original v2 bundle encoded `RoutePolicy` under the training script's
+The superseded v2 bundle encoded `RoutePolicy` under the training script's
 `__main__` module and therefore could not be loaded by a clean deployment
 process. It has been losslessly migrated to schema v2 and verified in a fresh
 Python process at:
@@ -35,7 +41,7 @@ Python process at:
     selected_m1_bundle_v2_portable.joblib
 ```
 
-The migrated artifact retains the selected estimator, confidence calibrator,
+The migrated artifact retains the former estimator, confidence calibrator,
 threshold `0.9598636879969709`, zero mechanical bucket promotion, and all
 12,800 `(t,l,h)` train-only prior rows.
 
@@ -56,13 +62,20 @@ conservatively maximized across video/action queries and conditional/
 unconditional CFG branches. Under-predicting the Oracle bucket receives 20x
 cost in the cost-sensitive candidate.
 
-## Deployment-safe features
+## Deployment-feature audit
 
-M1 uses timestep position, scheduler value, layer/head position, trajectory and
-instruction metadata, action/state magnitudes, historical support turnover,
-historical attention concentration/entropy, historical Qa-to-Kv versus
-Qv-to-Kv correlation, the previous two VV changes, VV acceleration, and
-leave-one-episode-out train priors for `(t,l,h)`.
+The corrected M1 feature set uses timestep position, scheduler value,
+layer/head position, current robot-state magnitudes, historical support
+turnover, historical attention concentration/entropy, historical Qa-to-Kv
+versus Qv-to-Kv correlation, the previous two VV changes, VV acceleration,
+and leave-one-episode-out train priors for `(t,l,h)`.
+
+The following Oracle-only request fields are now forbidden as model inputs:
+
+- ground-truth action L2, standard deviation, and temporal-delta L2;
+- offline trajectory stage and fraction;
+- complete trajectory length and length bucket;
+- offline instruction-position annotation.
 
 Current-call Dense attention metrics are explicitly forbidden. In particular,
 current support turnover, current VV change, current entropy, current maximum
@@ -72,6 +85,9 @@ the first two DiT evaluations and is handled by the fitted imputer; it is not
 filled with current Oracle evidence.
 
 ## Candidate comparison
+
+The following numbers describe the superseded feature-contaminated v2 run.
+They are preserved for reproducibility, not accepted as deployment evidence.
 
 The original GMM and supervised logistic control were measured in the first
 complete run. The calibrated v2 run re-evaluated the three statistically
@@ -92,7 +108,7 @@ macro-F1, subject to all hard gates. This prevents the unsafe logistic model
 from winning only because every prediction is mechanically promoted without a
 real uncertainty fallback.
 
-## Selected-policy test gates
+## Superseded v2 test gates
 
 | Metric | Result | Gate | Status |
 | --- | ---: | ---: | --- |
@@ -113,7 +129,7 @@ The 200-repeat source-episode bootstrap gives:
 | mean keep ratio | 84.334% | [84.160%, 84.523%] |
 | p05 mass >=0.90 rate | 99.980% | [99.947%, 99.997%] |
 
-## Route semantics
+## Superseded route semantics
 
 The deployment output is more than one budget label. It maps each head state
 to `critical`, `stable`, `slow-changing`, `predictable-late`, or `uncertain`,
@@ -125,7 +141,7 @@ to Dense. Only 36 states satisfy the deliberately strict predictable-late
 rule; this category will not be enlarged until VV extrapolation and sentinel
 experiments provide direct evidence.
 
-## Artifact
+## Superseded artifact
 
 The model bundle, prior table, per-candidate metrics, and summary are outside
 Git at:
@@ -141,6 +157,10 @@ to Git.
 
 ## Remaining M1 work
 
+- retrain every candidate after removing future-action and offline trajectory
+  annotations;
+- regenerate the request-level gate from the corrected per-head bundle without
+  trajectory-stage/fraction/length features;
 - integrate the selected bundle into timestep/layer/head-group budget routing;
 - measure actual route/classifier overhead on GPU;
 - replay held-out requests through the real DreamZero policy;

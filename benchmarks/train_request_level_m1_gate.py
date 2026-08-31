@@ -46,11 +46,9 @@ STAGE_CODES = {"early": 0.0, "middle": 0.5, "late": 1.0}
 # These are all observable immediately after the first two mandatory real DiT
 # evaluations.  The gate reads the M1 state for DiT index 2, whose historical
 # features come from DiT indices 0 and 1.  Current-call Dense attention
-# statistics, later DiT state, and final actions are deliberately absent.
+# statistics, later DiT state, final actions, and offline trajectory-stage or
+# trajectory-length annotations are deliberately absent.
 REQUEST_FEATURE_COLUMNS = (
-    "trajectory_stage_code",
-    "trajectory_fraction",
-    "trajectory_length_log",
     "state_l2",
     "state_abs_mean",
     "m1_route_keep_mean",
