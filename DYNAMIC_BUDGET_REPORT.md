@@ -41,6 +41,8 @@ Implementation commits:
 - `72a4c4d`: build fixed timestep-aware packed-segment policies.
 - `22a8a3d`: risk-controlled calibrated M1 routing into four Q/K-coupled Head
   groups with downstream unknown/unsafe Dense fallback.
+- `fa1d945`: causal online M1 feature state with first-two-DiT, missing-history,
+  and observer-schema Dense fallback.
 
 All listed commits are pushed to
 `origin/codex/dreamzero-anchor-sparse-opt`, and the H200 checkout is
@@ -212,9 +214,10 @@ policy per request. It rounds each Head budget upward into `[25, 50, 75,
 produces no more than four execution shapes per timestep/layer. This is the
 requested Q compression path; the 25 action/state tokens remain Dense.
 
-Three fallback causes remain distinct in runtime diagnostics:
+Four fallback causes remain distinct in runtime diagnostics:
 
 - classifier confidence below its frozen threshold;
+- missing or mismatched online feature-observer provenance;
 - downstream group evidence that violates explicit action/video thresholds;
 - no task-disjoint downstream evidence for that Head cell.
 
@@ -227,8 +230,12 @@ evidence.
 The companion evaluator reruns validation and test without retuning, rounds
 Oracle truth upward to the same executor buckets, and reports post-grouping
 false-sparse rate, macro-F1, mass retention, calibration, group count,
-fallback composition, and 200-repeat episode bootstrap. Twenty focused and
-existing M1 tests pass together with Ruff, compilation, and diff checks.
+fallback composition, and 200-repeat episode bootstrap. The causal state added
+in `fa1d945` preserves the exact eight-real-DiT order and refuses to use the
+current v3 bundle sparsely because that artifact does not declare a compatible
+online observation schema. Twenty-seven focused and existing online-state,
+M1, and dynamic-budget tests pass together with Ruff, compilation, and diff
+checks.
 
 There is deliberately no new speed or quality row here yet. H200 and its
 video-enabled downstream artifacts were unreachable, so the calibrated risk
