@@ -1,6 +1,6 @@
 # Dynamic attention Oracle report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
@@ -25,6 +25,8 @@ Phase implementation commits:
 - `329de40`, `839c164`: full dataset aggregation and compact M1 table;
 - `e0adbf3`, `9f5c60b`: audited condition sidecar recovery;
 - `dc7fb2c`, `fa9ed4d`: reproducible paper-statistics summary.
+- `7827c5c`: research-gated final-video latent return and paired downstream
+  action/video sensitivity recording.
 
 All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and
 the H200 checkout was fast-forwarded through them.
@@ -289,19 +291,41 @@ Artifacts:
   dynamic_m1_m2/downstream_oracle/20260831_validation18/
 ```
 
+### Final-video downstream metric path
+
+Commit `7827c5c` closes the instrumentation gap between local attention-output
+error and final generated-video error. When and only when the server is
+launched with the downstream research override enabled, a target request may
+return both the normal action and the final `video_pred` latent. The normal
+service response remains action-only.
+
+The single-candidate and resumable grid runners can now record paired final
+video cosine, relative L2, maximum absolute difference, latent shape, stage
+means, and the worst request while retaining the existing action metrics. Raw
+video latents are not written to JSON, avoiding artifact inflation. Resume
+rejects action-only/video-metric schema mixing. With Dense-history snapshots,
+one baseline latent is compared with every candidate restored from the same
+pre-target state.
+
+Local gates for this change are 21 passing benchmark/client tests, Python
+compilation, and `git diff --check`. The GPU-dependent wrapper test and the
+real-checkpoint scale-one action/video exactness gate remain pending because
+both configured H200 SSH routes were unavailable at the time of this commit.
+
 ## Exactness and tests
 
 Observer-enabled Dense execution preserves video output, action output, and
 returned KV cache exactly in unit tests and the real checkpoint gate. The
 latest relevant H200 test groups pass, including real schema aggregation,
 condition recovery, task-disjoint M1 table construction, and packed-state
-primitives.
+primitives. This statement predates the new WebSocket video-return path; that
+path is not considered exact until its pending H200 gate passes.
 
 ## Remaining Oracle work
 
 - expand the controlled downstream intervention from this pilot to a
-  task-disjoint `(timestep, layer, shared-head-group, query-type)` scan and add
-  final-video sensitivity;
+  task-disjoint `(timestep, layer, shared-head-group, query-type)` scan and
+  collect the now-instrumented final-video sensitivity;
 - replay the calibrated M1 policy through the real model and require final
   action cosine >=0.999;
 - save worst requests and connect classifier false-sparse events to downstream
