@@ -914,3 +914,51 @@ dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/
   checkpoint_none_both_gpu01_bd28485/
   tables/
 ```
+
+## Runtime axis-separation pilot
+
+The first online M1 replay coupled each Head's current Q shape to its
+historical K/V budget.  Commits `640f001` and `117d08d` added a layer-shared
+current-token bucket so Head class can control only historical K/V.  The
+following task-aligned pilot uses the same three measured validation requests,
+the same Dense artifact, 16 scheduler steps, and eight real DiT evaluations per
+inference.  These rows are diagnostic because downstream Head-risk coverage is
+still incomplete and the online M1 rows deliberately disable that gate.
+
+| Policy | Paired E2E speedup | Faster | Action cosine mean/min | Action rel-L2 mean/max |
+| --- | ---: | ---: | ---: | ---: |
+| M1 Head Q/K coupled | 0.841x | 1/3 | 0.98096 / 0.95802 | 17.00% / 29.16% |
+| M1 Head K + shared Q75 | 0.929x | 1/3 | 0.98251 / 0.95277 | 15.53% / 32.82% |
+| fixed K100 + Q75, radius3/every5 | 1.351x | 3/3 | 0.98287 / 0.95152 | 15.28% / 33.55% |
+| fixed K75 + Q100 | 1.235x | 3/3 | 0.99865 / 0.99712 | 5.41% / 9.30% |
+| M1 Head K + Q100 | 0.784x | 1/3 | 0.99746 / 0.99365 | 6.89% / 11.63% |
+
+The axis separation changes the diagnosis.  Keeping every historical K/V token
+does not rescue Q75: the worst request still reaches 33.55% action relative
+L2.  Keeping current Q/K/V/O and FFN Dense while uniformly reducing history to
+75% is much safer, but remains outside the 0.999 cosine and 5% relative-L2
+gates.  Therefore skipped current-token hidden-state updates are the dominant
+error source, while historical K sparsity is a smaller but still measurable
+source.
+
+The unguarded M1 Head-K policy is worse than the shared K75 policy and is also
+slower than Dense.  Its 3--4 Head groups add projection and varlen launch
+overhead, and the proxy classifier's missing downstream coverage allows a few
+action-critical Heads to receive sparse history.  Per-Head execution is now a
+negative ablation, not the main acceleration path.  The next runtime schedule
+will use a small number of timestep/layer shared shapes and require calibrated
+downstream coverage or Dense fallback before any Head-specific reduction.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
+  sparse_sharedq75_validation4.json
+  comparison_sharedq75_validation3.json
+  sparse_k100_q75_p3e5_a4427db_droid_validation4.json
+  comparison_k100_q75_p3e5_a4427db_droid_validation3.json
+  sparse_k75_q100_a4427db_droid_validation4.json
+  comparison_k75_q100_a4427db_droid_validation3.json
+  sparse_dynamic_headk_q100_a4427db_droid_validation4.json
+  comparison_dynamic_headk_q100_a4427db_droid_validation3.json
+```

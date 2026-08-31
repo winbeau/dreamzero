@@ -342,3 +342,50 @@ same intervening layers.
 Artifact:
 
 `dynamic_m1_m2/dynamic_budgets/20260831_max_action_current/`
+
+## Full-history zero-copy and bounded gathered-KV lifetime
+
+The K100/Q75 isolation initially failed on the fourth trajectory inference:
+the single-Head-group Packed path gathered and retained a second complete
+history K/V tensor for every layer and every fresh denoise route.  GPU 5 reached
+143.75 GiB and the next 74 MiB allocation failed, while the Dense service for
+the same history remained near 67.2 GiB.  This was an executor retention bug,
+not an intrinsic K100 memory requirement.
+
+Commit `a4427db` makes a 100% nested history profile reuse the immutable Dense
+KV views directly.  It also clears gathered sparse history immediately after a
+Packed layer when `reuse_denoise=False`, including exception unwinding, because
+fresh route-index pointers cannot produce a cache hit on the next real DiT.
+The focused H200 suite passes 64/64 tests.  The corrected four-plan real-DROID
+replay completes without OOM and settles at approximately 67.2 GiB on each of
+GPUs 5 and 6 after repeated runs.
+
+With the memory artifact removed, the executor-axis pilot is:
+
+| Historical K/V | Current Q/FFN | Head grouping | E2E speedup | Action cosine mean/min | Action rel-L2 mean/max |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 100% | 75% | one shared shape | 1.351x | 0.98287 / 0.95152 | 15.28% / 33.55% |
+| 75% | 100% | one shared shape | 1.235x | 0.99865 / 0.99712 | 5.41% / 9.30% |
+| M1 dynamic | 100% | 3--4 Head groups | 0.784x | 0.99746 / 0.99365 | 6.89% / 11.63% |
+
+All rows execute the required eight DiTs.  Current-token packing supplies the
+larger speedup but causes the dominant quality loss.  Historical-only sparsity
+is substantially safer, yet its achievable attention reduction is too small
+to meet the main speed target, and per-Head kernels erase even that benefit.
+Consequently the next Packed-M2 revision will keep a small set of shared
+timestep/layer shapes, restore Dense at risk/fallback cells, and treat Head
+classification as a budget promotion signal rather than a separate kernel for
+every predicted class.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/runtime/20260831_dynamic_m1_d163fff_pilot/
+  sparse_k100_q75_p3e5_a4427db_server.log
+  sparse_k100_q75_p3e5_a4427db_droid_validation4.json
+  comparison_k100_q75_p3e5_a4427db_droid_validation3.json
+  sparse_k75_q100_a4427db_droid_validation4.json
+  comparison_k75_q100_a4427db_droid_validation3.json
+  sparse_dynamic_headk_q100_a4427db_droid_validation4.json
+  comparison_dynamic_headk_q100_a4427db_droid_validation3.json
+```
