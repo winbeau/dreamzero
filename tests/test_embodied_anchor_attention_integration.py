@@ -294,6 +294,45 @@ def test_equal_budget_head_groups_match_single_packed_attention_call():
     assert torch.allclose(grouped, single, atol=1e-6, rtol=1e-6)
 
 
+def test_packed_head_groups_compress_current_qkv_but_keep_registers_dense():
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    _, cache, _ = _inputs()
+    packed_x = torch.randn(1, 5, 8)
+    history_indices = torch.tensor([[1, 3, 5, 7]])
+    attention_shapes = []
+    hook = attention.attn.register_forward_pre_hook(
+        lambda _module, inputs: attention_shapes.append(
+            (inputs[0].shape[1], inputs[1].shape[1], inputs[0].shape[2])
+        )
+    )
+    try:
+        output = attention.forward_packed(
+            packed_x,
+            torch.ones((1, 5, 1, 2), dtype=torch.complex128),
+            action_register_length=3,
+            kv_cache=cache,
+            history_indices=history_indices,
+            history_token_count=cache.shape[2],
+            head_groups=(((0,), 1.0, None), ((1,), 0.5, 0.5)),
+            history_indices_by_ratio={0.5: history_indices},
+            current_video_tokens_by_ratio={0.5: 1},
+        )
+    finally:
+        hook.remove()
+
+    assert output.shape == packed_x.shape
+    # The sparse group sees all three leading action/state registers plus one
+    # video token as queries and current K/V.
+    assert attention_shapes == [(5, 13, 1), (4, 8, 1)]
+
+
 def test_packed_attention_does_not_expand_dense_history_window() -> None:
     module = _load_attention_module()
     attention = module.CausalWanSelfAttention(
@@ -762,8 +801,8 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     )
     assert model._packed_budget_ratios_for_layer(1) == (0.20, 0.25)
     assert model._packed_head_groups_for_layer(1) == (
-        ((0,), 1.0),
-        ((1,), 0.20),
+        ((0,), 1.0, None),
+        ((1,), 0.20, None),
     )
     model.set_dynamic_sparse_force_dense(True)
     assert model._packed_budget_ratios_for_layer(1) == (1.0, 1.0)

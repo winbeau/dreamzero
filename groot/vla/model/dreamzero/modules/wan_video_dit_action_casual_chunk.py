@@ -341,6 +341,9 @@ class CausalWanSelfAttention(nn.Module):
         self._packed_head_index_cache: dict[
             tuple[tuple[int, ...], str, int | None], torch.Tensor
         ] = {}
+        self._packed_query_position_cache: dict[
+            tuple[int, int, int, str, int | None], torch.Tensor
+        ] = {}
         # layers
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -420,6 +423,38 @@ class CausalWanSelfAttention(nn.Module):
             self._packed_head_index_cache[cache_key] = cached
         return cached
 
+    def _packed_query_positions(
+        self,
+        *,
+        video_tokens: int,
+        sequence: int,
+        action_register_length: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        maximum_video_tokens = sequence - action_register_length
+        if not 0 <= video_tokens <= maximum_video_tokens:
+            raise ValueError(
+                "Grouped current-query tokens exceed the active packed video prefix"
+            )
+        cache_key = (
+            video_tokens,
+            sequence,
+            action_register_length,
+            device.type,
+            device.index,
+        )
+        cached = self._packed_query_position_cache.get(cache_key)
+        if cached is None:
+            # PackedMiddleState places the Dense action/state registers first,
+            # followed by the nested current-video anchor prefix.
+            cached = torch.arange(
+                action_register_length + video_tokens,
+                device=device,
+                dtype=torch.long,
+            )
+            self._packed_query_position_cache[cache_key] = cached
+        return cached
+
     def forward_packed(
         self,
         x: torch.Tensor,
@@ -429,8 +464,9 @@ class CausalWanSelfAttention(nn.Module):
         kv_cache: torch.Tensor,
         history_indices: torch.Tensor,
         history_token_count: int,
-        head_groups: tuple[tuple[tuple[int, ...], float], ...] | None = None,
+        head_groups: tuple[tuple[Any, ...], ...] | None = None,
         history_indices_by_ratio: dict[float, torch.Tensor] | None = None,
+        current_video_tokens_by_ratio: dict[float, int] | None = None,
     ) -> torch.Tensor:
         """Run Q/K/V/O only on packed current tokens plus Dense registers.
 
@@ -492,13 +528,31 @@ class CausalWanSelfAttention(nn.Module):
                 raise ValueError(
                     "Grouped packed attention requires history indices by ratio"
                 )
+            if any(len(group) not in (2, 3) for group in head_groups):
+                raise ValueError(
+                    "Packed head groups require heads, history ratio, and optional current ratio"
+                )
+            normalized_head_groups = tuple(
+                (
+                    group[0],
+                    group[1],
+                    group[2] if len(group) == 3 else None,
+                )
+                for group in head_groups
+            )
             flattened_heads = sorted(
-                head for group_heads, _ in head_groups for head in group_heads
+                head
+                for group_heads, _, _ in normalized_head_groups
+                for head in group_heads
             )
             if flattened_heads != list(range(self.num_heads)):
                 raise ValueError("Packed head groups must partition every attention head")
             output = value.new_zeros(value.shape)
-            for group_heads, history_keep_ratio in head_groups:
+            for (
+                group_heads,
+                history_keep_ratio,
+                current_keep_ratio,
+            ) in normalized_head_groups:
                 head_indices = self._packed_head_indices(group_heads, query.device)
                 if history_keep_ratio == 1.0:
                     group_history_key = history_key
@@ -519,24 +573,66 @@ class CausalWanSelfAttention(nn.Module):
                             group_history_indices,
                         )
                     )
+                if current_keep_ratio is None:
+                    query_positions = None
+                    group_query = query.index_select(2, head_indices)
+                    group_current_key = key.index_select(2, head_indices)
+                    group_current_value = value.index_select(2, head_indices)
+                else:
+                    if current_video_tokens_by_ratio is None:
+                        raise ValueError(
+                            "Grouped current Q/K/V requires video-token counts by ratio"
+                        )
+                    group_video_tokens = current_video_tokens_by_ratio.get(
+                        current_keep_ratio
+                    )
+                    if group_video_tokens is None:
+                        raise ValueError(
+                            "Missing packed current-token count for head-group ratio "
+                            f"{current_keep_ratio}"
+                        )
+                    query_positions = self._packed_query_positions(
+                        video_tokens=group_video_tokens,
+                        sequence=sequence,
+                        action_register_length=action_register_length,
+                        device=query.device,
+                    )
+                    group_query = query.index_select(1, query_positions).index_select(
+                        2, head_indices
+                    )
+                    group_current_key = key.index_select(
+                        1, query_positions
+                    ).index_select(2, head_indices)
+                    group_current_value = value.index_select(
+                        1, query_positions
+                    ).index_select(2, head_indices)
                 group_output = self.attn(
-                    query.index_select(2, head_indices),
+                    group_query,
                     torch.cat(
                         (
                             group_history_key.index_select(2, head_indices),
-                            key.index_select(2, head_indices),
+                            group_current_key,
                         ),
                         dim=1,
                     ),
                     torch.cat(
                         (
                             group_history_value.index_select(2, head_indices),
-                            value.index_select(2, head_indices),
+                            group_current_value,
                         ),
                         dim=1,
                     ),
                 )
-                output = output.index_copy(2, head_indices, group_output)
+                if query_positions is None:
+                    output = output.index_copy(2, head_indices, group_output)
+                else:
+                    selected_output = output.index_select(1, query_positions)
+                    selected_output = selected_output.index_copy(
+                        2, head_indices, group_output
+                    )
+                    output = output.index_copy(
+                        1, query_positions, selected_output
+                    )
         return self.o(output.flatten(2))
 
     def _visualize_attention_mask(self, total_len, first_image_len, image_blocks_len, 
@@ -1752,8 +1848,11 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache: torch.Tensor,
         history_indices: torch.Tensor,
         history_token_count: int,
-        head_groups: tuple[tuple[tuple[int, ...], float], ...] | None = None,
+        head_groups: (
+            tuple[tuple[tuple[int, ...], float, float | None], ...] | None
+        ) = None,
         history_indices_by_ratio: dict[float, torch.Tensor] | None = None,
+        current_video_tokens_by_ratio: dict[float, int] | None = None,
     ) -> torch.Tensor:
         """Keep a packed current-token state through one complete DiT block."""
 
@@ -1770,6 +1869,7 @@ class CausalWanAttentionBlock(nn.Module):
             history_token_count=history_token_count,
             head_groups=head_groups,
             history_indices_by_ratio=history_indices_by_ratio,
+            current_video_tokens_by_ratio=current_video_tokens_by_ratio,
         )
         x = x + y * modulation[2].squeeze(2)
         x = x + self.cross_attn(self.norm3(x), context)
@@ -2517,7 +2617,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     def _packed_head_groups_for_layer(
         self,
         layer_index: int,
-    ) -> tuple[tuple[tuple[int, ...], float], ...] | None:
+    ) -> tuple[tuple[tuple[int, ...], float, float | None], ...] | None:
         if self._dynamic_sparse_force_dense:
             return None
         table = self._dynamic_packed_head_group_budget_table
@@ -2527,7 +2627,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             raise RuntimeError(
                 "Dynamic packed head-group table is active before the real DiT index was set"
             )
-        return table.groups_for_layer(self._dynamic_sparse_dit_index, layer_index)
+        return table.execution_groups_for_layer(
+            self._dynamic_sparse_dit_index,
+            layer_index,
+        )
 
     def get_last_anchor_route(self) -> AnchorRoute | None:
         """Return the last recorded layer-0 route for heatmap diagnostics."""
@@ -3048,13 +3151,32 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         )
         packed_layer_ratios: dict[int, tuple[float, float]] = {}
         packed_layer_head_groups: dict[
-            int, tuple[tuple[tuple[int, ...], float], ...] | None
+            int,
+            tuple[tuple[tuple[int, ...], float, float | None], ...] | None,
         ] = {}
         if packed_context_is_eligible:
             packed_layer_ratios = {
                 layer_index: self._packed_budget_ratios_for_layer(layer_index)
                 for layer_index in middle_layer_indices
             }
+            packed_layer_head_groups = {
+                layer_index: self._packed_head_groups_for_layer(layer_index)
+                for layer_index in middle_layer_indices
+            }
+            for layer_index, groups in packed_layer_head_groups.items():
+                if groups is None:
+                    continue
+                grouped_current_ratios = tuple(
+                    current_ratio
+                    for _, _, current_ratio in groups
+                    if current_ratio is not None
+                )
+                if grouped_current_ratios:
+                    history_ratio, current_ratio = packed_layer_ratios[layer_index]
+                    packed_layer_ratios[layer_index] = (
+                        history_ratio,
+                        max(current_ratio, *grouped_current_ratios),
+                    )
             if self.anchor_sparse_propagate_radius > 0:
                 stable_ratios = stabilize_current_budgets_for_segments(
                     tuple(
@@ -3066,16 +3188,16 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 packed_layer_ratios = dict(
                     zip(middle_layer_indices, stable_ratios, strict=True)
                 )
-            packed_layer_head_groups = {
-                layer_index: self._packed_head_groups_for_layer(layer_index)
-                for layer_index in middle_layer_indices
-            }
         packed_has_sparse_layer = any(
             history_ratio < 1.0 or current_ratio < 1.0
             for history_ratio, current_ratio in packed_layer_ratios.values()
         ) or any(
             groups is not None
-            and any(history_ratio < 1.0 for _, history_ratio in groups)
+            and any(
+                history_ratio < 1.0
+                or (current_ratio is not None and current_ratio < 1.0)
+                for _, history_ratio, current_ratio in groups
+            )
             for groups in packed_layer_head_groups.values()
         )
         packed_middle_active = (
@@ -3099,7 +3221,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     history_ratio
                     for groups in packed_layer_head_groups.values()
                     if groups is not None
-                    for _, history_ratio in groups
+                    for _, history_ratio, _ in groups
                 }
             )
         )
@@ -3174,6 +3296,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     block_index
                 ]
                 layer_head_groups = packed_layer_head_groups.get(block_index)
+                layer_current_video_tokens_by_ratio = (
+                    {
+                        ratio: packed_current_profile.video_tokens_for_ratio(ratio)
+                        for _, _, ratio in layer_head_groups
+                        if ratio is not None
+                    }
+                    if layer_head_groups is not None
+                    else None
+                )
                 packed_current_video_tokens = (
                     packed_current_profile.video_tokens_for_ratio(current_keep_ratio)
                 )
@@ -3190,6 +3321,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     head_groups=layer_head_groups,
                     history_indices_by_ratio=(
                         packed_history_indices
+                        if layer_head_groups is not None
+                        else None
+                    ),
+                    current_video_tokens_by_ratio=(
+                        layer_current_video_tokens_by_ratio
                         if layer_head_groups is not None
                         else None
                     ),

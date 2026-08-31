@@ -209,16 +209,19 @@ def _canonical_budget_cube(
 
 @dataclass(frozen=True)
 class DynamicPackedHeadGroupBudgetTable:
-    """Per-head historical-KV budgets collapsed to a few runtime groups.
+    """Per-head historical-KV and current Q/K/V budgets in shared groups.
 
-    Current-query and packed-compute length remains controlled by
-    :class:`DynamicPackedBudgetTable`. At each ``(timestep, layer)`` heads with
-    the same ratio are executed together, so critical or confidence-fallback
-    heads can retain more context without forcing every head to the same
-    budget. Every cell is restricted to at most four distinct ratios.
+    The optional current-token cube gives each head a nested current-video
+    prefix while action/state registers remain Dense. Heads with the same
+    ``(history, current)`` pair execute in one fixed-shape attention call. The
+    outer Packed-M2 table still controls the shared hidden-state/FFN length.
+    Every cell is restricted to at most four distinct execution groups.
     """
 
     head_keep_ratios: tuple[tuple[tuple[float, ...], ...], ...]
+    head_current_keep_ratios: (
+        tuple[tuple[tuple[float, ...], ...], ...] | None
+    ) = None
     name: str = "dynamic_head_groups"
 
     def __post_init__(self) -> None:
@@ -226,11 +229,37 @@ class DynamicPackedHeadGroupBudgetTable:
             self.head_keep_ratios,
             field_name="head_keep_ratios",
         )
-        if any(len(set(heads)) > 4 for row in cube for heads in row):
+        current_cube = None
+        if self.head_current_keep_ratios is not None:
+            current_cube = _canonical_budget_cube(
+                self.head_current_keep_ratios,
+                field_name="head_current_keep_ratios",
+            )
+            if (
+                len(current_cube) != len(cube)
+                or len(current_cube[0]) != len(cube[0])
+                or len(current_cube[0][0]) != len(cube[0][0])
+            ):
+                raise ValueError(
+                    "Historical and current head-group budget cubes must align"
+                )
+        execution_group_counts = []
+        for dit_index, row in enumerate(cube):
+            for layer_index, heads in enumerate(row):
+                current_heads = (
+                    current_cube[dit_index][layer_index]
+                    if current_cube is not None
+                    else (None,) * len(heads)
+                )
+                execution_group_counts.append(
+                    len(set(zip(heads, current_heads, strict=True)))
+                )
+        if any(count > 4 for count in execution_group_counts):
             raise ValueError(
-                "Each timestep/layer may use at most four shared head-group ratios"
+                "Each timestep/layer may use at most four shared head groups"
             )
         object.__setattr__(self, "head_keep_ratios", cube)
+        object.__setattr__(self, "head_current_keep_ratios", current_cube)
 
     @property
     def num_dit_steps(self) -> int:
@@ -243,9 +272,9 @@ class DynamicPackedHeadGroupBudgetTable:
     @property
     def num_groups(self) -> int:
         return max(
-            len(set(heads))
-            for row in self.head_keep_ratios
-            for heads in row
+            len(self.execution_groups_for_layer(dit_index, layer_index))
+            for dit_index in range(self.num_dit_steps)
+            for layer_index in range(self.num_layers)
         )
 
     @property
@@ -259,6 +288,21 @@ class DynamicPackedHeadGroupBudgetTable:
                 {
                     ratio
                     for row in self.head_keep_ratios
+                    for heads in row
+                    for ratio in heads
+                }
+            )
+        )
+
+    @property
+    def group_current_ratios(self) -> tuple[float, ...]:
+        if self.head_current_keep_ratios is None:
+            return ()
+        return tuple(
+            sorted(
+                {
+                    ratio
+                    for row in self.head_current_keep_ratios
                     for heads in row
                     for ratio in heads
                 }
@@ -285,6 +329,33 @@ class DynamicPackedHeadGroupBudgetTable:
             for ratio in sorted(groups, reverse=True)
         )
 
+    def execution_groups_for_layer(
+        self,
+        dit_index: int,
+        layer_index: int,
+    ) -> tuple[tuple[tuple[int, ...], float, float | None], ...]:
+        history = self.ratios(dit_index, layer_index)
+        current = (
+            self.head_current_keep_ratios[dit_index][layer_index]
+            if self.head_current_keep_ratios is not None
+            else (None,) * len(history)
+        )
+        groups: dict[tuple[float, float | None], list[int]] = {}
+        for head_index, pair in enumerate(zip(history, current, strict=True)):
+            groups.setdefault(pair, []).append(head_index)
+        return tuple(
+            (tuple(groups[pair]), pair[0], pair[1])
+            for pair in sorted(
+                groups,
+                key=lambda item: (
+                    item[1] is not None,
+                    -1.0 if item[1] is None else item[1],
+                    item[0],
+                ),
+                reverse=True,
+            )
+        )
+
     @classmethod
     def from_dict(
         cls,
@@ -292,6 +363,7 @@ class DynamicPackedHeadGroupBudgetTable:
     ) -> "DynamicPackedHeadGroupBudgetTable":
         return cls(
             head_keep_ratios=payload["head_keep_ratios"],  # type: ignore[arg-type]
+            head_current_keep_ratios=payload.get("head_current_keep_ratios"),  # type: ignore[arg-type]
             name=str(payload.get("name", "dynamic_head_groups")),
         )
 
@@ -304,7 +376,7 @@ class DynamicPackedHeadGroupBudgetTable:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "name": self.name,
             "budget_buckets": list(BUDGET_BUCKETS),
             "num_dit_steps": self.num_dit_steps,
@@ -312,8 +384,19 @@ class DynamicPackedHeadGroupBudgetTable:
             "num_groups": self.num_groups,
             "num_heads": self.num_heads,
             "group_ratios": list(self.group_ratios),
+            "group_current_ratios": list(self.group_current_ratios),
             "head_keep_ratios": [
                 [list(heads) for heads in row]
                 for row in self.head_keep_ratios
             ],
+            **(
+                {
+                    "head_current_keep_ratios": [
+                        [list(heads) for heads in row]
+                        for row in self.head_current_keep_ratios
+                    ]
+                }
+                if self.head_current_keep_ratios is not None
+                else {}
+            ),
         }

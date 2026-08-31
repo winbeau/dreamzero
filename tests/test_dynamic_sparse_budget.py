@@ -108,3 +108,29 @@ def test_dynamic_head_group_budget_roundtrip_and_partition_validation(tmp_path):
         DynamicPackedHeadGroupBudgetTable(
             head_keep_ratios=(((1.0, 0.5), (1.0,)),),
         )
+
+
+def test_dynamic_head_groups_support_separate_current_qkv_ratios(tmp_path):
+    table = DynamicPackedHeadGroupBudgetTable(
+        head_keep_ratios=(((1.0, 0.35, 1.0, 0.35),),),
+        head_current_keep_ratios=(((0.75, 0.25, 0.75, 0.50),),),
+        name="qkv-groups",
+    )
+
+    assert table.num_groups == 3
+    assert table.group_current_ratios == (0.25, 0.50, 0.75)
+    assert table.execution_groups_for_layer(0, 0) == (
+        ((0, 2), 1.0, 0.75),
+        ((3,), 0.35, 0.50),
+        ((1,), 0.35, 0.25),
+    )
+
+    path = tmp_path / "qkv_groups.json"
+    path.write_text(json.dumps(table.to_dict()))
+    assert DynamicPackedHeadGroupBudgetTable.from_json(path) == table
+
+    with pytest.raises(ValueError, match="must align"):
+        DynamicPackedHeadGroupBudgetTable(
+            head_keep_ratios=(((1.0, 0.5),),),
+            head_current_keep_ratios=(((1.0,),),),
+        )
