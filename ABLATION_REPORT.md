@@ -30,6 +30,9 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | action history layers 1--13 vs 28--38 | checkpoint L2 1.515% vs 1.837%; 154.57 vs 157.91 ms | early layers favored locally |
 | early-layer action history validation18 | 1.402x; L2 8.972%; 0/18 safe | reject global schedule |
 | DiT-4 early-layer action history vs none | L2 1.457% vs 2.487%; 145.59 vs 132.31 ms | quality gain, too costly alone |
+| early video-history 75% vs 100% | checkpoint action L2 1.259% vs 1.360% | 75% locally favored |
+| early video-history75 validation18 | 1.487x; L2 10.011%; 2/18 safe | reject global schedule |
+| five-profile validation Oracle | safety union 8/18; 1.102x ratio-of-means | coarse profile family exhausted |
 
 ## Required remaining ablations
 

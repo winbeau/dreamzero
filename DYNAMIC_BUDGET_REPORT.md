@@ -636,3 +636,29 @@ dynamic_m1_m2/dynamic_budgets/20260831_dynamic_action_history/
   checkpoint_dit4_early_vs_none_gpu01/
 dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/
 ```
+
+## Early-layer video-history floor
+
+Commit `55c1051` builds reproducible variants that raise only layers 1--13 of
+the balanced video-query historical K/V table to 50%, 75%, or 100%, while
+leaving every current-token budget unchanged. At DiT index zero, the 75% floor
+outperforms the 100% floor: action relative L2 is 1.259% versus 1.360%, video
+relative L2 is 8.525% versus 8.590%, and Sparse p50 is 148.83 versus 148.01 ms.
+This is further evidence that more historical mass is not monotonically safer.
+
+The validation18 replay rejects the 75% floor as a global policy. It reaches
+1.487x ratio-of-means speedup and 18/18 Sparse-faster requests, but mean action
+relative L2 worsens from 9.293% to 10.011% and worst L2 reaches 23.41%. Two
+requests pass the action gate, including one request not covered by the prior
+conservative profile. Across balanced, conservative, both action-history
+variants, and early-video-history75, the sparse-profile safety union is only
+8/18. Even a perfect per-request Oracle reaches just 1.102x ratio-of-means
+speedup because ten requests still require Dense execution. Coarse global
+history floors are therefore exhausted as a route family.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/dynamic_budgets/20260831_early_video_history/
+dynamic_m1_m2/e2e/20260831_early_video_history75_validation18/
+```

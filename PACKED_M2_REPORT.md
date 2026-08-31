@@ -235,3 +235,16 @@ Artifacts:
 dynamic_m1_m2/dynamic_budgets/20260831_dynamic_action_history/
 dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/
 ```
+
+## Early video-history floor ablation
+
+Raising only the first 13 packed layers' video-query historical K/V budget to
+75% improves the isolated checkpoint action/video errors to 1.259%/8.525%
+relative L2 without increasing current Q/K/V/O or FFN token counts. A 100%
+floor is slightly worse, confirming non-monotonicity.
+
+The complete validation18 replay reverses the local result: mean action L2 is
+10.011%, worst L2 is 23.41%, and only 2/18 requests are safe, although mean
+end-to-end speedup is 1.487x. This variant adds only one new safe request beyond
+the conservative profile and leaves the multi-profile Oracle ceiling at
+1.102x. It is retained as an ablation, not a main executor schedule.

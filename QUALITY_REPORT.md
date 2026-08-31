@@ -158,3 +158,10 @@ from 2.487% to 1.457%, so late denoising also benefits. This rules out a simple
 "protect action history only on early DiT steps" explanation. The validation
 failure despite per-step action improvement points to accumulated video/cache
 state as the next quality target.
+
+Raising early-layer video-query history to 75% also fails to give monotonic
+trajectory recovery. The isolated checkpoint improves to action/video relative
+L2 of 1.259%/8.525%, but validation18 mean action L2 worsens to 10.011% and the
+worst request reaches 23.406%. Two requests pass, one more than the union
+already covered by the conservative profile, but ten of 18 still require
+Dense execution even under a perfect selector over all measured profiles.

@@ -226,3 +226,11 @@ Packed DiT target.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_dynamic_action_history_early_layers_validation18/`
+
+## Early video-history performance gate
+
+The 75% history floor on layers 1--13 measures 1.2796 s mean target latency
+against 1.9034 s Dense, or 1.487x ratio-of-means and 1.489x paired geometric
+mean speedup. CI95 is [1.452x, 1.512x], all 18 targets are faster, and all 72
+history/target calls retain eight DiT model calls. It is rejected solely on
+quality; no performance claim treats this profile as accepted.
