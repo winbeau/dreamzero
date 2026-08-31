@@ -667,6 +667,7 @@ def main() -> None:
             packed_history_video_tokens = max(dynamic_middle_history_tokens)
             packed_current_video_tokens = max(dynamic_middle_current_tokens)
     dynamic_head_group_history_ratios: list[list[float]] = []
+    dynamic_head_group_current_ratios: list[list[float]] = []
     dynamic_head_group_assignments: list[list[dict[str, object]]] = []
     if dynamic_head_group_budget_table is not None:
         if dynamic_middle_layers:
@@ -688,10 +689,27 @@ def main() -> None:
             )
             for layer_index in head_group_layers
         ]
+        if dynamic_head_group_budget_table.head_current_keep_ratios is not None:
+            dynamic_head_group_current_ratios = [
+                list(
+                    dynamic_head_group_budget_table.head_current_keep_ratios[
+                        candidate_dynamic_budget_dit_index
+                    ][layer_index]
+                )
+                for layer_index in head_group_layers
+            ]
         dynamic_head_group_assignments = [
             [
-                {"heads": list(heads), "history_keep_ratio": ratio}
-                for heads, ratio in dynamic_head_group_budget_table.groups_for_layer(
+                {
+                    "heads": list(heads),
+                    "history_keep_ratio": history_ratio,
+                    "current_qkv_keep_ratio": current_ratio,
+                }
+                for (
+                    heads,
+                    history_ratio,
+                    current_ratio,
+                ) in dynamic_head_group_budget_table.execution_groups_for_layer(
                     candidate_dynamic_budget_dit_index,
                     layer_index,
                 )
@@ -786,7 +804,31 @@ def main() -> None:
             if dynamic_head_group_budget_table is not None
             else []
         ),
+        "dynamic_head_group_current_ratios": (
+            list(dynamic_head_group_budget_table.group_current_ratios)
+            if dynamic_head_group_budget_table is not None
+            else []
+        ),
         "dynamic_head_group_history_ratios": dynamic_head_group_history_ratios,
+        "dynamic_head_group_current_ratio_rows": dynamic_head_group_current_ratios,
+        "dynamic_head_group_history_ratio_mean": (
+            statistics.fmean(
+                ratio
+                for row in dynamic_head_group_history_ratios
+                for ratio in row
+            )
+            if dynamic_head_group_history_ratios
+            else None
+        ),
+        "dynamic_head_group_current_ratio_mean": (
+            statistics.fmean(
+                ratio
+                for row in dynamic_head_group_current_ratios
+                for ratio in row
+            )
+            if dynamic_head_group_current_ratios
+            else None
+        ),
         "dynamic_head_group_assignments": dynamic_head_group_assignments,
         "packed_propagation_boundaries": (
             packed_propagation_boundaries if args.packed_middle else 0
