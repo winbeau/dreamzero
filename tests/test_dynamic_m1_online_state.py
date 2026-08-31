@@ -169,6 +169,45 @@ def test_missing_probe_advances_real_dit_but_forces_later_dense() -> None:
     assert np.all(step2.dense_fallback)
 
 
+def test_nonfinite_required_proxy_feature_forces_dense() -> None:
+    proxy_features = (
+        "history_one_available",
+        "history_two_available",
+        "previous_packed_route_support_turnover_max",
+        "prior_budget_mean_tlh",
+    )
+    bundle = {
+        **_bundle(),
+        "feature_columns": proxy_features,
+        "online_observation_schema": "dreamzero-packed-m1-proxy-v2",
+    }
+    state = OnlineM1FeatureState(
+        bundle,
+        num_dit_steps=3,
+        num_layers=2,
+        num_heads=2,
+    )
+
+    def proxy_observation(dit_index, turnover):
+        return M1CausalObservation(
+            dit_index=dit_index,
+            schema="dreamzero-packed-m1-proxy-v2",
+            metrics={
+                "packed_route_support_turnover_max": np.full((2, 2), turnover),
+            },
+        )
+
+    state.begin_request()
+    _features(state, 0)
+    state.observe(proxy_observation(0, np.nan))
+    _features(state, 1)
+    state.observe(proxy_observation(1, np.nan))
+    step2 = _features(state, 2)
+
+    assert np.all(step2.missing_history_fallback)
+    assert np.all(step2.dense_fallback)
+
+
 def test_online_feature_fallback_is_enforced_by_grouped_router() -> None:
     bundle = _bundle()
     state = OnlineM1FeatureState(

@@ -95,6 +95,14 @@ PRIOR_VALUE_COLUMNS = (
     "prior_budget_std_tlh",
     "prior_critical_rate_tlh",
 )
+CAUSALLY_UNDEFINED_FEATURE_NAMES = frozenset(
+    {
+        "previous_two_vv_output_change_relative_l2_max",
+        "previous_two_packed_action_output_change_relative_l2_max",
+        "vv_change_acceleration",
+        "packed_action_output_change_acceleration",
+    }
+)
 
 
 def _readonly(array: np.ndarray, *, dtype: Any = np.float64) -> np.ndarray:
@@ -461,6 +469,10 @@ class OnlineM1FeatureState:
             **{name: self.priors[name][dit_index] for name in PRIOR_VALUE_COLUMNS},
         }
         features = {name: all_features[name] for name in self.feature_columns}
+        nonfinite_features = np.zeros(shape, dtype=bool)
+        for name, value in features.items():
+            if name not in CAUSALLY_UNDEFINED_FEATURE_NAMES:
+                nonfinite_features |= ~np.isfinite(value)
 
         forced_early = np.full(
             shape,
@@ -479,6 +491,8 @@ class OnlineM1FeatureState:
             and not (previous is not None and previous_two is not None),
             dtype=bool,
         )
+        if history_required:
+            missing_history |= nonfinite_features
         schema_mismatch = np.full(
             shape,
             history_required

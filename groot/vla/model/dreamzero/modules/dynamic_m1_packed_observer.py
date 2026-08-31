@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 from groot.vla.model.dreamzero.modules.dynamic_m1_observation import (
@@ -196,25 +197,87 @@ class PackedM1CausalObserver:
             raise ValueError("Packed M1 route scores must have shape [B, F, P]")
         step.route_scores[cfg_branch] = scores.detach()
 
+    def _complete_distributed_cfg_branches(
+        self,
+        step: _StepAccumulator,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]] | None:
+        """Join conditional/unconditional proxies split across two IP ranks."""
+
+        required_layers = set(range(self.num_layers))
+        complete_local = {
+            branch: torch.stack(
+                [step.signatures[branch][layer] for layer in range(self.num_layers)]
+            )
+            for branch in self.cfg_branches
+            if set(step.signatures[branch]) == required_layers
+        }
+        if set(complete_local) == set(self.cfg_branches):
+            return complete_local, dict(step.route_scores)
+        if (
+            not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_world_size() == 1
+            or len(complete_local) != 1
+        ):
+            return None
+
+        exemplar = next(iter(complete_local.values()))
+        branch_signatures = exemplar.new_zeros(
+            (len(self.cfg_branches), *exemplar.shape)
+        )
+        branch_presence = exemplar.new_zeros(len(self.cfg_branches))
+        for branch, value in complete_local.items():
+            branch_index = self.cfg_branches.index(branch)
+            branch_signatures[branch_index].copy_(value)
+            branch_presence[branch_index] = 1.0
+        dist.all_reduce(branch_signatures)
+        dist.all_reduce(branch_presence)
+        if not torch.equal(
+            branch_presence,
+            torch.ones_like(branch_presence),
+        ):
+            return None
+        complete_signatures = {
+            branch: branch_signatures[index]
+            for index, branch in enumerate(self.cfg_branches)
+        }
+
+        local_routes = {
+            branch: value
+            for branch, value in step.route_scores.items()
+            if branch in self.cfg_branches
+        }
+        if len(local_routes) != 1:
+            return complete_signatures, {}
+        route_exemplar = next(iter(local_routes.values()))
+        branch_routes = route_exemplar.new_zeros(
+            (len(self.cfg_branches), *route_exemplar.shape)
+        )
+        route_presence = route_exemplar.new_zeros(len(self.cfg_branches))
+        for branch, value in local_routes.items():
+            branch_index = self.cfg_branches.index(branch)
+            branch_routes[branch_index].copy_(value)
+            route_presence[branch_index] = 1.0
+        dist.all_reduce(branch_routes)
+        dist.all_reduce(route_presence)
+        if not torch.equal(route_presence, torch.ones_like(route_presence)):
+            return complete_signatures, {}
+        return complete_signatures, {
+            branch: branch_routes[index]
+            for index, branch in enumerate(self.cfg_branches)
+        }
+
     def finish_step(self) -> M1CausalObservation | None:
         step = self._step
         if step is None:
             raise RuntimeError("Packed M1 begin_step must precede finish_step")
         self._step = None
-        required_layers = set(range(self.num_layers))
-        if any(
-            set(step.signatures[branch]) != required_layers
-            for branch in self.cfg_branches
-        ):
+        completed = self._complete_distributed_cfg_branches(step)
+        if completed is None:
             return None
 
         shape = (self.num_layers, self.num_heads)
-        current_by_branch = {
-            branch: torch.stack(
-                [step.signatures[branch][layer] for layer in range(self.num_layers)]
-            )
-            for branch in self.cfg_branches
-        }
+        current_by_branch, route_scores = completed
         signature_shapes = {tuple(value.shape) for value in current_by_branch.values()}
         if len(signature_shapes) != 1:
             return None
@@ -272,19 +335,19 @@ class PackedM1CausalObserver:
             .cpu()
         )
 
-        if not step.route_scores:
+        if not route_scores:
             route_turnover = torch.tensor(torch.nan)
             route_entropy = torch.tensor(torch.nan)
             route_max_mass = torch.tensor(torch.nan)
         else:
             route_metrics = [
                 route_proxy_metrics(
-                    step.route_scores[branch],
+                    route_scores[branch],
                     self._previous_route_scores.get(branch),
                     support_ratio=self.support_ratio,
                 )
                 for branch in self.cfg_branches
-                if branch in step.route_scores
+                if branch in route_scores
             ]
             route_turnover = torch.stack(
                 [value[0].amax() for value in route_metrics]
@@ -295,7 +358,7 @@ class PackedM1CausalObserver:
             route_max_mass = torch.stack(
                 [value[2].mean() for value in route_metrics]
             ).mean()
-            self._previous_route_scores.update(step.route_scores)
+            self._previous_route_scores.update(route_scores)
 
         self._previous_action_signatures = {
             branch: current.detach() for branch, current in current_by_branch.items()

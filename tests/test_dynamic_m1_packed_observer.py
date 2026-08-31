@@ -124,6 +124,43 @@ def test_packed_observer_incomplete_or_invalid_step_fails_closed() -> None:
         )
 
 
+def test_packed_observer_joins_cfg_branches_split_across_ip_ranks(monkeypatch):
+    observer = PackedM1CausalObserver(num_layers=2, num_heads=2, support_ratio=0.5)
+    observer.begin_request()
+    observer.begin_step(0)
+    for layer_index in range(2):
+        observer.observe_action_output(
+            layer_index=layer_index,
+            cfg_branch="conditional",
+            action_output=_output(1.0, layer_index=layer_index),
+        )
+    observer.observe_route_scores(
+        torch.tensor([[[3.0, 2.0, 0.0, 0.0]]]),
+        cfg_branch="conditional",
+    )
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+
+    def fake_all_reduce(tensor):
+        if tensor.ndim == 1:
+            tensor[1] = 1.0
+        elif tensor.shape[-1] == 6:
+            tensor[1].copy_(tensor[0] * 0.5)
+        else:
+            tensor[1].copy_(torch.flip(tensor[0], dims=(-1,)))
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+    observation = observer.finish_step()
+
+    assert observation is not None
+    assert np.all(observation.metric("packed_cfg_disagreement_relative_l2") > 0.0)
+    assert np.isfinite(
+        observation.metric("packed_route_normalized_entropy_mean")
+    ).all()
+
+
 def test_packed_observer_dense_rerun_replaces_sparse_signature() -> None:
     observer = PackedM1CausalObserver(
         num_layers=1,
