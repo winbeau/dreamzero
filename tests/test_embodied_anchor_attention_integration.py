@@ -10,6 +10,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     AnchorSparseConfig,
 )
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicDenseActionHistoryTable,
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
 )
@@ -993,6 +994,27 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert model.anchor_sparse_dense_action_history
     assert not model.blocks[0].self_attn.packed_dense_action_history
     assert model.blocks[1].self_attn.packed_dense_action_history
+    action_history_table = DynamicDenseActionHistoryTable(
+        enabled_cells=tuple(
+            ((False, dit_index >= 4)) for dit_index in range(8)
+        ),
+        name="late-dit-late-layer",
+    )
+    model.configure_dynamic_dense_action_history_table(action_history_table)
+    model.set_dynamic_attention_oracle_step(
+        scheduler_index=1,
+        dit_index=1,
+        scheduler_steps=16,
+        timestep=986,
+    )
+    assert not model._packed_dense_action_history_for_layer(1)
+    model.set_dynamic_attention_oracle_step(
+        scheduler_index=10,
+        dit_index=4,
+        scheduler_steps=16,
+        timestep=749,
+    )
+    assert model._packed_dense_action_history_for_layer(1)
 
     model.configure_anchor_sparse_attention(
         enabled=True,
@@ -1003,6 +1025,7 @@ def test_post_checkpoint_configuration_updates_every_block() -> None:
     assert not model.anchor_sparse_packed_middle
     assert model._dynamic_packed_budget_table is None
     assert model._dynamic_packed_head_group_budget_table is None
+    assert model._dynamic_dense_action_history_table is None
     assert not any(block.self_attn.record_anchor_diagnostics for block in model.blocks)
 
     model.configure_anchor_sparse_attention(enabled=False)

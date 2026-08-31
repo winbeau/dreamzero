@@ -58,6 +58,7 @@ class Args:
     anchor_sparse_dense_action_history: bool = False
     anchor_sparse_dynamic_budget_table: str | None = None
     anchor_sparse_dynamic_head_group_budget_table: str | None = None
+    anchor_sparse_dynamic_action_history_table: str | None = None
     anchor_sparse_record_diagnostics: bool = False
     anchor_sparse_flow_sentinel_enabled: bool = False
     anchor_sparse_flow_sentinel_minimum_cosine: float = 0.99
@@ -916,6 +917,25 @@ def main(args: Args) -> None:
                 args.anchor_sparse_dynamic_head_group_budget_table
             )
         )
+    if args.anchor_sparse_dynamic_action_history_table is not None:
+        from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+            DynamicDenseActionHistoryTable,
+        )
+
+        configure_dynamic_action_history = getattr(
+            diffusion_model,
+            "configure_dynamic_dense_action_history_table",
+            None,
+        )
+        if configure_dynamic_action_history is None:
+            raise RuntimeError(
+                "Loaded diffusion model does not support dynamic action history"
+            )
+        configure_dynamic_action_history(
+            DynamicDenseActionHistoryTable.from_json(
+                args.anchor_sparse_dynamic_action_history_table
+            )
+        )
     if args.anchor_sparse_flow_sentinel_enabled:
         from groot.vla.model.dreamzero.modules.dynamic_flow_sentinel import (
             FlowSentinelConfig,
@@ -945,6 +965,7 @@ def main(args: Args) -> None:
         "dense_action_history=%s "
         "recent_dense_frames=%d "
         "dynamic_budget_table=%s dynamic_head_group_budget_table=%s "
+        "dynamic_action_history_table=%s "
         "diagnostics=%s backend=%s",
         args.anchor_sparse_enabled,
         args.anchor_sparse_keep_ratio,
@@ -960,6 +981,7 @@ def main(args: Args) -> None:
         args.anchor_sparse_recent_dense_frames,
         args.anchor_sparse_dynamic_budget_table,
         args.anchor_sparse_dynamic_head_group_budget_table,
+        args.anchor_sparse_dynamic_action_history_table,
         args.anchor_sparse_record_diagnostics,
         args.attention_backend,
     )

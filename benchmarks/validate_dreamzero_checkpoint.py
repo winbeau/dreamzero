@@ -21,6 +21,7 @@ import torch.distributed as dist
 
 from groot.vla.model.dreamzero.base_vla import VLA
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicDenseActionHistoryTable,
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
     stabilize_current_budgets_for_segments,
@@ -110,6 +111,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional per-rank head-group tables aligned with keep-ratios. "
             "This compares M1 QKV policies in one checkpoint load."
+        ),
+    )
+    parser.add_argument("--dynamic-action-history-table", type=Path)
+    parser.add_argument(
+        "--dynamic-action-history-table-candidates",
+        type=Path,
+        nargs="+",
+        help=(
+            "Optional per-rank 8x40 action-history schedules aligned with "
+            "keep-ratios."
         ),
     )
     parser.add_argument("--dynamic-budget-dit-index", type=int, default=0)
@@ -395,6 +406,41 @@ def main() -> None:
             "dynamic-head-group-budget-table-candidates must align one-to-one "
             "with keep-ratios"
         )
+    if args.dynamic_action_history_table is not None and not args.packed_middle:
+        raise ValueError("Dynamic action-history tables require --packed-middle")
+    if (
+        args.dynamic_action_history_table_candidates is not None
+        and not args.packed_middle
+    ):
+        raise ValueError(
+            "Dynamic action-history table candidates require --packed-middle"
+        )
+    if (
+        args.dynamic_action_history_table is not None
+        and args.dynamic_action_history_table_candidates is not None
+    ):
+        raise ValueError(
+            "Use either dynamic-action-history-table or its candidates"
+        )
+    if (
+        args.dynamic_action_history_table_candidates is not None
+        and len(args.dynamic_action_history_table_candidates)
+        != len(args.keep_ratios)
+    ):
+        raise ValueError(
+            "dynamic-action-history-table-candidates must align one-to-one "
+            "with keep-ratios"
+        )
+    if (
+        args.dynamic_action_history_table is not None
+        or args.dynamic_action_history_table_candidates is not None
+    ) and not (
+        args.dense_action_history
+        or args.dense_action_history_candidates is not None
+    ):
+        raise ValueError(
+            "Dynamic action-history tables require dense-action-history to be enabled"
+        )
     if not 0 <= args.dynamic_budget_dit_index < 8:
         raise ValueError("dynamic-budget-dit-index must lie in [0, 7]")
     if (
@@ -403,6 +449,8 @@ def main() -> None:
         and args.dynamic_budget_table_candidates is None
         and args.dynamic_head_group_budget_table is None
         and args.dynamic_head_group_budget_table_candidates is None
+        and args.dynamic_action_history_table is None
+        and args.dynamic_action_history_table_candidates is None
     ):
         raise ValueError(
             "dynamic-budget-dit-indices requires a dynamic budget table"
@@ -510,9 +558,22 @@ def main() -> None:
         if candidate_dynamic_head_group_budget_table_path is not None
         else None
     )
+    candidate_dynamic_action_history_table_path = (
+        args.dynamic_action_history_table_candidates[candidate_index]
+        if args.dynamic_action_history_table_candidates is not None
+        else args.dynamic_action_history_table
+    )
+    dynamic_action_history_table = (
+        DynamicDenseActionHistoryTable.from_json(
+            candidate_dynamic_action_history_table_path
+        )
+        if candidate_dynamic_action_history_table_path is not None
+        else None
+    )
     dynamic_budget_active = (
         dynamic_budget_table is not None
         or dynamic_head_group_budget_table is not None
+        or dynamic_action_history_table is not None
     )
     candidate_dynamic_budget_dit_index = (
         args.dynamic_budget_dit_indices[candidate_index]
@@ -609,6 +670,10 @@ def main() -> None:
         if dynamic_head_group_budget_table is not None:
             diffusion_model.configure_dynamic_packed_head_group_budget_table(
                 dynamic_head_group_budget_table
+            )
+        if dynamic_action_history_table is not None:
+            diffusion_model.configure_dynamic_dense_action_history_table(
+                dynamic_action_history_table
             )
         if dynamic_budget_active:
             diffusion_model.set_dynamic_attention_oracle_step(
@@ -805,6 +870,11 @@ def main() -> None:
             if candidate_dynamic_head_group_budget_table_path is not None
             else None
         ),
+        "dynamic_action_history_table": (
+            str(candidate_dynamic_action_history_table_path)
+            if candidate_dynamic_action_history_table_path is not None
+            else None
+        ),
         "dynamic_budget_dit_index": (
             candidate_dynamic_budget_dit_index
             if dynamic_budget_active
@@ -817,6 +887,23 @@ def main() -> None:
         ),
         "dynamic_budget_table_name": (
             dynamic_budget_table.name if dynamic_budget_table is not None else None
+        ),
+        "dynamic_action_history_table_name": (
+            dynamic_action_history_table.name
+            if dynamic_action_history_table is not None
+            else None
+        ),
+        "dynamic_action_history_enabled_layers": (
+            [
+                layer_index
+                for layer_index in range(dynamic_action_history_table.num_layers)
+                if dynamic_action_history_table.enabled(
+                    candidate_dynamic_budget_dit_index,
+                    layer_index,
+                )
+            ]
+            if dynamic_action_history_table is not None
+            else []
         ),
         "dynamic_middle_layers": dynamic_middle_layers,
         "dynamic_middle_history_ratios": dynamic_middle_history_ratios,

@@ -22,6 +22,7 @@ from groot.vla.model.dreamzero.modules.dynamic_packed_sparse import (
     pack_middle_state,
 )
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicDenseActionHistoryTable,
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
     stabilize_current_budgets_for_segments,
@@ -2618,6 +2619,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_packed_head_group_budget_table: (
             DynamicPackedHeadGroupBudgetTable | None
         ) = None
+        self._dynamic_dense_action_history_table: (
+            DynamicDenseActionHistoryTable | None
+        ) = None
         self._dynamic_sparse_dit_index: int | None = None
         self._dynamic_sparse_scheduler_index: int | None = None
         self._dynamic_sparse_scheduler_steps: int | None = None
@@ -2981,6 +2985,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if not packed_middle_active:
             self._dynamic_packed_budget_table = None
             self._dynamic_packed_head_group_budget_table = None
+            self._dynamic_dense_action_history_table = None
+        elif not self.anchor_sparse_dense_action_history:
+            self._dynamic_dense_action_history_table = None
         sparse_end = len(self.blocks) - dense_suffix_layers
         block_config = config
         if packed_middle_active and block_config is not None:
@@ -3081,6 +3088,47 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 )
         self._dynamic_packed_head_group_budget_table = table
         self.clear_anchor_sparse_route_cache()
+
+    def configure_dynamic_dense_action_history_table(
+        self,
+        table: DynamicDenseActionHistoryTable | None,
+    ) -> None:
+        """Attach an eight-DiT by layer action-history protection schedule."""
+
+        if table is not None:
+            if not self.anchor_sparse_packed_middle:
+                raise ValueError(
+                    "Dynamic action history requires an active Packed Middle Stack"
+                )
+            if not self.anchor_sparse_dense_action_history:
+                raise ValueError(
+                    "Enable dense_action_history before attaching its dynamic table"
+                )
+            if table.num_dit_steps != 8:
+                raise ValueError(
+                    "DreamZero action-history schedules must cover exactly 8 real DiT evaluations"
+                )
+            if table.num_layers != len(self.blocks):
+                raise ValueError(
+                    "Dynamic action-history layer count differs from the model depth"
+                )
+            if self._dynamic_packed_head_group_budget_table is not None:
+                raise ValueError(
+                    "Dynamic action history currently requires one shared head group"
+                )
+        self._dynamic_dense_action_history_table = table
+
+    def _packed_dense_action_history_for_layer(self, layer_index: int) -> bool:
+        if not self.anchor_sparse_dense_action_history:
+            return False
+        table = self._dynamic_dense_action_history_table
+        if table is None:
+            return True
+        if self._dynamic_sparse_dit_index is None:
+            raise RuntimeError(
+                "Dynamic action-history table is active before the real DiT index was set"
+            )
+        return table.enabled(self._dynamic_sparse_dit_index, layer_index)
 
     def set_dynamic_sparse_force_dense(self, enabled: bool) -> None:
         """Temporarily bypass Packed M2 for a sentinel Dense recomputation."""
@@ -3800,6 +3848,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     packed_current_profile.video_tokens_for_ratio(current_keep_ratio)
                 )
                 active_length = packed_state.active_length(packed_current_video_tokens)
+                block.self_attn.packed_dense_action_history = (
+                    self._packed_dense_action_history_for_layer(block_index)
+                )
                 updated_packed = block.forward_packed(
                     packed_state.active_x(packed_current_video_tokens),
                     packed_state.active_e0(packed_current_video_tokens),

@@ -3,11 +3,34 @@ import json
 import pytest
 
 from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
+    DynamicDenseActionHistoryTable,
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
     bucket_at_least,
     stabilize_current_budgets_for_segments,
 )
+
+
+def test_dynamic_dense_action_history_roundtrip_and_indexing(tmp_path) -> None:
+    table = DynamicDenseActionHistoryTable(
+        enabled_cells=((False, True, True), (False, False, True)),
+        name="late-layers",
+    )
+
+    assert table.num_dit_steps == 2
+    assert table.num_layers == 3
+    assert table.enabled(0, 1)
+    assert not table.enabled(1, 1)
+
+    path = tmp_path / "action_history.json"
+    path.write_text(json.dumps(table.to_dict()))
+    assert DynamicDenseActionHistoryTable.from_json(path) == table
+
+    with pytest.raises(ValueError, match="JSON booleans"):
+        DynamicDenseActionHistoryTable(enabled_cells=((0, 1),))
+
+    with pytest.raises(ValueError, match="equal layer counts"):
+        DynamicDenseActionHistoryTable(enabled_cells=((True,), (True, False)))
 
 
 def test_budget_table_indexes_fixed_dit_layer_shapes() -> None:

@@ -80,6 +80,101 @@ def _canonical_matrix(
     return matrix
 
 
+def _canonical_bool_matrix(
+    values: Sequence[Sequence[bool]],
+    *,
+    field_name: str,
+) -> tuple[tuple[bool, ...], ...]:
+    matrix = tuple(tuple(value for value in row) for row in values)
+    if not matrix or not matrix[0]:
+        raise ValueError(f"{field_name} must be a non-empty 2D table")
+    width = len(matrix[0])
+    if any(len(row) != width for row in matrix):
+        raise ValueError(f"{field_name} rows must have equal layer counts")
+    if any(not isinstance(value, bool) for row in matrix for value in row):
+        raise ValueError(f"{field_name} cells must be JSON booleans")
+    return matrix
+
+
+@dataclass(frozen=True)
+class DynamicDenseActionHistoryTable:
+    """Enable complete historical K/V for action queries by DiT and layer."""
+
+    enabled_cells: tuple[tuple[bool, ...], ...]
+    name: str = "dynamic_dense_action_history"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "enabled_cells",
+            _canonical_bool_matrix(
+                self.enabled_cells,
+                field_name="enabled_cells",
+            ),
+        )
+
+    @property
+    def num_dit_steps(self) -> int:
+        return len(self.enabled_cells)
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.enabled_cells[0])
+
+    def enabled(self, dit_index: int, layer_index: int) -> bool:
+        if not 0 <= dit_index < self.num_dit_steps:
+            raise IndexError(f"dit_index {dit_index} is outside the action-history table")
+        if not 0 <= layer_index < self.num_layers:
+            raise IndexError(
+                f"layer_index {layer_index} is outside the action-history table"
+            )
+        return self.enabled_cells[dit_index][layer_index]
+
+    @classmethod
+    def constant(
+        cls,
+        *,
+        num_dit_steps: int,
+        num_layers: int,
+        enabled: bool,
+        name: str = "constant_dense_action_history",
+    ) -> "DynamicDenseActionHistoryTable":
+        if num_dit_steps <= 0 or num_layers <= 0:
+            raise ValueError("Action-history table dimensions must be positive")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        return cls(
+            enabled_cells=tuple(
+                tuple(enabled for _ in range(num_layers))
+                for _ in range(num_dit_steps)
+            ),
+            name=name,
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: dict[str, object],
+    ) -> "DynamicDenseActionHistoryTable":
+        return cls(
+            enabled_cells=payload["enabled_cells"],  # type: ignore[arg-type]
+            name=str(payload.get("name", "dynamic_dense_action_history")),
+        )
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "DynamicDenseActionHistoryTable":
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "name": self.name,
+            "num_dit_steps": self.num_dit_steps,
+            "num_layers": self.num_layers,
+            "enabled_cells": [list(row) for row in self.enabled_cells],
+        }
+
+
 @dataclass(frozen=True)
 class DynamicPackedBudgetTable:
     """Nested current/history budgets indexed by ``(dit_index, layer)``."""
