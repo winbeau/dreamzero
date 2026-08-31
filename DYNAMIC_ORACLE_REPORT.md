@@ -27,6 +27,8 @@ Phase implementation commits:
 - `dc7fb2c`, `fa9ed4d`: reproducible paper-statistics summary.
 - `7827c5c`: research-gated final-video latent return and paired downstream
   action/video sensitivity recording.
+- `3da14e9`: applied-count traces and a strict scale-one history-snapshot
+  action/video exactness gate.
 
 All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and
 the H200 checkout was fast-forwarded through them.
@@ -307,10 +309,20 @@ rejects action-only/video-metric schema mixing. With Dense-history snapshots,
 one baseline latent is compared with every candidate restored from the same
 pre-target state.
 
-Local gates for this change are 21 passing benchmark/client tests, Python
-compilation, and `git diff --check`. The GPU-dependent wrapper test and the
-real-checkpoint scale-one action/video exactness gate remain pending because
-both configured H200 SSH routes were unavailable at the time of this commit.
+Commit `3da14e9` also returns the exact intervention trace with research-only
+video responses. Every measured candidate must match its requested DiT,
+layer, heads, scale, CFG branch, and query scope and must report exactly one
+application; the Dense baseline must report zero. The checked-in
+`d0_l39_h12_15_scale1_exactness.json` candidate and
+`validate_downstream_exactness.py` then fail unless the grid used a restored
+Dense-history snapshot, used scale one, preserved the final action array
+elementwise, and produced zero final-video relative L2 and maximum absolute
+difference. A cosine merely close to one cannot hide a nonzero difference.
+
+Local gates for these changes are 23 passing benchmark/client tests, Python
+compilation, and `git diff --check`. The GPU-dependent wrapper tests and the
+real-checkpoint strict gate remain pending because both configured H200 SSH
+routes were unavailable at commit time.
 
 ## Exactness and tests
 
