@@ -75,6 +75,12 @@ class Args:
     dynamic_oracle_layer_indices: tuple[int, ...] = ()
     dynamic_oracle_task_id: str | None = None
     dynamic_oracle_trajectory_stage: str | None = None
+    dynamic_downstream_dit_index: int | None = None
+    dynamic_downstream_layer_index: int | None = None
+    dynamic_downstream_head_indices: tuple[int, ...] = ()
+    dynamic_downstream_scale: float = 0.0
+    dynamic_downstream_cfg_branches: tuple[str, ...] = ("conditional",)
+    dynamic_downstream_query_scope: str = "all"
     save_video_on_reset: bool = True
 
 
@@ -1052,6 +1058,42 @@ def main(args: Args) -> None:
             args.dynamic_oracle_query_chunk_size,
             args.dynamic_oracle_support_ratio,
         )
+    downstream_fields = (
+        args.dynamic_downstream_dit_index,
+        args.dynamic_downstream_layer_index,
+    )
+    if any(value is not None for value in downstream_fields) or (
+        args.dynamic_downstream_head_indices
+    ):
+        if any(value is None for value in downstream_fields):
+            raise ValueError(
+                "Downstream intervention requires both DiT and layer indices"
+            )
+        if not args.dynamic_downstream_head_indices:
+            raise ValueError("Downstream intervention requires at least one head")
+        from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
+            DownstreamHeadIntervention,
+        )
+
+        configure_downstream = getattr(
+            diffusion_model,
+            "configure_dynamic_downstream_head_intervention",
+            None,
+        )
+        if configure_downstream is None:
+            raise RuntimeError(
+                "Loaded diffusion model does not support downstream head intervention"
+            )
+        intervention = DownstreamHeadIntervention(
+            dit_index=args.dynamic_downstream_dit_index,
+            layer_index=args.dynamic_downstream_layer_index,
+            head_indices=args.dynamic_downstream_head_indices,
+            scale=args.dynamic_downstream_scale,
+            cfg_branches=args.dynamic_downstream_cfg_branches,
+            query_scope=args.dynamic_downstream_query_scope,
+        )
+        configure_downstream(intervention)
+        logger.info("Dynamic downstream head intervention enabled: %s", intervention)
 
     # Create server for all ranks - rank 0 handles websocket, others run worker loop
     hostname = socket.gethostname()

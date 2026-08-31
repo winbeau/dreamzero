@@ -17,7 +17,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Sequence
+from typing import Literal, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +25,64 @@ import torch.nn.functional as F
 
 DEFAULT_KEEP_RATIOS = (1.0, 0.75, 0.50, 0.35, 0.25, 0.20, 0.10)
 DEFAULT_TOP_P_THRESHOLDS = (0.50, 0.75, 0.90, 0.95)
+
+
+@dataclass(frozen=True)
+class DownstreamHeadIntervention:
+    """One controlled Dense attention-output intervention.
+
+    The intervention is applied before the attention output projection and is
+    deliberately restricted to one real DiT evaluation and Transformer layer.
+    Continuing the remaining denoising trajectory then measures final-action
+    sensitivity instead of another local attention proxy.
+    """
+
+    dit_index: int
+    layer_index: int
+    head_indices: tuple[int, ...]
+    scale: float = 0.0
+    cfg_branches: tuple[str, ...] = ("conditional",)
+    query_scope: Literal["all", "video", "register"] = "all"
+
+    def __post_init__(self) -> None:
+        if self.dit_index < 0:
+            raise ValueError("dit_index must be non-negative")
+        if self.layer_index < 0:
+            raise ValueError("layer_index must be non-negative")
+        if not self.head_indices:
+            raise ValueError("head_indices must be non-empty")
+        if len(set(self.head_indices)) != len(self.head_indices):
+            raise ValueError("head_indices must be unique")
+        if any(index < 0 for index in self.head_indices):
+            raise ValueError("head_indices must be non-negative")
+        if not math.isfinite(self.scale):
+            raise ValueError("scale must be finite")
+        if not self.cfg_branches:
+            raise ValueError("cfg_branches must be non-empty")
+        if len(set(self.cfg_branches)) != len(self.cfg_branches):
+            raise ValueError("cfg_branches must be unique")
+        if any(
+            branch not in {"conditional", "unconditional"}
+            for branch in self.cfg_branches
+        ):
+            raise ValueError(
+                "cfg_branches may contain only conditional or unconditional"
+            )
+        if self.query_scope not in {"all", "video", "register"}:
+            raise ValueError("query_scope must be all, video, or register")
+
+    def applies(
+        self,
+        *,
+        dit_index: int | None,
+        layer_index: int,
+        cfg_branch: str | None,
+    ) -> bool:
+        return bool(
+            dit_index == self.dit_index
+            and layer_index == self.layer_index
+            and cfg_branch in self.cfg_branches
+        )
 
 
 @dataclass(frozen=True)

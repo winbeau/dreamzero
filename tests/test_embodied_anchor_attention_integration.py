@@ -2,6 +2,7 @@ import os
 import sys
 import types
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -13,6 +14,9 @@ from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicDenseActionHistoryTable,
     DynamicPackedHeadGroupBudgetTable,
     DynamicPackedBudgetTable,
+)
+from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
+    DownstreamHeadIntervention,
 )
 
 
@@ -56,6 +60,28 @@ def _inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     cache = torch.randn(2, 1, 8, 2, 4)
     freqs = torch.ones(32, 2, dtype=torch.complex64)
     return x, cache, freqs
+
+
+def _small_model(module):
+    return module.CausalWanModel(
+        model_type="t2v",
+        patch_size=(1, 2, 2),
+        frame_seqlen=880,
+        text_len=4,
+        in_dim=2,
+        dim=8,
+        ffn_dim=16,
+        freq_dim=8,
+        text_dim=8,
+        out_dim=2,
+        num_heads=2,
+        num_layers=2,
+        action_dim=2,
+        max_state_dim=4,
+        hidden_size=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
 
 
 def test_current_token_routing_requires_causal_action_pass() -> None:
@@ -667,6 +693,147 @@ def test_oracle_observes_dense_video_action_layout_without_changing_output() -> 
         "video_key": (1, 12, 2, 4),
         "video_value": (1, 12, 2, 4),
     }
+
+
+def test_downstream_head_intervention_scales_only_selected_query_heads() -> None:
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    attention.layer_index = 5
+    attention.downstream_intervention_dit_index = 2
+    attention.downstream_intervention_cfg_branch = "conditional"
+    attention.downstream_head_intervention = DownstreamHeadIntervention(
+        dit_index=2,
+        layer_index=5,
+        head_indices=(1,),
+        scale=0.0,
+        query_scope="register",
+    )
+    output = torch.arange(40, dtype=torch.float32).reshape(1, 5, 2, 4)
+
+    intervened = attention._apply_downstream_head_intervention(
+        output,
+        action_register_length=2,
+    )
+
+    assert torch.equal(intervened[:, :3], output[:, :3])
+    assert torch.equal(intervened[:, 3:, 0], output[:, 3:, 0])
+    assert torch.count_nonzero(intervened[:, 3:, 1]) == 0
+    assert attention.downstream_head_intervention_count == 1
+
+
+def test_downstream_scale_one_is_exact_noop() -> None:
+    module = _load_attention_module()
+    attention = module.CausalWanSelfAttention(
+        dim=8,
+        num_heads=2,
+        frame_seqlen=4,
+        num_action_per_block=2,
+        num_state_per_block=1,
+    )
+    attention.layer_index = 1
+    attention.downstream_intervention_dit_index = 0
+    attention.downstream_intervention_cfg_branch = "conditional"
+    attention.downstream_head_intervention = DownstreamHeadIntervention(
+        dit_index=0,
+        layer_index=1,
+        head_indices=(0, 1),
+        scale=1.0,
+    )
+    output = torch.randn(1, 5, 2, 4)
+
+    intervened = attention._apply_downstream_head_intervention(
+        output,
+        action_register_length=2,
+    )
+
+    assert intervened is output
+    assert attention.downstream_head_intervention_count == 1
+
+
+def test_model_downstream_intervention_tracks_exact_execution_context() -> None:
+    module = _load_attention_module()
+    model = _small_model(module)
+    intervention = DownstreamHeadIntervention(
+        dit_index=3,
+        layer_index=1,
+        head_indices=(1,),
+        scale=0.0,
+        cfg_branches=("conditional",),
+        query_scope="register",
+    )
+    model.configure_dynamic_downstream_head_intervention(intervention)
+    attention = model.blocks[1].self_attn
+    output = torch.ones(1, 5, 2, 4)
+
+    model.begin_dynamic_attention_oracle_request(current_start_frame=0)
+    model.set_dynamic_attention_oracle_step(
+        scheduler_index=5,
+        dit_index=2,
+        scheduler_steps=16,
+        timestep=800,
+    )
+    model.set_dynamic_attention_oracle_cfg_branch("conditional")
+    assert attention._apply_downstream_head_intervention(
+        output,
+        action_register_length=2,
+    ) is output
+
+    model.set_dynamic_attention_oracle_step(
+        scheduler_index=7,
+        dit_index=3,
+        scheduler_steps=16,
+        timestep=700,
+    )
+    model.set_dynamic_attention_oracle_cfg_branch("unconditional")
+    assert attention._apply_downstream_head_intervention(
+        output,
+        action_register_length=2,
+    ) is output
+
+    model.set_dynamic_attention_oracle_cfg_branch("conditional")
+    intervened = attention._apply_downstream_head_intervention(
+        output,
+        action_register_length=2,
+    )
+    assert torch.equal(intervened[:, :3], output[:, :3])
+    assert torch.count_nonzero(intervened[:, 3:, 1]) == 0
+    assert model.get_dynamic_downstream_head_intervention_trace()[
+        "applied_count"
+    ] == 1
+
+    model.begin_dynamic_attention_oracle_request(current_start_frame=1)
+    assert model.get_dynamic_downstream_head_intervention_trace()[
+        "applied_count"
+    ] == 0
+    model.configure_dynamic_downstream_head_intervention(None)
+    assert model.get_dynamic_downstream_head_intervention_trace() == {
+        "configured": False,
+        "applied_count": 0,
+    }
+
+
+def test_model_rejects_sparse_and_downstream_intervention_combination() -> None:
+    module = _load_attention_module()
+    model = _small_model(module)
+    intervention = DownstreamHeadIntervention(
+        dit_index=0,
+        layer_index=0,
+        head_indices=(0,),
+    )
+    model.configure_dynamic_downstream_head_intervention(intervention)
+    with pytest.raises(ValueError, match="Disable downstream"):
+        model.configure_anchor_sparse_attention(enabled=True)
+
+    model.configure_dynamic_downstream_head_intervention(None)
+    model.configure_anchor_sparse_attention(enabled=True)
+    with pytest.raises(ValueError, match="exact Dense path"):
+        model.configure_dynamic_downstream_head_intervention(intervention)
 
 
 def test_no_update_sparse_attention_reuses_gathered_history() -> None:

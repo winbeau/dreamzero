@@ -27,6 +27,9 @@ from groot.vla.model.dreamzero.modules.dynamic_sparse_budget import (
     DynamicPackedBudgetTable,
     stabilize_current_budgets_for_segments,
 )
+from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
+    DownstreamHeadIntervention,
+)
 from groot.vla.model.n1_5.modules.action_encoder import (
     SinusoidalPositionalEncoding,
     swish,
@@ -333,6 +336,10 @@ class CausalWanSelfAttention(nn.Module):
         self.packed_dense_action_history = False
         self.packed_max_action_current = False
         self.dynamic_oracle_collector: Any | None = None
+        self.downstream_head_intervention: DownstreamHeadIntervention | None = None
+        self.downstream_intervention_dit_index: int | None = None
+        self.downstream_intervention_cfg_branch: str | None = None
+        self.downstream_head_intervention_count = 0
         self.layer_index = -1
         self.last_anchor_route: AnchorRoute | None = None
         self._anchor_sparse_history_cache_key: tuple[Any, ...] | None = None
@@ -369,6 +376,58 @@ class CausalWanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim)
         self.causal_attn = AttentionModule(num_heads=self.num_heads, head_dim=self.head_dim, causal=True)
+
+    def _apply_downstream_head_intervention(
+        self,
+        output: torch.Tensor,
+        *,
+        action_register_length: int | None,
+    ) -> torch.Tensor:
+        """Scale selected Dense attention heads before the O projection."""
+
+        intervention = self.downstream_head_intervention
+        if intervention is None or not intervention.applies(
+            dit_index=self.downstream_intervention_dit_index,
+            layer_index=self.layer_index,
+            cfg_branch=self.downstream_intervention_cfg_branch,
+        ):
+            return output
+        if output.ndim != 4 or output.shape[2] != self.num_heads:
+            raise ValueError("attention output must have shape [B, L, H, D]")
+        if intervention.query_scope == "all":
+            query_start, query_stop = 0, output.shape[1]
+        else:
+            if action_register_length is None or not (
+                0 < action_register_length < output.shape[1]
+            ):
+                raise RuntimeError(
+                    "video/register head intervention requires action/state registers"
+                )
+            register_start = output.shape[1] - action_register_length
+            if intervention.query_scope == "video":
+                query_start, query_stop = 0, register_start
+            else:
+                query_start, query_stop = register_start, output.shape[1]
+
+        self.downstream_head_intervention_count += 1
+        if intervention.scale == 1.0:
+            return output
+        head_indices = self._packed_head_indices(
+            intervention.head_indices,
+            output.device,
+        )
+        intervened = output.clone()
+        selected = intervened[
+            :,
+            query_start:query_stop,
+        ].index_select(2, head_indices)
+        updated_region = intervened[:, query_start:query_stop].index_copy(
+            2,
+            head_indices,
+            selected * intervention.scale,
+        )
+        intervened[:, query_start:query_stop] = updated_region
+        return intervened
 
     def clear_anchor_sparse_history_cache(self) -> None:
         """Release gathered historical KV retained across action denoise steps."""
@@ -2212,6 +2271,15 @@ class CausalWanSelfAttention(nn.Module):
                 updated_kv_cache = torch.stack([new_k, new_v], dim=0)
 
 
+        # Controlled downstream Oracle interventions act on the exact per-head
+        # Dense attention output and then retain the released O projection and
+        # every remaining layer/denoising step.
+        if self.downstream_head_intervention is not None:
+            x = self._apply_downstream_head_intervention(
+                x,
+                action_register_length=action_register_length,
+            )
+
         # output
         x = x.flatten(2)
         x = self.o(x)
@@ -2728,6 +2796,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_force_dense = False
         self._anchor_sparse_last_packed_propagation_count = 0
         self._dynamic_attention_oracle_collector: Any | None = None
+        self._dynamic_downstream_head_intervention: (
+            DownstreamHeadIntervention | None
+        ) = None
+        self._dynamic_attention_oracle_cfg_branch: str | None = None
 
         max_num_embodiments = 1
 
@@ -2938,6 +3010,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         trajectory_stage: str | None = None,
     ) -> None:
         self._dynamic_sparse_force_dense = False
+        self._dynamic_attention_oracle_cfg_branch = None
+        intervention = self._dynamic_downstream_head_intervention
+        if intervention is not None:
+            block = self.blocks[intervention.layer_index]
+            block.self_attn.downstream_intervention_dit_index = None
+            block.self_attn.downstream_intervention_cfg_branch = None
+            block.self_attn.downstream_head_intervention_count = 0
         collector = self._dynamic_attention_oracle_collector
         if collector is not None:
             collector.begin_request(
@@ -2962,6 +3041,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self._dynamic_sparse_scheduler_index = int(scheduler_index)
         self._dynamic_sparse_dit_index = int(dit_index)
         self._dynamic_sparse_scheduler_steps = int(scheduler_steps)
+        intervention = self._dynamic_downstream_head_intervention
+        if intervention is not None:
+            self.blocks[
+                intervention.layer_index
+            ].self_attn.downstream_intervention_dit_index = int(dit_index)
         collector = self._dynamic_attention_oracle_collector
         if collector is not None:
             collector.set_step(
@@ -2972,9 +3056,70 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             )
 
     def set_dynamic_attention_oracle_cfg_branch(self, branch: str | None) -> None:
+        self._dynamic_attention_oracle_cfg_branch = branch
+        intervention = self._dynamic_downstream_head_intervention
+        if intervention is not None:
+            self.blocks[
+                intervention.layer_index
+            ].self_attn.downstream_intervention_cfg_branch = branch
         collector = self._dynamic_attention_oracle_collector
         if collector is not None:
             collector.set_cfg_branch(branch)
+
+    def configure_dynamic_downstream_head_intervention(
+        self,
+        intervention: DownstreamHeadIntervention | None,
+    ) -> None:
+        """Configure a Dense per-head intervention for downstream sensitivity."""
+
+        if intervention is not None:
+            if self.anchor_sparse_enabled:
+                raise ValueError(
+                    "Downstream head interventions require the exact Dense path"
+                )
+            if intervention.dit_index >= 8:
+                raise ValueError(
+                    "DreamZero downstream interventions require a real DiT index in [0, 7]"
+                )
+            if intervention.layer_index >= len(self.blocks):
+                raise ValueError("intervention layer exceeds model depth")
+            if any(index >= self.num_heads for index in intervention.head_indices):
+                raise ValueError("intervention head exceeds model head count")
+
+        previous = self._dynamic_downstream_head_intervention
+        if previous is not None:
+            previous_attention = self.blocks[previous.layer_index].self_attn
+            previous_attention.downstream_head_intervention = None
+            previous_attention.downstream_intervention_dit_index = None
+            previous_attention.downstream_intervention_cfg_branch = None
+            previous_attention.downstream_head_intervention_count = 0
+        if intervention is not None:
+            attention = self.blocks[intervention.layer_index].self_attn
+            attention.downstream_head_intervention = intervention
+            attention.downstream_intervention_dit_index = (
+                self._dynamic_sparse_dit_index
+            )
+            attention.downstream_intervention_cfg_branch = (
+                self._dynamic_attention_oracle_cfg_branch
+            )
+            attention.downstream_head_intervention_count = 0
+        self._dynamic_downstream_head_intervention = intervention
+
+    def get_dynamic_downstream_head_intervention_trace(self) -> dict[str, object]:
+        intervention = self._dynamic_downstream_head_intervention
+        if intervention is None:
+            return {"configured": False, "applied_count": 0}
+        attention = self.blocks[intervention.layer_index].self_attn
+        return {
+            "configured": True,
+            "dit_index": intervention.dit_index,
+            "layer_index": intervention.layer_index,
+            "head_indices": list(intervention.head_indices),
+            "scale": intervention.scale,
+            "cfg_branches": list(intervention.cfg_branches),
+            "query_scope": intervention.query_scope,
+            "applied_count": attention.downstream_head_intervention_count,
+        }
 
     def flush_dynamic_attention_oracle_request(self):
         collector = self._dynamic_attention_oracle_collector
@@ -3018,6 +3163,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         the same immutable route configuration.
         """
 
+        if enabled and self._dynamic_downstream_head_intervention is not None:
+            raise ValueError(
+                "Disable downstream head intervention before enabling sparse attention"
+            )
         if enabled and self.frame_seqlen != 880:
             raise ValueError(
                 "Embodied anchor routing currently supports only the released "

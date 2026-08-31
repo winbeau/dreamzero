@@ -1,10 +1,12 @@
 import json
 
+import pytest
 import torch
 
 from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
     DenseAttentionOracleCollector,
     DenseAttentionOracleConfig,
+    DownstreamHeadIntervention,
     OracleThresholds,
     analyze_dense_attention,
     deterministic_query_sample_indices,
@@ -12,6 +14,49 @@ from groot.vla.model.dreamzero.modules.dynamic_attention_oracle import (
     minimum_oracle_budget,
     support_turnover,
 )
+
+
+def test_downstream_head_intervention_validates_and_matches_context() -> None:
+    intervention = DownstreamHeadIntervention(
+        dit_index=3,
+        layer_index=7,
+        head_indices=(1, 4),
+        scale=0.5,
+        cfg_branches=("conditional",),
+        query_scope="register",
+    )
+
+    assert intervention.applies(
+        dit_index=3,
+        layer_index=7,
+        cfg_branch="conditional",
+    )
+    assert not intervention.applies(
+        dit_index=2,
+        layer_index=7,
+        cfg_branch="conditional",
+    )
+    assert not intervention.applies(
+        dit_index=3,
+        layer_index=7,
+        cfg_branch="unconditional",
+    )
+
+
+def test_downstream_head_intervention_rejects_invalid_spec() -> None:
+    for kwargs in (
+        {"head_indices": ()},
+        {"head_indices": (1, 1)},
+        {"head_indices": (1,), "cfg_branches": ("invalid",)},
+        {"head_indices": (1,), "query_scope": "invalid"},
+        {"head_indices": (1,), "scale": float("nan")},
+    ):
+        with pytest.raises(ValueError):
+            DownstreamHeadIntervention(
+                dit_index=0,
+                layer_index=0,
+                **kwargs,
+            )
 
 
 def test_query_sampling_is_deterministic_and_covers_endpoints() -> None:

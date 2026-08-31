@@ -1519,6 +1519,18 @@ class WANPolicyHead(ActionHead):
                     "Flow Sentinel Trace "
                     + json.dumps(self._last_flow_sentinel_trace, sort_keys=True)
                 )
+            get_downstream_trace = getattr(
+                self.model,
+                "get_dynamic_downstream_head_intervention_trace",
+                None,
+            )
+            if get_downstream_trace is not None:
+                downstream_trace = get_downstream_trace()
+                if downstream_trace.get("configured"):
+                    print(
+                        "Downstream Head Intervention Trace "
+                        + json.dumps(downstream_trace, sort_keys=True)
+                    )
 
         flush_oracle_request = getattr(
             self.model,
