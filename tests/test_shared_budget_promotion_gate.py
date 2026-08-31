@@ -4,7 +4,9 @@ import pandas as pd
 from benchmarks.train_shared_budget_promotion_gate import (
     aggregate_shared_gate_features,
     choose_dense_threshold,
+    episode_cross_validated_route,
 )
+from sklearn.linear_model import LogisticRegression
 
 
 def _proxy_frame() -> pd.DataFrame:
@@ -74,3 +76,26 @@ def test_dense_threshold_prefers_sparse_routes_without_false_sparse() -> None:
     assert prediction.tolist() == [0, 0, 1, 1]
     assert metrics["false_sparse_count"] == 0
     assert metrics["sparse_route_rate"] == 0.5
+
+
+def test_episode_cross_validation_holds_out_complete_groups() -> None:
+    features = pd.DataFrame(
+        {"risk": [0.0, 0.1, 0.2, 0.8, 0.9, 1.0]}
+    )
+    truth = np.asarray((0, 0, 0, 1, 1, 1))
+    groups = np.asarray((0, 1, 2, 3, 4, 5))
+    sample_weight = np.where(truth == 1, 10.0, 1.0)
+
+    prediction, metrics = episode_cross_validated_route(
+        LogisticRegression(),
+        features,
+        truth,
+        groups,
+        sample_weight,
+        weight_parameter="sample_weight",
+        false_sparse_limit=0.01,
+    )
+
+    assert prediction.shape == truth.shape
+    assert metrics["fold_count"] == 6
+    assert len(metrics["folds"]) == 6

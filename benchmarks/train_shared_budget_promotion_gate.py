@@ -18,10 +18,12 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, f1_score
+from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -59,14 +61,11 @@ SHARED_GATE_FEATURE_COLUMNS = (
     "packed_route_mass_p05",
     "packed_action_change_mean",
     "packed_action_change_p95",
-    "packed_two_action_change_mean",
-    "packed_two_action_change_p95",
     "packed_action_cosine_p05",
     "packed_cfg_disagreement_mean",
     "packed_cfg_disagreement_p95",
     "packed_signature_norm_mean",
     "packed_signature_norm_p95",
-    "packed_action_acceleration_p95",
     "candidate_m1_route_keep_mean",
     "candidate_m1_dense_route_rate",
     "candidate_m1_fallback_rate",
@@ -316,6 +315,62 @@ def dense_probability(estimator: Any, features: pd.DataFrame) -> np.ndarray:
     return probabilities[:, dense_columns[0]]
 
 
+def episode_cross_validated_route(
+    estimator: Any,
+    features: pd.DataFrame,
+    truth: np.ndarray,
+    groups: np.ndarray,
+    sample_weight: np.ndarray,
+    *,
+    weight_parameter: str,
+    false_sparse_limit: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Choose each fold threshold without observing its held-out episode."""
+
+    truth = np.asarray(truth, dtype=np.int64)
+    groups = np.asarray(groups)
+    sample_weight = np.asarray(sample_weight, dtype=np.float64)
+    prediction = np.full(len(features), -1, dtype=np.int64)
+    fold_metrics = []
+    splitter = LeaveOneGroupOut()
+    for train_indices, held_out_indices in splitter.split(features, truth, groups):
+        fold_estimator = clone(estimator)
+        fold_estimator.fit(
+            features.iloc[train_indices],
+            truth[train_indices],
+            **{weight_parameter: sample_weight[train_indices]},
+        )
+        train_probability = dense_probability(
+            fold_estimator, features.iloc[train_indices]
+        )
+        threshold, _train_prediction, _train_metrics = choose_dense_threshold(
+            train_probability,
+            truth[train_indices],
+            false_sparse_limit=false_sparse_limit,
+        )
+        held_out_probability = dense_probability(
+            fold_estimator, features.iloc[held_out_indices]
+        )
+        held_out_prediction = (held_out_probability > threshold).astype(np.int64)
+        prediction[held_out_indices] = held_out_prediction
+        fold_metrics.append(
+            {
+                "source_episode_index": int(groups[held_out_indices[0]]),
+                **route_metrics(truth[held_out_indices], held_out_prediction),
+            }
+        )
+    if np.any(prediction < 0):
+        raise RuntimeError("episode cross-validation omitted request rows")
+    return prediction, {
+        **route_metrics(truth, prediction),
+        "fold_count": len(fold_metrics),
+        "folds_with_false_sparse": int(
+            sum(metric["false_sparse_count"] > 0 for metric in fold_metrics)
+        ),
+        "folds": fold_metrics,
+    }
+
+
 def route_metrics(truth: np.ndarray, prediction: np.ndarray) -> dict[str, Any]:
     truth = np.asarray(truth, dtype=np.int64)
     prediction = np.asarray(prediction, dtype=np.int64)
@@ -461,6 +516,15 @@ def train_shared_gate(args: argparse.Namespace) -> dict[str, Any]:
     model_results = {}
     fitted = {}
     for name, (estimator, weight_parameter) in candidate_estimators().items():
+        _cv_prediction, cv_metrics = episode_cross_validated_route(
+            estimator,
+            train[list(SHARED_GATE_FEATURE_COLUMNS)],
+            train_truth,
+            train["source_episode_index"].to_numpy(dtype=np.int64),
+            sample_weight,
+            weight_parameter=weight_parameter,
+            false_sparse_limit=args.false_sparse_limit,
+        )
         estimator.fit(
             train[list(SHARED_GATE_FEATURE_COLUMNS)],
             train_truth,
@@ -481,6 +545,7 @@ def train_shared_gate(args: argparse.Namespace) -> dict[str, Any]:
         )
         test_prediction = (test_probability > threshold).astype(np.int64)
         model_results[name] = {
+            "train_episode_cross_validation": cv_metrics,
             "threshold": threshold,
             "validation": validation_metrics,
             "validation_realized": realized_route_metrics(
@@ -503,7 +568,13 @@ def train_shared_gate(args: argparse.Namespace) -> dict[str, Any]:
         model_results,
         key=lambda name: (
             model_results[name]["validation"]["false_sparse_count"],
+            model_results[name]["train_episode_cross_validation"][
+                "false_sparse_count"
+            ],
             model_results[name]["validation"]["mean_route_cost"],
+            model_results[name]["train_episode_cross_validation"][
+                "mean_route_cost"
+            ],
             -model_results[name]["validation"]["macro_f1"],
         ),
     )
