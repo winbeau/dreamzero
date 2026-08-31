@@ -51,6 +51,9 @@ confidence fallback, and a quality-safe accelerated policy remain incomplete.
 | timestep expansion late4 -> late5 | 1.325x; cosine min 0.98463; L2 max 18.41% | reject early DiT 3 |
 | layer expansion S4 -> S5 at late4 | 1.267x; cosine min 0.99825; L2 max 5.92% | reject fifth segment |
 | late4/S4/H50Q50 validation18 | 1.074x; 14/18 safe; cosine min 0.99802; L2 max 7.51% | reject static candidate |
+| late4/S4/H50Q50 full 108 requests | 1.074--1.091x by split; 92/108 safe | stable speed, reject quality |
+| maximum-Head shared M1 promotion | every validation/test candidate cell Dense | safe but zero sparse coverage |
+| request-wide Packed-proxy promotion gate | val/test 0 false-sparse for selected GB; train episode-CV 6/72 false-sparse; about 1.01x mixed | reject safety and speed |
 
 ## Required remaining ablations
 

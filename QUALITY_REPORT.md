@@ -311,3 +311,27 @@ requests whenever confidence is calibrated.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_validation18/`
+
+## Static frontier full-split action risk and shared-gate rejection
+
+Completing the static table on train and test finds 11/72 train failures and
+1/18 test failure in addition to the four validation failures. Train worst
+case is `train_subset004_source026088_early` at cosine 0.997215 and relative
+L2 8.39%. Test worst case is `test_subset034_source006696_late` at cosine
+0.997798 and relative L2 8.53%. Overall static results are:
+
+| Split | Cosine mean/min | Relative L2 mean/max | Safe |
+| --- | ---: | ---: | ---: |
+| train | 0.999462 / 0.997215 | 3.11% / 8.39% | 61/72 |
+| validation | 0.999513 / 0.998022 | 3.04% / 7.51% | 14/18 |
+| test | 0.999523 / 0.997798 | 2.90% / 8.53% | 17/18 |
+
+The request-level Gradient Boosting promotion gate yields zero mixed-route
+quality failures on validation and test, but this does not pass the M1 safety
+phase: leave-one-source-episode-out training replay has 6/72 false-sparse
+requests across four folds. Its safe held-out result is achieved by falling
+back Dense on 15/18 requests. The artifact is explicitly marked failed and is
+not deployed.
+
+Video-output and closed-loop quality remain unmeasured for this new gate; no
+success-rate or non-inferiority Claim is made.

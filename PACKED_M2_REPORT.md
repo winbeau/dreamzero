@@ -475,3 +475,26 @@ level: risky requests should raise selected segments to Q75/Q100 or Dense,
 while confident requests may retain H50/Q50.  Per-Head kernels remain excluded
 from the main path.  The current resident service continues to hold GPUs 5--6
 at approximately 67.2 GiB each.
+
+## M1-to-shared-Packed promotion path
+
+Commit `ecf7417` allows a Dynamic M1 runtime and an Oracle-ranked shared budget
+table to coexist. For each `(DiT, layer)`, M1 may only increase the table's
+H/Q buckets; the main Packed path returns `None` for Head groups, so QKV/O,
+attention, and FFN retain one shared fixed shape. Existing propagation
+stabilization raises current Q to the segment maximum before execution, and
+the runtime trace records base/effective budgets, fallback counts, confidence,
+and Dense-cell counts. Full-budget cells bypass Packed execution exactly as
+before.
+
+H200 regression coverage is 68/68 across the shared gate, Packed feature
+contract, Dynamic M1 runtime/grouping/state/observer, dynamic budgets, and
+attention integration. This closes an executor interface gap, not the M2
+performance phase: the conservative maximum-Head aggregation maps 100% of the
+current validation/test candidate cells to Dense. No live M1 service timing
+is claimed for that degenerate route.
+
+The next executor experiment should use a small fixed number of risk regions
+whose membership is stable enough to avoid per-DiT projection repacking. A
+request-wide Dense switch is also insufficient: its safe held-out gate retains
+only 16.7% sparse requests and yields about 1.01x mixed E2E speedup.

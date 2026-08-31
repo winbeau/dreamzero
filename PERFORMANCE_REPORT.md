@@ -364,3 +364,31 @@ the 100-request performance experiment.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_validation18/`
+
+## Train/test completion and gated mixed performance
+
+The same static frontier was extended without changing the 16-step/eight-DiT
+protocol:
+
+| Split | Dense mean | Sparse mean | Paired geomean | CI95 | Faster |
+| --- | ---: | ---: | ---: | --- | ---: |
+| train72 | 1.8799 s | 1.7236 s | 1.0908x | [1.0874x, 1.0941x] | 72/72 |
+| test18 | 1.8985 s | 1.7471 s | 1.0867x | [1.0798x, 1.0938x] | 18/18 |
+
+Together with validation18 this gives 108 paired requests and 108/108 Sparse-
+faster targets. It still cannot be promoted because static action quality
+fails and the speed is far below 1.35x.
+
+The episode-CV-selected shared promotion gate routes only 3/18 validation and
+3/18 test requests to the sparse table. Realized mixed speedups are 1.0094x
+and 1.0137x, with 16.7% strictly faster. The gate therefore fails both the
+1.35x mixed-speed and 95%-strictly-faster requirements even though its held-
+out mixed actions pass. The result is a negative performance ablation.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_train72/
+dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_test18/
+dynamic_m1_m2/request_gate/20260831_shared_h50q50_proxy_v2_episode_cv/
+```

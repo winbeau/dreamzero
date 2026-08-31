@@ -1092,3 +1092,35 @@ E2E target rather than merely noisy.
 Artifact:
 
 `dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_validation18/`
+
+## Stable 108-request static frontier and dynamic-gate ceiling
+
+The rejected late4/S4/H50Q50 table was completed across all task-disjoint
+splits so its risk could supervise a dynamic promotion gate. Every target
+still performs three real history calls and eight real DiTs per inference.
+
+| Split | Requests | Paired geomean speedup | CI95 | Sparse faster | Action-safe |
+| --- | ---: | ---: | --- | ---: | ---: |
+| train | 72 | 1.0908x | [1.0874x, 1.0941x] | 72/72 | 61/72 |
+| validation | 18 | 1.0738x | [1.0691x, 1.0786x] | 18/18 | 14/18 |
+| test | 18 | 1.0867x | [1.0798x, 1.0938x] | 18/18 | 17/18 |
+
+This is 108 paired target requests, but it is not the required main result:
+the table fails 16 final-action requests and no GPU exchange has been applied
+to this row. The training failures span early/middle/late as 6/1/4, so stage
+alone cannot define the promotion.
+
+The conservative M1 maximum-Head promotion implemented at `ecf7417` preserves
+one shared Packed shape, but promotes every held-out candidate cell to Dense
+because each cell has at least one fallback Head. A causal request-level
+Gradient Boosting gate trained at `8962b0d` and selected with episode CV at
+`e4529f5` catches all validation/test failures, but only retains the table on
+3/18 requests per split. Its mixed speedups are 1.009x and 1.014x. Commit
+`796a923` makes episode-CV risk, the 1.35x E2E target, and the 95%-faster target
+mandatory; the resulting artifact is correctly rejected.
+
+The data therefore rule out both extremes: any-fallback-Head promotion is
+fully Dense, while a global request decision safe enough for held-out action
+quality destroys coverage. The next budget representation must localize risk
+more finely than a request-wide switch but use fewer shapes than the negative
+3--4 group per-Head executor.

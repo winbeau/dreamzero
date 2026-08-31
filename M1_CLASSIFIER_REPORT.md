@@ -468,3 +468,60 @@ unscanned/uncertain cells.
   action/video changes;
 - populate the task-disjoint downstream risk table and run the implemented
   fixed-shape post-quantization calibration evaluator.
+
+## Shared Packed promotion gate and rejection
+
+Commits `ecf7417` and `eccc5fe` add a conservative bridge from online M1 to a
+shared timestep/layer Packed table. The Oracle table supplies the base H/Q
+bucket, M1 may only promote it, and the executor launches no per-Head group in
+this mode. Current-token budgets remain constant within each five-layer
+propagation segment. Full-budget cells stay on the exact Dense path, while a
+fallback Head promotes its layer through the same fixed bucket interface.
+
+This maximum-Head rule is safe but degenerate for the current Packed-proxy-v2
+classifier. Offline replay on both validation18 and test18 shows that every
+candidate `(request, DiT>=4, layer 1--20)` cell contains at least one Dense
+fallback Head. Each such cell has 6--32 fallback Heads, averaging 16.33 on
+validation and 16.12 on test. Consequently 100% of candidate cells promote
+to Dense and zero of 36 held-out requests retain any sparse cell. The live
+6105 service was not restarted for a result that was analytically certain to
+be fully Dense.
+
+Commit `547f8b8` also fixes the post-grouping evaluator to honor the feature
+schema stored in the selected bundle. Before this fix,
+`evaluate_dynamic_m1_group_router.py` always requested Dense-Oracle columns
+and passed the default Dense feature list to `sequential_predict`, so a
+Packed-proxy bundle could not be evaluated by the advertised CLI.
+
+The static late4/S4/H50Q50 table was then replayed on train72 and test18 to
+obtain final-action supervision for a request-level shared-budget promotion
+gate. The base-table unsafe labels are 11/72 train, 4/18 validation, and 1/18
+test. Commits `8962b0d`, `e4529f5`, and `796a923` add a causal binary
+`shared_sparse` versus `dense_fallback` trainer. Its features come only from
+robot state and the Packed observer/M1 state available before the third real
+DiT; task identity, trajectory stage/length, future DiTs, current Dense
+attention, and final action are excluded. Model selection uses train
+source-episode leave-one-out predictions plus validation thresholds; test is
+report-only.
+
+| Candidate | Train episode-CV false-sparse | Validation false-sparse / Sparse route | Test false-sparse / Sparse route | Decision |
+| --- | ---: | ---: | ---: | --- |
+| cost-sensitive logistic | 7/72 | 0/18 / 3/18 | 1/18 / 1/18 | reject safety |
+| cost-sensitive Gradient Boosting | 6/72 | 0/18 / 3/18 | 0/18 / 3/18 | selected diagnostic; reject CV |
+| cost-sensitive small MLP | 8/72 | 0/18 / 1/18 | 0/18 / 0/18 | reject degenerate Dense |
+
+The selected Gradient Boosting gate has zero final-action failures on the
+validation and test mixed routes, but it fails the episode-level safety gate
+and retains too little sparse coverage. Mixed speedup is only 1.009x on
+validation and 1.014x on test, with 16.7% of requests strictly faster. The
+artifact therefore records `safety_gates_passed: false`,
+`performance_gates_passed: false`, and `passed: false`. This candidate is not
+connected to the live server and cannot support an M1 Claim.
+
+Artifacts:
+
+```text
+dynamic_m1_m2/request_gate/20260831_shared_h50q50_proxy_v2_episode_cv/
+dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_train72/
+dynamic_m1_m2/e2e/20260831_guarded_segments_late4_s4_h50q50_test18/
+```
