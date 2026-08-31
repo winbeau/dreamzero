@@ -19,8 +19,9 @@ inside the packed stack is substantially more effective. The follow-up sweep
 also identifies a required executor invariant: mutable current-token budgets
 must stay fixed within a propagation segment. Segment-max budgets reach 0.9749
 video cosine at 1.552x early-DiT speedup, while a 75% segment floor reaches
-0.9970 at 1.378x. Confidence-controlled M1 runtime routing and a full eight-DiT
-policy replay are still required before this phase can pass its quality gate.
+0.9970 at 1.378x. The confidence-controlled M1 router now exists, but its
+online history-feature connection and a full eight-DiT policy replay are still
+required before this phase can pass its quality gate.
 
 Implementation commits:
 
@@ -38,10 +39,14 @@ Implementation commits:
 - `39f0515`: localize conservative current compute by propagation segment;
 - `ca0dce6`: enforce segment-stable current budgets inside Packed M2;
 - `72a4c4d`: build fixed timestep-aware packed-segment policies.
+- `22a8a3d`: risk-controlled calibrated M1 routing into four Q/K-coupled Head
+  groups with downstream unknown/unsafe Dense fallback.
 
 All listed commits are pushed to
 `origin/codex/dreamzero-anchor-sparse-opt`, and the H200 checkout is
 fast-forwarded through `72a4c4d`.
+Commit `22a8a3d` is pushed but has not yet been synchronized to H200 because
+both configured SSH routes were unavailable.
 
 ## Runtime contract
 
@@ -196,6 +201,40 @@ Artifacts:
       20260830_m1_head_groups/prior_mean_group4.json
       20260830_m1_headgroup_aggressive_tl_early_late_gpu01/
 ```
+
+### Calibrated risk-controlled grouped route
+
+Commit `22a8a3d` addresses the policy gap in the negative prior-only ablation
+without reinterpreting its timing as a positive result. The new deployment
+router consumes the frozen v3 classifier, calibrated confidence, and promotion
+policy per request. It rounds each Head budget upward into `[25, 50, 75,
+100]%`, couples current Q/K and historical K/V to the same ratio, and therefore
+produces no more than four execution shapes per timestep/layer. This is the
+requested Q compression path; the 25 action/state tokens remain Dense.
+
+Three fallback causes remain distinct in runtime diagnostics:
+
+- classifier confidence below its frozen threshold;
+- downstream group evidence that violates explicit action/video thresholds;
+- no task-disjoint downstream evidence for that Head cell.
+
+All three force the affected Head to 100%. The downstream table accepts only
+scale-zero group-removal records with exact trace agreement, the configured
+split and trajectory-stage coverage, and a minimum unique-request count. This
+prevents the incomplete current scan from being silently treated as safety
+evidence.
+
+The companion evaluator reruns validation and test without retuning, rounds
+Oracle truth upward to the same executor buckets, and reports post-grouping
+false-sparse rate, macro-F1, mass retention, calibration, group count,
+fallback composition, and 200-repeat episode bootstrap. Twenty focused and
+existing M1 tests pass together with Ruff, compilation, and diff checks.
+
+There is deliberately no new speed or quality row here yet. H200 and its
+video-enabled downstream artifacts were unreachable, so the calibrated risk
+table and real Packed-M2 replay have not run. Until they do, unknown cells
+route Dense and `22a8a3d` is an implemented contract rather than an accepted
+performance result.
 
 ## Segmented packed spatial propagation gate
 

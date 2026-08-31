@@ -1,6 +1,6 @@
 # Dynamic M1 classifier report
 
-Date: 2026-08-30
+Date: 2026-08-31
 
 ## Status
 
@@ -13,9 +13,12 @@ decision time. The old bundle must therefore not support a paper Claim.
 
 The training and request-gate feature contracts now exclude those fields. The
 corrected v3 per-head classifier has been retrained and passes its statistical
-gates. The complete M1 phase remains open because the corrected request-level
-gate and real dynamic-routing final-action replay are not yet accepted. The
-prior v2 metrics below are retained only to document the superseded ablation.
+gates. A risk-controlled four-shape grouped router is now implemented, but the
+complete M1 phase remains open because its task-disjoint downstream risk table
+has not yet been populated, the grouped v3 artifact has not yet been
+re-evaluated, and real dynamic-routing final-action replay is not yet accepted.
+The prior v2 metrics below are retained only to document the superseded
+ablation.
 
 Implementation commits:
 
@@ -27,9 +30,13 @@ Implementation commits:
 - `4ce658e`: request-level final-action safety gate from first-two-DiT state.
 - `df04445`: distinguish request-gate safety from performance acceptance.
 - `1510f4b`: remove future-action and offline trajectory annotations from M1.
+- `22a8a3d`: risk-controlled four-bucket Head grouping, downstream coverage
+  table, and post-quantization task-disjoint evaluator.
 
-All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt` and
-the H200 checkout was fast-forwarded through them.
+All listed commits are pushed to `origin/codex/dreamzero-anchor-sparse-opt`.
+The H200 checkout was previously fast-forwarded through `1510f4b`; `22a8a3d`
+has not yet been synchronized because both configured SSH routes were
+unavailable.
 
 The superseded v2 bundle encoded `RoutePolicy` under the training script's
 `__main__` module and therefore could not be loaded by a clean deployment
@@ -161,6 +168,48 @@ Artifact:
   dynamic_m1_m2/request_gate/20260831_deployment_safe_v3/
 ```
 
+## Risk-controlled fixed-shape Head grouping
+
+Commit `22a8a3d` replaces the static train-prior bridge as the intended M1
+deployment contract. It loads the calibrated v3 estimator, confidence
+calibrator, promotion policy, and feature order, then conservatively rounds
+the seven M1 ratios upward into the four executor shapes `[25, 50, 75, 100]%`.
+Heads sharing one effective ratio form one execution group, so each
+request/timestep/layer uses at most four FA2 shapes. Historical K/V and current
+Q/K use the same group ratio in this first deployable contract; action/state
+tokens remain Dense in M2.
+
+The grouped decision retains all requested M1 semantics per Head:
+
+- calibrated route confidence and the original classifier fallback;
+- `critical`, `stable`, `slow-changing`, `predictable-late`, or `uncertain`;
+- the nested anchor-prefix ratio and route refresh frequency;
+- late-step extrapolation permission only for confident, two-history,
+  low-turnover, low-VV-change routes.
+
+Downstream safety is a separate mandatory gate, not another confidence
+feature. `build_downstream_head_risk_table.py` accepts only scale-zero
+shared-group removals with exact trace agreement and one application. A Head
+is marked scanned only after the configured task-disjoint split, all required
+trajectory stages, and a minimum unique-request count are covered. Action and
+video thresholds are explicit inputs. Failed evidence marks every Head in the
+removed group unsafe; missing coverage stays unknown. Classifier-low-
+confidence, downstream-unsafe, and downstream-unknown fallbacks are logged
+separately and all force Dense.
+
+`evaluate_dynamic_m1_group_router.py` replays the frozen bundle on validation
+and test without retuning, rounds Oracle labels upward to the same four
+executor buckets, and reports post-grouping macro-F1, false-sparse rate,
+confusion matrix, mass retention, calibration, group counts, fallback causes,
+and 200-repeat source-episode bootstrap. Its output deliberately remains
+`passed: false` until action/video policy replay and closed-loop gates pass.
+
+Local implementation gates are 20 passing grouped-M1/classifier tests, Ruff,
+Python compilation, and `git diff --check`. No post-grouping v3 number is
+reported yet: the required video-enabled downstream risk artifact lives on
+the currently unreachable H200 server, and treating every unscanned cell as
+safe would violate the M1 risk contract.
+
 ## Candidate comparison
 
 The following numbers describe the superseded feature-contaminated v2 run.
@@ -244,7 +293,8 @@ must therefore include calibrated downstream action sensitivity or a
 conservative proxy trained against it, while retaining Dense fallback for
 unscanned/uncertain cells.
 
-- integrate the selected bundle into timestep/layer/head-group budget routing;
+- connect the implemented grouped bundle router to the model's online history
+  feature producer and Packed-M2 table update;
 - measure actual route/classifier overhead on GPU;
 - replace the current global profile family with finer shared-group dynamic
   budgets; request-level selection alone has an Oracle ceiling below target;
@@ -253,4 +303,5 @@ unscanned/uncertain cells.
 - expand same-noise downstream labels across task-disjoint shared head groups,
   save the worst false-sparse/fallback cases, and connect them to final
   action/video changes;
-- recheck calibration after fixed-shape head-group quantization.
+- populate the task-disjoint downstream risk table and run the implemented
+  fixed-shape post-quantization calibration evaluator.
