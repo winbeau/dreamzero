@@ -1,3 +1,5 @@
+> **Evaluation fork (`main`) — planning only:** [LIBERO-5B handoff](docs/action-eval/README.md) · [operating rules](AGENTS.md). Execution is paused. The RLinf 5B candidate is distinct from the original DROID 14B release below; preserve existing experiments and follow local Git → server pull → locked uv sync.
+
 # NVIDIA DreamZero: World Action Models Are Zero-Shot Policies
 A research project from [NVIDIA GEAR Lab](https://research.nvidia.com/labs/gear/).
 
