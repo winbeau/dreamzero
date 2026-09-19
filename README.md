@@ -1,4 +1,4 @@
-> **Evaluation fork (`main`) — planning only:** [LIBERO-5B handoff](docs/action-eval/README.md) · [operating rules](AGENTS.md). Execution is paused. The RLinf 5B candidate is distinct from the original DROID 14B release below; preserve existing experiments and follow local Git → server pull → locked uv sync.
+> **Evaluation fork (`main`) — evaluation running:** [LIBERO-5B handoff](docs/action-eval/README.md) · [inference path](docs/action-eval/INFERENCE-PATH.md) · [operating rules](AGENTS.md). The RLinf WAN2.2-5B LIBERO-SFT candidate is being evaluated through action-eval on physical GPUs 4/5/7; it is distinct from the original DROID 14B release described below. Preserve existing experiments and follow local Git → server pull.
 
 # NVIDIA DreamZero: World Action Models Are Zero-Shot Policies
 A research project from [NVIDIA GEAR Lab](https://research.nvidia.com/labs/gear/).

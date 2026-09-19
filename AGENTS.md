@@ -8,7 +8,7 @@ All projects: local clone/edit → local git add/commit/push on main → compute
 
 Reuse validated pyproject.toml and uv.lock byte-for-byte wherever compatible; pin new dependencies/build tools/source commits exactly, document necessary differences, never upgrade implicitly. Missing locks may be generated only in isolated server staging, returned for local review/commit/push, then pulled before execution. Do not change live environments.
 
-Only physical GPU5 on H200-target-server is authorized for future single-card tests; other GPUs and existing 14B jobs must remain untouched. Do not run RLinf's installer wholesale: it can rewrite shared LIBERO configuration and has dependency conflicts requiring review. Do not connect to or stop existing Ray instances. No CI workflows; no force push. No training is authorized.
+Physical GPUs 4, 5 and 7 on H200-target-server are authorized; never touch another GPU, another user's process, or the existing 14B jobs. Do not run RLinf's installer wholesale: it can rewrite shared LIBERO configuration and has dependency conflicts requiring review. Do not connect to or stop existing Ray instances. No CI workflows; no force push. No training is authorized. The evaluated inference path is mapped in [docs/action-eval/INFERENCE-PATH.md](docs/action-eval/INFERENCE-PATH.md); the adapter itself lives in the RLinf fork, which is where `get_model` and the LIBERO transforms are.
 
 README states model identity/status; docs/action-eval records the plan, provenance and blockers. Verification records require status, timestamp/timezone, commits, checkpoint/lock hashes, exact commands, exit codes, artifact paths and limitations. No completed benchmark claim without complete outcomes; errors are not task failures.
 
