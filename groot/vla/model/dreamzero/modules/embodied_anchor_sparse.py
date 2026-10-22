@@ -54,6 +54,18 @@ class ViewRegion:
         return (rows[:, None] * grid_width + cols[None, :]).reshape(-1)
 
 
+def libero_side_by_side_view_regions(grid_height: int, grid_width: int) -> tuple[ViewRegion, ...]:
+    """LIBERO two-camera layout: exterior (agentview) left half, wrist right half."""
+
+    if grid_width % 2 != 0:
+        raise ValueError("LIBERO side-by-side routing requires an even token grid width")
+    half_w = grid_width // 2
+    return (
+        ViewRegion("exterior", 0, grid_height, 0, half_w),
+        ViewRegion("wrist", 0, grid_height, half_w, grid_width),
+    )
+
+
 def droid_composite_view_regions(
     grid_height: int = 22,
     grid_width: int = 40,
@@ -90,6 +102,12 @@ class AnchorSparseConfig:
     num_router_heads: int = 4
     smooth_radius: int = 1
     views: tuple[ViewRegion, ...] = ()
+    #: Oldest frames kept dense (e.g. the clean observation frame of a LIBERO call).
+    dense_first_frames: int = 0
+    #: ``action``: action-conditioned anchor scores; ``random``: seeded uniform scores
+    #: (the random-drop control at the same budget).
+    selection: str = "action"
+    random_seed: int = 0
 
     def __post_init__(self) -> None:
         if self.frame_seqlen != self.grid_height * self.grid_width:
@@ -101,6 +119,10 @@ class AnchorSparseConfig:
             raise ValueError("keep_ratio must lie in (0, 1]")
         if self.recent_dense_frames < 0:
             raise ValueError("recent_dense_frames must be non-negative")
+        if self.dense_first_frames < 0:
+            raise ValueError("dense_first_frames must be non-negative")
+        if self.selection not in ("action", "random"):
+            raise ValueError("selection must be 'action' or 'random'")
         if self.probe_dim <= 0:
             raise ValueError("probe_dim must be positive")
         if self.num_router_heads <= 0:
@@ -126,11 +148,12 @@ class AnchorSparseConfig:
 
         if num_frames < 0:
             raise ValueError("num_frames must be non-negative")
-        num_dense = min(self.recent_dense_frames, num_frames)
-        num_sparse = num_frames - num_dense
+        num_first = min(self.dense_first_frames, num_frames)
+        num_dense = min(self.recent_dense_frames, num_frames - num_first)
+        num_sparse = num_frames - num_first - num_dense
         return (
             num_sparse * self.anchor_tokens_per_frame
-            + num_dense * self.frame_seqlen
+            + (num_first + num_dense) * self.frame_seqlen
         )
 
 
@@ -405,20 +428,29 @@ def build_video_key_route(
     if frame_scores.ndim != 3 or frame_scores.shape[-1] != config.frame_seqlen:
         raise ValueError("frame_scores must have shape [B, F, frame_seqlen]")
     batch, num_frames, _ = frame_scores.shape
-    num_dense = min(config.recent_dense_frames, num_frames)
-    num_sparse = num_frames - num_dense
+    num_first = min(config.dense_first_frames, num_frames)
+    num_dense = min(config.recent_dense_frames, num_frames - num_first)
+    num_sparse = num_frames - num_first - num_dense
     chunks = []
 
+    if num_first > 0:
+        chunks.append(
+            torch.arange(0, num_first * config.frame_seqlen, device=frame_scores.device, dtype=torch.long)
+            .expand(batch, -1)
+        )
+
     if num_sparse > 0:
-        local = select_view_balanced_anchor_indices(frame_scores[:, :num_sparse], config)
+        local = select_view_balanced_anchor_indices(
+            frame_scores[:, num_first:num_first + num_sparse], config
+        )
         offsets = (
-            torch.arange(num_sparse, device=frame_scores.device, dtype=local.dtype)
+            torch.arange(num_first, num_first + num_sparse, device=frame_scores.device, dtype=local.dtype)
             * config.frame_seqlen
         )
         chunks.append((local + offsets.view(1, num_sparse, 1)).reshape(batch, -1))
 
     if num_dense > 0:
-        dense_start = num_sparse * config.frame_seqlen
+        dense_start = (num_first + num_sparse) * config.frame_seqlen
         dense = torch.arange(
             dense_start,
             num_frames * config.frame_seqlen,
@@ -445,12 +477,19 @@ def route_action_conditioned_video_keys(
             f"{config.frame_seqlen}"
         )
     num_frames = video_key.shape[1] // config.frame_seqlen
-    scores = action_conditioned_anchor_scores(
-        action_query,
-        video_key,
-        probe_dim=config.probe_dim,
-        num_router_heads=config.num_router_heads,
-    ).reshape(video_key.shape[0], num_frames, config.frame_seqlen)
+    if config.selection == "random":
+        generator = torch.Generator(device=video_key.device).manual_seed(int(config.random_seed))
+        scores = torch.rand(
+            (video_key.shape[0], num_frames, config.frame_seqlen),
+            generator=generator, device=video_key.device, dtype=torch.float32,
+        )
+    else:
+        scores = action_conditioned_anchor_scores(
+            action_query,
+            video_key,
+            probe_dim=config.probe_dim,
+            num_router_heads=config.num_router_heads,
+        ).reshape(video_key.shape[0], num_frames, config.frame_seqlen)
     scores = smooth_spatial_scores(
         scores,
         grid_height=config.grid_height,
@@ -463,7 +502,8 @@ def route_action_conditioned_video_keys(
         video_indices=indices,
         scores=scores,
         num_video_frames=num_frames,
-        num_dense_frames=min(config.recent_dense_frames, num_frames),
+        num_dense_frames=min(config.dense_first_frames, num_frames)
+        + min(config.recent_dense_frames, max(num_frames - config.dense_first_frames, 0)),
         anchor_tokens_per_sparse_frame=config.anchor_tokens_per_frame,
     )
 

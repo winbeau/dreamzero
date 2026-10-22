@@ -6,6 +6,7 @@ from groot.vla.model.dreamzero.modules.embodied_anchor_sparse import (
     AnchorSparseConfig,
     build_current_video_query_route,
     droid_composite_view_regions,
+    libero_side_by_side_view_regions,
     gather_sequence_by_index,
     propagate_spatial_anchor_updates,
     route_action_conditioned_video_keys,
@@ -1721,6 +1722,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         propagate_every: int = 1,
         reuse_denoise: bool = True,
         record_diagnostics: bool = False,
+        view_layout: str = "droid",
+        grid_height: int | None = None,
+        grid_width: int | None = None,
+        dense_first_frames: int = 0,
+        selection: str = "action",
+        random_seed: int = 0,
     ) -> None:
         """Configure sparse routing after loading an upstream checkpoint.
 
@@ -1730,10 +1737,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         the same immutable route configuration.
         """
 
-        if enabled and self.frame_seqlen != 880:
+        if view_layout == "droid":
+            grid_height, grid_width = grid_height or 22, grid_width or 40
+        elif view_layout != "libero_side_by_side":
+            raise ValueError(f"unknown view_layout {view_layout!r}")
+        if enabled and (grid_height is None or grid_width is None
+                        or self.frame_seqlen != grid_height * grid_width):
             raise ValueError(
-                "Embodied anchor routing currently supports only the released "
-                f"DreamZero-DROID 22x40 layout, got frame_seqlen={self.frame_seqlen}."
+                f"anchor routing grid {grid_height}x{grid_width} does not match "
+                f"frame_seqlen={self.frame_seqlen}"
             )
         if not 0.0 < current_keep_ratio <= 1.0:
             raise ValueError("current_keep_ratio must lie in (0, 1]")
@@ -1751,14 +1763,18 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if enabled:
             config = AnchorSparseConfig(
                 frame_seqlen=self.frame_seqlen,
-                grid_height=22,
-                grid_width=40,
+                grid_height=grid_height,
+                grid_width=grid_width,
                 keep_ratio=keep_ratio,
                 recent_dense_frames=recent_dense_frames,
                 probe_dim=probe_dim,
                 num_router_heads=num_router_heads,
                 smooth_radius=smooth_radius,
-                views=droid_composite_view_regions(),
+                views=(droid_composite_view_regions(grid_height, grid_width) if view_layout == "droid"
+                       else libero_side_by_side_view_regions(grid_height, grid_width)),
+                dense_first_frames=dense_first_frames,
+                selection=selection,
+                random_seed=random_seed,
             )
 
         self.anchor_sparse_enabled = enabled
