@@ -349,8 +349,13 @@ class WanI2VCrossAttention(WanSelfAttention):
             v = self.v(context).view(b, -1, n, d)
         x = flash_attention(q, k, v, k_lens=None)
 
-        k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
-        v_img = self.v_img(context_img).view(b, -1, n, d)
+        if crossattn_cache is not None and "k_img" in crossattn_cache:
+            k_img, v_img = crossattn_cache["k_img"], crossattn_cache["v_img"]
+        else:
+            k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
+            v_img = self.v_img(context_img).view(b, -1, n, d)
+            if crossattn_cache is not None:
+                crossattn_cache["k_img"], crossattn_cache["v_img"] = k_img, v_img
         img_x = flash_attention(q, k_img, v_img, k_lens=None)
 
         # output

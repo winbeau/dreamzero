@@ -1350,7 +1350,11 @@ class CausalWanAttentionBlock(nn.Module):
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, e):
-            x = x + self.cross_attn(self.norm3(x), context)
+            if isinstance(crossattn_cache, dict):
+                # Exact per-call cache of the context K/V (same values at every DiT step of a call).
+                x = x + self.cross_attn(self.norm3(x), context, crossattn_cache=crossattn_cache)
+            else:
+                x = x + self.cross_attn(self.norm3(x), context)
             y = self.ffn(
                 (self.norm2(x) * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
             )
@@ -2136,9 +2140,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         state: torch.Tensor | None,
         kv_cache: list[torch.Tensor],
         current_start_frame: int,
+        crossattn_cache: list[dict] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor]]:
         r"""
         Forward pass through the diffusion model blocks.
+
+        ``crossattn_cache``: optional per-block dicts (exact per-call cross-attention K/V cache);
+        anything else means no cache (the default path).
         """
         x = x.flatten(start_dim=2).transpose(1, 2)
 
@@ -2240,6 +2248,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 context=context,
                 action_register_length=action_register_length,
                 kv_cache=kv_cache[block_index],
+                crossattn_cache=crossattn_cache[block_index] if crossattn_cache is not None else None,
                 current_start_frame=current_start_frame,
                 anchor_route_indices=anchor_route_indices,
                 current_video_indices=current_video_indices,
@@ -2466,6 +2475,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             state=state,
             kv_cache=kv_cache,
             current_start_frame=current_start_frame,
+            crossattn_cache=(crossattn_cache if (isinstance(crossattn_cache, list) and crossattn_cache
+                                                and isinstance(crossattn_cache[0], dict)) else None),
         )
 
         # Copy the updated KV caches back to the original KV cache.

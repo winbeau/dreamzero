@@ -1149,6 +1149,10 @@ class WANPolicyHead(ActionHead):
         crossattn_caches = self._get_caches(
             [self.crossattn_cache, self.crossattn_cache_neg],
         )
+        if getattr(self, "exact_cross_kv_cache", False):
+            # Fresh per-call dict caches: the context K/V are computed at the first DiT pass of this
+            # call and reused by the later ones (the context is fixed within a call).
+            crossattn_caches = [[{"is_init": False} for _ in range(self.model.num_layers)] for _ in crossattn_caches]
 
         start_kv_event.record()
 
