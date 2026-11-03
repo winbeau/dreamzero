@@ -1215,11 +1215,25 @@ class CausalWanSelfAttention(nn.Module):
                             updated_anchor_route_indices,
                             validate_indices=False,
                         )
-                x = self.attn(
-                    torch.cat([roped_query, roped_action_query], dim=1),
-                    torch.cat([attention_k, roped_action_key], dim=1),
-                    torch.cat([attention_v, action_v], dim=1),
-                )
+                if getattr(self, "anchor_action_no_future", False):
+                    # S0-noF: video rows as routed; action / state rows over [context cache | action / state] only, so
+                    # no future token is among their keys (its attention weight is exactly 0).
+                    x_video = self.attn(
+                        roped_query,
+                        torch.cat([attention_k, roped_action_key], dim=1),
+                        torch.cat([attention_v, action_v], dim=1),
+                    )
+                    act_k = torch.cat([updated_k, roped_action_key], dim=1)
+                    x_action = self.attn(roped_action_query, act_k, torch.cat([updated_v, action_v], dim=1))
+                    x = torch.cat([x_video, x_action], dim=1)
+                    self.action_no_future_log.append(
+                        (int(updated_k.shape[1]), int(act_k.shape[1]), int(roped_action_key.shape[1])))
+                else:
+                    x = self.attn(
+                        torch.cat([roped_query, roped_action_query], dim=1),
+                        torch.cat([attention_k, roped_action_key], dim=1),
+                        torch.cat([attention_v, action_v], dim=1),
+                    )
             else:
                 x = self.attn(
                     roped_query,
@@ -1728,8 +1742,13 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         dense_first_frames: int = 0,
         selection: str = "action",
         random_seed: int = 0,
+        action_no_future: bool = False,
     ) -> None:
         """Configure sparse routing after loading an upstream checkpoint.
+
+        ``action_no_future`` (case study, S0-noF): the action and state rows see only the context cache (frame 0)
+        and themselves; the video rows keep the routed key set. Each call logs the action rows' key counts
+        (``anchor_action_no_future_log``).
 
         DreamZero nests the diffusion model inside the action-head config, so a
         post-load API is substantially less brittle than rewriting checkpoint
@@ -1789,6 +1808,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         sparse_end = len(self.blocks) - dense_suffix_layers
         for block_index, block in enumerate(self.blocks):
             block.self_attn.anchor_sparse_config = config
+            block.self_attn.anchor_action_no_future = bool(enabled and action_no_future)
+            block.self_attn.action_no_future_log = []
             block.self_attn.record_anchor_diagnostics = (
                 enabled
                 and (record_diagnostics or current_keep_ratio < 1.0)
@@ -1812,6 +1833,15 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 propagate_radius if should_propagate else 0
             )
         self.clear_anchor_sparse_route_cache()
+
+    def anchor_action_no_future_log(self, clear: bool = True) -> list[tuple[int, int, int]]:
+        """(context keys, action-row keys, action + state tokens) of every S0-noF attention call since the last clear."""
+
+        out = [entry for block in self.blocks for entry in getattr(block.self_attn, "action_no_future_log", [])]
+        if clear:
+            for block in self.blocks:
+                block.self_attn.action_no_future_log = []
+        return out
 
     def get_last_anchor_route(self) -> AnchorRoute | None:
         """Return the last recorded layer-0 route for heatmap diagnostics."""
