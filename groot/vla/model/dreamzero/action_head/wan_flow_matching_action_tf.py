@@ -200,8 +200,11 @@ class WANPolicyHead(ActionHead):
         self.language = None
         # Future injection (case study, future-inject-dz): clean latents [B, C, num_frame_per_block, h, w] that replace
         # the denoised video block of the next call (video timestep 0, never updated; only the action is denoised).
-        # None (the default) leaves lazy_joint_video_action unchanged.
+        # None (the default) leaves lazy_joint_video_action unchanged. With inject_future_renoise the block is instead
+        # re-noised at every step to the step's own noise level, (1 - sigma) z + sigma eps with the call's video noise
+        # eps, at the normal video timestep (video and action noise are coupled in training).
         self.inject_future_latents = None
+        self.inject_future_renoise = False
 
         self.ip_rank = 0
         self.ip_size = 1
@@ -1256,6 +1259,7 @@ class WANPolicyHead(ActionHead):
         noisy_input = noise_obs
         noisy_input_action = noise_action
         inject = self.inject_future_latents
+        renoise = inject is not None and bool(self.inject_future_renoise)
         if inject is not None:
             inject = inject.to(device=noise_obs.device, dtype=noise_obs.dtype).transpose(1, 2)
             if inject.shape != noise_obs.shape:
@@ -1306,7 +1310,10 @@ class WANPolicyHead(ActionHead):
                 [batch_size, self.num_frame_per_block],
                 device=noise_obs.device,
                 dtype=torch.int64,
-            ) * (0 if inject is not None else video_timestep)
+            ) * (0 if inject is not None and not renoise else video_timestep)
+            if renoise:
+                sigma = sample_scheduler.sigmas[index].float()
+                noisy_input = ((1 - sigma) * inject.float() + sigma * noise_obs.float()).to(noise_obs.dtype)
             timestep_action = torch.ones(
                 [batch_size, self.action_horizon],
                 device=noise_obs.device,
