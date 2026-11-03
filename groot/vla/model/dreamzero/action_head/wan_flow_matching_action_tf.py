@@ -198,6 +198,10 @@ class WANPolicyHead(ActionHead):
         self.ys = None
         self.current_start_frame = 0
         self.language = None
+        # Future injection (case study, future-inject-dz): clean latents [B, C, num_frame_per_block, h, w] that replace
+        # the denoised video block of the next call (video timestep 0, never updated; only the action is denoised).
+        # None (the default) leaves lazy_joint_video_action unchanged.
+        self.inject_future_latents = None
 
         self.ip_rank = 0
         self.ip_size = 1
@@ -591,7 +595,53 @@ class WANPolicyHead(ActionHead):
             # concat: B * (4+16) * (1+(T-1)/4) * H_latent * W_latent
             y = torch.concat([msk, y], dim=1)
         return clip_context, y, new_image
-    
+
+    def encode_future_clip(self, videos: torch.Tensor) -> torch.Tensor:
+        """Case study (future-inject-dz): VAE latents [B, C, 1 + (T-1)/4, h, w] of a clip of processed observations
+        ``videos`` [B, T, H, W, C] uint8 (the ``images`` of the transform chain, current frame first). Normalisation and
+        the target resize are lazy_joint_video_action's; the encode is encode_image's, without the zero frames."""
+        videos = rearrange(videos, "b t h w c -> b c t h w")
+        if videos.dtype == torch.uint8:
+            videos = videos.float() / 255.0
+            videos = videos.to(dtype=self.dtype)
+            b, c, t, h, w = videos.shape
+            videos = videos.permute(0, 2, 1, 3, 4)
+            videos = videos.reshape(b * t, c, h, w)
+            videos = self.normalize_video(videos)
+            videos = videos.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
+            videos = videos.to(dtype=self.dtype)
+        videos = videos.to(dtype=torch.bfloat16)
+        target_h = getattr(self.config, "target_video_height", None)
+        target_w = getattr(self.config, "target_video_width", None)
+        if target_h is None or target_w is None:
+            if getattr(self.model, "frame_seqlen", None) in (50, 55):
+                target_h, target_w = 176, 320
+            else:
+                target_h, target_w = None, None
+        if target_h is not None and target_w is not None:
+            _, _, _, h, w = videos.shape
+            if (h, w) != (target_h, target_w):
+                b, c, t, _, _ = videos.shape
+                videos = torch.nn.functional.interpolate(
+                    videos.reshape(b * t, c, h, w),
+                    size=(target_h, target_w),
+                    mode="bilinear",
+                    align_corners=False,
+                ).reshape(b, c, t, target_h, target_w)
+        with torch.amp.autocast(dtype=torch.bfloat16, device_type=torch.device(self._device).type):
+            self._ensure_vae_on_device(videos)
+            with torch.no_grad():
+                return self.vae.encode(videos)
+
+    def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
+        """Case study: VAE decode of latents [B, C, F, h, w] -> uint8 frames [B, T, H, W, 3]."""
+        with torch.amp.autocast(dtype=torch.bfloat16, device_type=torch.device(self._device).type):
+            self._ensure_vae_on_device(latents)
+            with torch.no_grad():
+                video = self.vae.decode(latents.to(torch.bfloat16))
+        video = ((video.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8)
+        return rearrange(video, "b c t h w -> b t h w c")
+
     def prepare_extra_input(self, latents=None):
         return {}
 
@@ -1205,6 +1255,12 @@ class WANPolicyHead(ActionHead):
 
         noisy_input = noise_obs
         noisy_input_action = noise_action
+        inject = self.inject_future_latents
+        if inject is not None:
+            inject = inject.to(device=noise_obs.device, dtype=noise_obs.dtype).transpose(1, 2)
+            if inject.shape != noise_obs.shape:
+                raise ValueError(f"inject_future_latents {tuple(inject.shape)} vs video block {tuple(noise_obs.shape)}")
+            noisy_input = inject
 
         # Step 3.1: Spatial denoising loop
 
@@ -1250,7 +1306,7 @@ class WANPolicyHead(ActionHead):
                 [batch_size, self.num_frame_per_block],
                 device=noise_obs.device,
                 dtype=torch.int64,
-            ) * video_timestep
+            ) * (0 if inject is not None else video_timestep)
             timestep_action = torch.ones(
                 [batch_size, self.action_horizon],
                 device=noise_obs.device,
@@ -1298,15 +1354,16 @@ class WANPolicyHead(ActionHead):
 
             end_diffusion_events[index].record()
 
-            # Video: denoising step (uses rescaled schedule if decoupled)
-            noisy_input = sample_scheduler.step(
-                model_output=flow_pred.transpose(1, 2),
-                timestep=video_timestep,
-                sample=noisy_input,
-                step_index=index,
-                return_dict=False,
-            )[0]
-            
+            # Video: denoising step (uses rescaled schedule if decoupled); an injected future stays fixed
+            if inject is None:
+                noisy_input = sample_scheduler.step(
+                    model_output=flow_pred.transpose(1, 2),
+                    timestep=video_timestep,
+                    sample=noisy_input,
+                    step_index=index,
+                    return_dict=False,
+                )[0]
+
             # Action: always fully denoises with standard schedule (1000->0)
             noisy_input_action = sample_scheduler_action.step(
                 model_output=flow_pred_cond_action,
