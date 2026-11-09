@@ -1056,7 +1056,9 @@ class WANPolicyHead(ActionHead):
         rec_d: dict = {}
         fv_all, _ = cs_run(r1["v"], r1["a"], r1["ts"][0], r1["ts"][1], (allrows, None, rec_d, late))
         x_all = cs_generality.tokens(r1["v"].float() - r1["sig_v"] * fv_all.float())
-        step1 = {"dense": {"shares": mean_rec(rec_d), "sdpa_vs_pass_rel": round(float((x_all - y).norm() / y.norm()), 6)}}
+        step1 = {"dense": {"shares": mean_rec(rec_d), "sdpa_vs_pass_rel": round(float((x_all - y).norm() / y.norm()), 6),
+                           "sdpa_kappa": round(cs_generality.kappa(x_all, y, z0t, allrows), 6),
+                           "sdpa_v_rel": round(float((fv_all.float() - r1["fv"].float()).norm() / r1["fv"].float().norm()), 6)}}
         n_sel, seed = int(cfg.get("n", 40)), int(cfg.get("seed", 1234))
         for name, rows in (("strat", cs_generality.strat_set(n_sel, n_fr, gh, gw, seed)),
                            ("near", cs_generality.strat_set(n_sel, n_fr, gh, gw, seed, frames=(0,)))):
