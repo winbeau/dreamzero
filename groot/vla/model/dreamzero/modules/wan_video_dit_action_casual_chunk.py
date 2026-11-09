@@ -297,6 +297,9 @@ class CausalWanSelfAttention(nn.Module):
         self.anchor_sparse_config = anchor_sparse_config
         self.record_anchor_diagnostics = record_anchor_diagnostics
         self.last_anchor_route: AnchorRoute | None = None
+        # case study (generality): the current block's video keys restricted to ``cs_select["idx"]`` (``CausalWanModel.set_cs_select``)
+        self.cs_select: dict | None = None
+        self.cs_layer = -1
         # layers
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -1215,7 +1218,10 @@ class CausalWanSelfAttention(nn.Module):
                             updated_anchor_route_indices,
                             validate_indices=False,
                         )
-                if getattr(self, "anchor_action_no_future", False):
+                if self.cs_select is not None:
+                    x = self._cs_attention(roped_query, roped_action_query, new_k, new_v, roped_action_key, action_v,
+                                           num_new_tokens)
+                elif getattr(self, "anchor_action_no_future", False):
                     # S0-noF: video rows as routed; action / state rows over [context cache | action / state] only, so
                     # no future token is among their keys (its attention weight is exactly 0).
                     x_video = self.attn(
@@ -1247,6 +1253,45 @@ class CausalWanSelfAttention(nn.Module):
         x = x.flatten(2)
         x = self.o(x)
         return x, updated_kv_cache, updated_anchor_route_indices
+
+
+    def _cs_attention(self, q_vid, q_act, new_k, new_v, k_act, v_act, n_new: int) -> torch.Tensor:
+        """case study (generality): attention of every new query (the block's video tokens, then action / state) over the history keys,
+        the block's video keys at ``cs_select["idx"]`` only (+ ``cs_select["bias"]`` on their logits) and the action / state keys; SDPA
+        with an additive key mask. The other video rows are still computed but no key reads them, so the selected rows and the action rows
+        equal a forward in which only the selected video tokens exist. ``cs_select["record"]`` (a dict of lists) and this layer in
+        ``cs_select["layers"]``: the selected rows' head-mean attention on themselves and on their same-frame 3 x 3 neighbours of the same
+        view (``cs_select["grid"]`` = (frame tokens, grid width, view width)), over every key and within the block's video keys."""
+        cs = self.cs_select
+        hist = int(new_k.shape[1]) - n_new
+        idx = cs["idx"].to(new_k.device)
+        n = int(idx.numel())
+        keys = torch.cat([new_k[:, :hist], new_k[:, hist + idx], k_act], dim=1)
+        vals = torch.cat([new_v[:, :hist], new_v[:, hist + idx], v_act], dim=1)
+        q = torch.cat([q_vid, q_act], dim=1)
+        mask = torch.zeros(int(keys.shape[1]), device=q.device, dtype=torch.float32)
+        if cs.get("bias") is not None and n:
+            mask[hist:hist + n] = cs["bias"].to(q.device).float()
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), keys.transpose(1, 2), vals.transpose(1, 2), attn_mask=mask.to(q.dtype)[None, None, None, :])
+        rec = cs.get("record")
+        if rec is not None and n and self.cs_layer in cs.get("layers", ()):
+            fs, gw, vw = cs["grid"]
+            qs = q_vid[:, idx].transpose(1, 2).float()  # [B, H, n, D]
+            logits = qs @ keys.transpose(1, 2).float().transpose(-1, -2) * (qs.shape[-1] ** -0.5) + mask
+            pk = torch.softmax(logits, dim=-1).mean(dim=1)[0][:, hist:hist + n]  # [n, n] over every key
+            fr, rem = idx // fs, idx % fs
+            hh, ww = rem // gw, rem % gw
+            view = ww // vw
+            eye = idx[:, None] == idx[None]
+            near = (fr[:, None] == fr[None]) & (view[:, None] == view[None]) & ((hh[:, None] - hh[None]).abs() <= 1) & (
+                (ww[:, None] - ww[None]).abs() <= 1) & ~eye
+            fut = pk.sum(dim=1).clamp_min(1e-12)
+            se, ne = (pk * eye).sum(dim=1), (pk * near).sum(dim=1)
+            for k_, v_ in (("self_all", se.mean()), ("near_all", ne.mean()), ("self_fut", (se / fut).mean()),
+                           ("near_fut", (ne / fut).mean())):
+                rec.setdefault(k_, []).append(float(v_))
+        return out.transpose(1, 2)
 
 
 class CausalWanAttentionBlock(nn.Module):
@@ -1709,6 +1754,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.gradient_checkpointing = True
         self.independent_first_frame = False if self.num_frame_per_block == 1 else True
 
+
+    def set_cs_select(self, cs: dict | None) -> None:
+        """case study (generality): the current block's video key selection of every self-attention layer (None: off)."""
+        for i, block in enumerate(self.blocks):
+            block.self_attn.cs_select = cs
+            block.self_attn.cs_layer = i
 
     def clear_anchor_sparse_route_cache(self) -> None:
         """Clear per-control-block anchor indices, e.g. at an episode reset."""

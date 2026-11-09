@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import logging
+import math
 import time
 from typing import TypeAlias, cast
 import os
@@ -48,6 +49,7 @@ from groot.vla.model.dreamzero.modules.flow_match_scheduler import FlowMatchSche
 from groot.vla.model.dreamzero.modules.vram_management import enable_vram_management, AutoWrappedModule, AutoWrappedLinear
 from groot.vla.model.dreamzero.modules.wan_video_text_encoder import T5RelativeEmbedding, T5LayerNorm
 from groot.vla.model.dreamzero.modules.flow_unipc_multistep_scheduler import FlowUniPCMultistepScheduler
+from groot.vla.model.dreamzero.action_head import cs_generality
 
 
 KVCacheType: TypeAlias = torch.Tensor
@@ -205,6 +207,11 @@ class WANPolicyHead(ActionHead):
         # eps, at the normal video timestep (video and action noise are coupled in training).
         self.inject_future_latents = None
         self.inject_future_renoise = False
+        # Case study, generality (cs_generality.py): the JUMP-sparse arm (``cs_jump`` dict) or the dense diagnostics (``cs_gen`` dict);
+        # None (the default) leaves lazy_joint_video_action unchanged. ``cs_last_diag``: what the last call logged.
+        self.cs_jump = None
+        self.cs_gen = None
+        self.cs_last_diag = None
 
         self.ip_rank = 0
         self.ip_size = 1
@@ -1005,6 +1012,85 @@ class WANPolicyHead(ActionHead):
         assert all(isinstance(pred, tuple) for pred in output_predictions)
         return cast(list[tuple[torch.Tensor, torch.Tensor]], output_predictions)
     
+    def _cs_continue(self, rec: list, s: int, xh: torch.Tensor, cs_run) -> torch.Tensor:
+        """Case study, generality: the call continued from step ``s``'s recorded state (copied solvers) with the action clean estimate
+        ``xh`` [B, T, A] on step s (velocity (x - xh) / sigma, the video velocity as recorded); later steps run the DiT on the
+        ``dit_step_mask`` steps and reuse the last velocities otherwise (the native schedule) -> the final action latents (fp32)."""
+        sch_v, sch_a = cs_generality.copy.deepcopy(rec[s]["sch"]), cs_generality.copy.deepcopy(rec[s]["sch_a"])
+        xv, xa = rec[s]["v"], rec[s]["a"]
+        fa = ((xa.float() - xh) / rec[s]["sig_a"]).to(xa.dtype)
+        last = (rec[s]["fv"], rec[s]["fa"])
+        xv = sch_v.step(model_output=rec[s]["fv"], timestep=rec[s]["ts_raw"][0], sample=xv, step_index=s, return_dict=False)[0]
+        xa = sch_a.step(model_output=fa, timestep=rec[s]["ts_raw"][1], sample=xa, step_index=s, return_dict=False)[0]
+        for s2 in range(s + 1, len(rec)):
+            if self.dit_step_mask[s2]:
+                last = cs_run(xv, xa, rec[s2]["ts"][0], rec[s2]["ts"][1], None)
+            xv = sch_v.step(model_output=last[0], timestep=rec[s2]["ts_raw"][0], sample=xv, step_index=s2, return_dict=False)[0]
+            xa = sch_a.step(model_output=last[1], timestep=rec[s2]["ts_raw"][1], sample=xa, step_index=s2, return_dict=False)[0]
+        return xa.float()
+
+    def _cs_gen(self, rec: list, z0_lat: torch.Tensor, cs_run, n_fr: int, gh: int, gw: int, cfg: dict) -> dict:
+        """Case study, generality: the dense call's diagnostics (cs_generality.py): F(s); step 1's sparse forwards (kappa_1, late-layer
+        shares; the all-token SDPA forward against the pass); c(s) / c_grip(s) on the DiT steps (normalized action finals, perturbed
+        clean estimates; the adapter converts them to simulator units)."""
+        import base64
+
+        import numpy as np
+
+        def b64(x):
+            return base64.b64encode(x.detach().float().cpu().numpy().astype(np.float32).tobytes()).decode()
+
+        n_tok = n_fr * gh * gw
+        z0t = cs_generality.tokens(z0_lat).repeat(n_fr, 1)
+        out = {"F": cs_generality.f_curve(rec, z0t, n_fr, gh, gw), "sigma_v": [r["sig_v"] for r in rec],
+               "sigma_a": [r["sig_a"] for r in rec], "ran": [r["ran"] for r in rec], "grid": [n_fr, gh, gw]}
+        n_layers = len(self.model.blocks)
+        late = tuple(range(*cfg.get("late_layers", (n_layers - 10, n_layers))))
+        r1 = rec[1]
+        y = cs_generality.tokens(r1["v"].float() - r1["sig_v"] * r1["fv"].float())
+        allrows = torch.arange(n_tok)
+
+        def mean_rec(d):
+            return {k: round(sum(v) / len(v), 6) for k, v in d.items() if v}
+
+        rec_d: dict = {}
+        fv_all, _ = cs_run(r1["v"], r1["a"], r1["ts"][0], r1["ts"][1], (allrows, None, rec_d, late))
+        x_all = cs_generality.tokens(r1["v"].float() - r1["sig_v"] * fv_all.float())
+        step1 = {"dense": {"shares": mean_rec(rec_d), "sdpa_vs_pass_rel": round(float((x_all - y).norm() / y.norm()), 6)}}
+        n_sel, seed = int(cfg.get("n", 40)), int(cfg.get("seed", 1234))
+        for name, rows in (("strat", cs_generality.strat_set(n_sel, n_fr, gh, gw, seed)),
+                           ("near", cs_generality.strat_set(n_sel, n_fr, gh, gw, seed, frames=(0,)))):
+            rec_s: dict = {}
+            bias = torch.full((int(rows.numel()),), math.log(n_tok / int(rows.numel())))
+            fv_s, _ = cs_run(r1["v"], r1["a"], r1["ts"][0], r1["ts"][1], (rows, bias, rec_s, late))
+            xs = cs_generality.tokens(r1["v"].float() - r1["sig_v"] * fv_s.float())
+            step1[name] = {"n": int(rows.numel()), "kappa": round(cs_generality.kappa(xs, y, z0t, rows), 6), "shares": mean_rec(rec_s),
+                           "e_x": round(float((xs[rows] - y[rows]).norm() / y[rows].norm()), 6)}
+        out["step1"] = step1
+        eps = tuple(float(x) for x in cfg.get("eps", (0.05, -0.05)))
+        grip = tuple(float(x) for x in cfg.get("grip_eps", (0.2, -0.2)))
+        n_exec, gd = int(cfg.get("executed", 10)), int(cfg.get("grip_dim", 6))
+        steps_c = [s for s in range(len(rec)) if rec[s]["ran"]] if cfg.get("c_steps") is None else [int(x) for x in cfg["c_steps"]]
+        actions, c_grip = {}, {f"{g:g}": [] for g in grip}
+        for s in steps_c:
+            x0a = rec[s]["a"].float() - rec[s]["sig_a"] * rec[s]["fa"].float()
+            actions[f"d@{s}"] = x0a[0]
+            base = self._cs_continue(rec, s, x0a, cs_run)
+            actions[f"c0@{s}"] = base[0]
+            for e in eps:
+                xh = x0a.clone()
+                xh[0, :n_exec, :3] = (1.0 + e) * x0a[0, :n_exec, :3]
+                actions[f"p{e:g}@{s}"] = xh[0]
+                actions[f"c{e:g}@{s}"] = self._cs_continue(rec, s, xh, cs_run)[0]
+            for g in grip:
+                xh = x0a.clone()
+                xh[0, :n_exec, gd] = x0a[0, :n_exec, gd] + g
+                fin = self._cs_continue(rec, s, xh, cs_run)
+                c_grip[f"{g:g}"].append(round(float((fin[0, :n_exec, gd] - base[0, :n_exec, gd]).mean() / g), 6))
+        out.update(c_steps=steps_c, c_grip=c_grip, n_exec=n_exec, eps=list(eps), grip_eps=list(grip),
+                   actions={k: b64(v) for k, v in actions.items()})
+        return out
+
     def should_run_model(self, index, current_timestep, prev_predictions):
 
         if not self.dynamic_cache_schedule:
@@ -1295,6 +1381,40 @@ class WANPolicyHead(ActionHead):
 
         start_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in sample_scheduler.timesteps]
         end_diffusion_events = [torch.cuda.Event(enable_timing=True) for _ in sample_scheduler.timesteps]
+        # Case study, generality: the JUMP-sparse arm or the dense diagnostics' per-step record (cs_generality.py).
+        cs_jump_cfg, cs_gen_cfg = self.cs_jump, self.cs_gen
+        self.cs_last_diag = None
+        n_steps_cs = len(sample_scheduler.timesteps)
+        n_fr, cs_gh, cs_gw = int(noise_obs.shape[1]), int(noise_obs.shape[3]) // 2, int(noise_obs.shape[4]) // 2
+        z0_lat = image[:, -1:]
+        jst = cs_generality.JumpState(cs_jump_cfg, n_fr, cs_gh, cs_gw) if cs_jump_cfg is not None else None
+        gen_rec = [] if cs_gen_cfg is not None else None
+        if self.current_start_frame + self.num_frame_per_block <= self.ys.shape[2]:
+            y_blk = self.ys[:, :, self.current_start_frame : self.current_start_frame + self.num_frame_per_block]
+        else:
+            y_blk = self.ys[:, :, -self.num_frame_per_block:]
+
+        def cs_run(nv, na, ts_v_t, ts_a_t, sel):
+            """The DiT on video latents ``nv`` [B, F, C, H, W] and actions ``na`` (cond + uncond), the block's video keys restricted
+            to ``sel`` = (rows, bias, record, layers) or all (None) -> (CFG video velocity [B, F, C, H, W], cond action velocity)."""
+            preds = []
+            for pi, prompt_emb in enumerate(prompt_embs):
+                cs = None
+                if sel is not None:
+                    cs = {"idx": sel[0], "bias": sel[1], "record": sel[2] if pi == 0 else None, "layers": sel[3] if len(sel) > 3 else (),
+                          "grid": (cs_gh * cs_gw, cs_gw, cs_gw // 2)}
+                self.model.set_cs_select(cs)
+                try:
+                    obs_p, act_p, _ = self.model(nv.transpose(1, 2), ts_v_t, action=na, timestep_action=ts_a_t, state=state_features,
+                                                 embodiment_id=embodiment_id, context=prompt_emb, seq_len=seq_len, y=y_blk,
+                                                 clip_feature=self.clip_feas, kv_cache=kv_caches[pi], crossattn_cache=crossattn_caches[pi],
+                                                 current_start_frame=self.current_start_frame)
+                finally:
+                    self.model.set_cs_select(None)
+                preds.append((obs_p, act_p))
+            fv = preds[0][0] if len(preds) == 1 else preds[1][0] + self.cfg_scale * (preds[0][0] - preds[1][0])
+            return fv.transpose(1, 2), preds[0][1]
+
         prev_predictions = [] 
         self.skip_countdown = 0
         dit_compute_steps = 0
@@ -1319,6 +1439,24 @@ class WANPolicyHead(ActionHead):
                 device=noise_obs.device,
                 dtype=torch.int64,
             ) * action_timestep
+
+            if jst is not None:
+                # JUMP-sparse: the DiT on steps 0, 1 and the last only, each with its block video key set (cs_generality.JumpState)
+                rows, bias = jst.select(index, n_steps_cs)
+                if rows is not None:
+                    fv_m, act_flow = cs_run(noisy_input, noisy_input_action, timestep, timestep_action, (rows, bias, None))
+                    jst.runs.append([int(index), int(rows.numel())])
+                    if index == 1:
+                        jst.act = act_flow
+                else:
+                    fv_m, act_flow = None, jst.act
+                v_vid = jst.video_flow(index, n_steps_cs, noisy_input, float(sample_scheduler.sigmas[index]), fv_m, z0_lat)
+                noisy_input = sample_scheduler.step(model_output=v_vid, timestep=video_timestep, sample=noisy_input,
+                                                    step_index=index, return_dict=False)[0]
+                noisy_input_action = sample_scheduler_action.step(model_output=act_flow, timestep=action_timestep,
+                                                                  sample=noisy_input_action, step_index=index, return_dict=False)[0]
+                end_diffusion_events[index].record()
+                continue
 
             # check if we need to run the DIT step
             should_run_model = self.should_run_model(index, current_timestep, prev_predictions)
@@ -1360,6 +1498,14 @@ class WANPolicyHead(ActionHead):
                 _, flow_pred, flow_pred_cond_action = prev_predictions[-1]
 
             end_diffusion_events[index].record()
+            if gen_rec is not None:
+                # dense diagnostics: this step's state, velocities and (copied) solver states, before the solvers step
+                gen_rec.append({"v": noisy_input.clone(), "a": noisy_input_action.clone(), "fv": flow_pred.transpose(1, 2).clone(),
+                                "fa": flow_pred_cond_action.clone(), "sig_v": float(sample_scheduler.sigmas[index]),
+                                "sig_a": float(sample_scheduler_action.sigmas[index]), "ts": (timestep.clone(), timestep_action.clone()),
+                                "ts_raw": (video_timestep, action_timestep), "ran": bool(should_run_model),
+                                "sch": cs_generality.copy.deepcopy(sample_scheduler),
+                                "sch_a": cs_generality.copy.deepcopy(sample_scheduler_action)})
 
             # Video: denoising step (uses rescaled schedule if decoupled); an injected future stays fixed
             if inject is None:
@@ -1383,6 +1529,11 @@ class WANPolicyHead(ActionHead):
         latents = noisy_input
         latents_action = noisy_input_action
         output = latents
+        if jst is not None:
+            self.cs_last_diag = {"jump": {"runs": jst.runs, "s1": jst.s1.tolist(), "last": jst.last.tolist(), "cfg": dict(cs_jump_cfg),
+                                          "steps": n_steps_cs, "cfg_passes": len(prompt_embs)}}
+        if gen_rec is not None:
+            self.cs_last_diag = {"gen": self._cs_gen(gen_rec, z0_lat, cs_run, n_fr, cs_gh, cs_gw, cs_gen_cfg)}
 
         if self.current_start_frame == 1:
             output = torch.cat([image, output], dim=1)
