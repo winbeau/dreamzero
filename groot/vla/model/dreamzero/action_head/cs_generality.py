@@ -91,26 +91,50 @@ def pixel_mask(rows: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
 
 
 class JumpState:
-    """The JUMP-sparse arm across the steps of one call."""
+    """The JUMP-sparse arm across the steps of one call.
+
+    dz-cause (2026-11-09) switches, all off by default (= generality's JN arms): ``mode: r`` (the R arm: the native dense schedule on
+    steps 0 .. last-1, only the last step reads ``last``; the loop handles it, ``native``); ``anchor: dense`` (step 1 runs the native
+    DiT on every block video key, the draft = every token's clean estimate x ``gain``, no spread, no extrapolation); ``extra``
+    (steps that also run the DiT on ``last``, as the last step: its tokens and the action take the model's velocity, the rest stays
+    on the draft); ``record_draft`` (the near frame's draft and current-frame tokens are logged)."""
+
+    MODES, ANCHORS = ("jump", "r"), ("near", "dense")
 
     def __init__(self, cfg: dict, n_frames: int, gh: int, gw: int):
         self.cfg, self.n_frames, self.gh, self.gw = cfg, n_frames, gh, gw
         per = gh * gw
+        self.mode, self.anchor = str(cfg.get("mode", "jump")), str(cfg.get("anchor", "near"))
+        if self.mode not in self.MODES or self.anchor not in self.ANCHORS:
+            raise ValueError(f"cs_jump: mode {self.mode!r} / anchor {self.anchor!r} not in {self.MODES} / {self.ANCHORS}")
+        self.extra = sorted({int(x) for x in cfg.get("extra", ())})
+        self.native = self.mode == "r"
         self.s1 = strat_set(int(cfg.get("s1", 40)), n_frames, gh, gw, int(cfg.get("seed", 1234)), frames=(0,))
         self.last = strat_set(int(cfg.get("last", per // 2)), n_frames, gh, gw, int(cfg.get("seed", 1234)) + 1, frames=(0,))
         self.draft = None
         self.act = None
         self.runs: list = []
+        self.rec: dict = {}
+
+    def last_bias(self) -> torch.Tensor:
+        n_tok = self.n_frames * self.gh * self.gw
+        return torch.full((int(self.last.numel()),), math.log(n_tok / int(self.last.numel())))
+
+    def reads_last(self, index: int, n_steps: int) -> bool:
+        return index == n_steps - 1 or index in self.extra
 
     def select(self, index: int, n_steps: int):
-        """The block video keys of the DiT on step ``index`` (None: no DiT on this step)."""
+        """The block video keys of the DiT on step ``index`` (None: no DiT on this step; "all": the native DiT, every key)."""
         n_tok = self.n_frames * self.gh * self.gw
         if index == 0:
             return torch.zeros(0, dtype=torch.long), None
-        rows = self.s1 if index == 1 else (self.last if index == n_steps - 1 else None)
-        if rows is None:
-            return None, None
-        return rows, torch.full((int(rows.numel()),), math.log(n_tok / int(rows.numel())))
+        if index == 1:
+            if self.anchor == "dense":
+                return "all", None
+            return self.s1, torch.full((int(self.s1.numel()),), math.log(n_tok / int(self.s1.numel())))
+        if self.reads_last(index, n_steps):
+            return self.last, self.last_bias()
+        return None, None
 
     def video_flow(self, index: int, n_steps: int, sample: torch.Tensor, sigma: float, model_flow, z0: torch.Tensor) -> torch.Tensor:
         """The video velocity of step ``index`` [B, F, C, H, W] (fp32 -> sample dtype)."""
@@ -120,15 +144,28 @@ class JumpState:
             x0 = tokens(sample.float() - sigma * model_flow.float())
             z0t = tokens(z0).repeat(self.n_frames, 1) if z0.shape[1] == 1 else tokens(z0)
             g = float(self.cfg.get("gain", 1.0))
-            zf = z0t.clone()
-            zf[self.s1] = z0t[self.s1] + g * (x0[self.s1] - z0t[self.s1])
-            d = spread(zf, self.s1, z0t, self.n_frames, self.gh, self.gw, float(self.cfg.get("far_lambda", 0.5)))
+            if self.anchor == "dense":  # dz-cause D: every token's own clean estimate, no spread / extrapolation
+                d = z0t + g * (x0 - z0t)
+            else:
+                zf = z0t.clone()
+                zf[self.s1] = z0t[self.s1] + g * (x0[self.s1] - z0t[self.s1])
+                d = spread(zf, self.s1, z0t, self.n_frames, self.gh, self.gw, float(self.cfg.get("far_lambda", 0.5)))
             self.draft = untokens(d, sample).to(sample.device)
+            if self.cfg.get("record_draft"):
+                per = self.gh * self.gw
+                self.rec = {"draft_near_f16": f16_b64(d[:per]), "z0_near_f16": f16_b64(z0t[:per]), "shape": [per, int(d.shape[1])]}
         v = (sample.float() - self.draft) / sigma
-        if index == n_steps - 1:
+        if self.reads_last(index, n_steps):
             m = pixel_mask(self.last, sample)
             v = torch.where(m, model_flow.float(), v)
         return v.to(sample.dtype)
+
+
+def f16_b64(x: torch.Tensor) -> str:
+    """A tensor as base64 float16 bytes (row-major), for the probe logs."""
+    import base64
+
+    return base64.b64encode(x.detach().float().cpu().half().numpy().tobytes()).decode()
 
 
 def kappa(xs: torch.Tensor, y: torch.Tensor, z0: torch.Tensor, rows: torch.Tensor) -> float:

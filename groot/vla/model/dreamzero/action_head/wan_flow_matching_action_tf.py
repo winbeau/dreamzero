@@ -1390,7 +1390,9 @@ class WANPolicyHead(ActionHead):
         n_fr, cs_gh, cs_gw = int(noise_obs.shape[1]), int(noise_obs.shape[3]) // 2, int(noise_obs.shape[4]) // 2
         z0_lat = image[:, -1:]
         jst = cs_generality.JumpState(cs_jump_cfg, n_fr, cs_gh, cs_gw) if cs_jump_cfg is not None else None
-        gen_rec = [] if cs_gen_cfg is not None else None
+        x0_last = cs_gen_cfg is not None and bool(cs_gen_cfg.get("x0_last"))  # dz-cause: only the last step's clean estimate is logged
+        gen_rec = [] if cs_gen_cfg is not None and not x0_last else None
+        x0_rec: dict = {}
         if self.current_start_frame + self.num_frame_per_block <= self.ys.shape[2]:
             y_blk = self.ys[:, :, self.current_start_frame : self.current_start_frame + self.num_frame_per_block]
         else:
@@ -1442,10 +1444,14 @@ class WANPolicyHead(ActionHead):
                 dtype=torch.int64,
             ) * action_timestep
 
-            if jst is not None:
+            if jst is not None and not jst.native:
                 # JUMP-sparse: the DiT on steps 0, 1 and the last only, each with its block video key set (cs_generality.JumpState)
                 rows, bias = jst.select(index, n_steps_cs)
-                if rows is not None:
+                if isinstance(rows, str):  # dz-cause anchor dense: the native DiT on every block video key
+                    fv_m, act_flow = cs_run(noisy_input, noisy_input_action, timestep, timestep_action, None)
+                    jst.runs.append([int(index), int(n_fr * cs_gh * cs_gw)])
+                    jst.act = act_flow
+                elif rows is not None:
                     fv_m, act_flow = cs_run(noisy_input, noisy_input_action, timestep, timestep_action, (rows, bias, None))
                     jst.runs.append([int(index), int(rows.numel())])
                     if index == 1:
@@ -1460,9 +1466,22 @@ class WANPolicyHead(ActionHead):
                 end_diffusion_events[index].record()
                 continue
 
+            # dz-cause R: the native schedule, but the last step reads only the near-frame set ``last`` (key + log(N / n)); its
+            # tokens and the action take the model's velocity, every other video token keeps the last prediction (native reuse)
+            r_last = jst is not None and jst.native and index == n_steps_cs - 1
             # check if we need to run the DIT step
-            should_run_model = self.should_run_model(index, current_timestep, prev_predictions)
-            if should_run_model:
+            should_run_model = False if r_last else self.should_run_model(index, current_timestep, prev_predictions)
+            if r_last:
+                assert len(prev_predictions) > 0, "the R arm's last step needs a previous prediction"
+                fv_m, act_p = cs_run(noisy_input, noisy_input_action, timestep, timestep_action, (jst.last, jst.last_bias(), None))
+                jst.runs.append([int(index), int(jst.last.numel())])
+                prev_v = prev_predictions[-1][1].transpose(1, 2)
+                m_last = cs_generality.pixel_mask(jst.last, noisy_input)
+                flow_pred = torch.where(m_last, fv_m.to(prev_v.dtype), prev_v).transpose(1, 2)
+                flow_pred_cond_action = act_p
+            elif should_run_model:
+                if jst is not None:  # R: the native steps, every block video key
+                    jst.runs.append([int(index), int(n_fr * cs_gh * cs_gw)])
                 dit_compute_steps += 1
                 if self.current_start_frame + self.num_frame_per_block <= self.ys.shape[2]:
                     y = self.ys[:, :, self.current_start_frame : self.current_start_frame + self.num_frame_per_block]
@@ -1500,6 +1519,12 @@ class WANPolicyHead(ActionHead):
                 _, flow_pred, flow_pred_cond_action = prev_predictions[-1]
 
             end_diffusion_events[index].record()
+            if x0_last and index == n_steps_cs - 1:
+                # dz-cause: the dense last step's clean estimate of the near frame and the current frame (f16), for the draft cosines
+                per_ = cs_gh * cs_gw
+                x0t = cs_generality.tokens(noisy_input.float() - float(sample_scheduler.sigmas[index]) * flow_pred.transpose(1, 2).float())
+                x0_rec = {"x0_near_f16": cs_generality.f16_b64(x0t[:per_]),
+                          "z0_near_f16": cs_generality.f16_b64(cs_generality.tokens(z0_lat)[:per_]), "shape": [per_, int(x0t.shape[1])]}
             if gen_rec is not None:
                 # dense diagnostics: this step's state, velocities and (copied) solver states, before the solvers step
                 gen_rec.append({"v": noisy_input.clone(), "a": noisy_input_action.clone(), "fv": flow_pred.transpose(1, 2).clone(),
@@ -1533,7 +1558,9 @@ class WANPolicyHead(ActionHead):
         output = latents
         if jst is not None:
             self.cs_last_diag = {"jump": {"runs": jst.runs, "s1": jst.s1.tolist(), "last": jst.last.tolist(), "cfg": dict(cs_jump_cfg),
-                                          "steps": n_steps_cs, "cfg_passes": len(prompt_embs)}}
+                                          "steps": n_steps_cs, "cfg_passes": len(prompt_embs), **({"rec": jst.rec} if jst.rec else {})}}
+        if x0_last:
+            self.cs_last_diag = {"x0_last": x0_rec}
         if gen_rec is not None:
             self.cs_last_diag = {"gen": self._cs_gen(gen_rec, z0_lat, cs_run, n_fr, cs_gh, cs_gw, cs_gen_cfg)}
 
