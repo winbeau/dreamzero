@@ -111,12 +111,26 @@ class JumpState:
         self.native = self.mode == "r"
         self.s1 = strat_set(int(cfg.get("s1", 40)), n_frames, gh, gw, int(cfg.get("seed", 1234)), frames=(0,))
         self.last = strat_set(int(cfg.get("last", per // 2)), n_frames, gh, gw, int(cfg.get("seed", 1234)) + 1, frames=(0,))
+        # chain2-curves (2026-11-10): the last step's near-frame set and per-key bias given explicitly (the adapter builds them from
+        # the call's body mask); ``record_recv``: the attention every read key receives on the last step (sink finding)
+        self._last_bias = None
+        if cfg.get("last_rows") is not None:
+            rows = [int(x) for x in cfg["last_rows"]]
+            bias = [float(x) for x in cfg.get("last_bias") or ()]
+            if not rows or len(set(rows)) != len(rows) or min(rows) < 0 or max(rows) >= per or len(bias) != len(rows):
+                raise ValueError("cs_jump last_rows: distinct near-frame tokens with one last_bias each")
+            order = sorted(range(len(rows)), key=lambda i: rows[i])
+            self.last = torch.tensor([rows[i] for i in order], dtype=torch.long)
+            self._last_bias = torch.tensor([bias[i] for i in order], dtype=torch.float32)
+        self.record_recv = bool(cfg.get("record_recv", False))
         self.draft = None
         self.act = None
         self.runs: list = []
         self.rec: dict = {}
 
     def last_bias(self) -> torch.Tensor:
+        if self._last_bias is not None:
+            return self._last_bias.clone()
         n_tok = self.n_frames * self.gh * self.gw
         return torch.full((int(self.last.numel()),), math.log(n_tok / int(self.last.numel())))
 

@@ -1406,7 +1406,7 @@ class WANPolicyHead(ActionHead):
                 cs = None
                 if sel is not None:
                     cs = {"idx": sel[0], "bias": sel[1], "record": sel[2] if pi == 0 else None, "layers": sel[3] if len(sel) > 3 else (),
-                          "grid": (cs_gh * cs_gw, cs_gw, cs_gw // 2)}
+                          "grid": (cs_gh * cs_gw, cs_gw, cs_gw // 2), "recv": bool(sel[4]) if len(sel) > 4 and pi == 0 else False}
                 self.model.set_cs_select(cs)
                 try:
                     obs_p, act_p, _ = self.model(nv.transpose(1, 2), ts_v_t, action=na, timestep_action=ts_a_t, state=state_features,
@@ -1473,7 +1473,13 @@ class WANPolicyHead(ActionHead):
             should_run_model = False if r_last else self.should_run_model(index, current_timestep, prev_predictions)
             if r_last:
                 assert len(prev_predictions) > 0, "the R arm's last step needs a previous prediction"
-                fv_m, act_p = cs_run(noisy_input, noisy_input_action, timestep, timestep_action, (jst.last, jst.last_bias(), None))
+                rec_r = {} if jst.record_recv else None  # chain2-curves: the attention each read key receives (sink finding)
+                fv_m, act_p = cs_run(noisy_input, noisy_input_action, timestep, timestep_action,
+                                     (jst.last, jst.last_bias(), rec_r, tuple(range(len(self.model.blocks))) if rec_r is not None else (),
+                                      rec_r is not None))
+                if rec_r is not None and rec_r.get("recv"):
+                    jst.rec.update(recv_near=[round(float(v), 6) for v in torch.tensor(rec_r["recv"]).mean(dim=0)],
+                                   recv_rows=jst.last.tolist(), recv_layers=len(rec_r["recv"]))
                 jst.runs.append([int(index), int(jst.last.numel())])
                 prev_v = prev_predictions[-1][1].transpose(1, 2)
                 m_last = cs_generality.pixel_mask(jst.last, noisy_input)

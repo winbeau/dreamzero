@@ -58,3 +58,20 @@ def test_dense_anchor_draft_is_the_clean_estimate_and_extra_reads_the_model():
     s = cg.JumpState(dict(JN105), F, GH, GW)
     s.video_flow(1, 16, sample, sig, flow, z0)
     assert not s.rec and not torch.allclose(s.draft, sample - sig * flow)  # the near arm spreads from its 40 tokens
+
+
+def test_explicit_last_rows_and_bias():
+    """chain2-curves: the R arm's last-step set and per-key bias given explicitly (any order in, sorted out); off = unchanged."""
+    base = cg.JumpState({"mode": "r", "last": 50, "seed": 1234}, F, GH, GW)
+    assert torch.equal(base.last, torch.arange(50)) and torch.allclose(base.last_bias(), torch.full((50,), math.log(2.0)))
+    assert not base.record_recv and base._last_bias is None
+    rows, bias = [12, 3, 40, 7], [0.5, 0.1, 0.7, 0.2]
+    js = cg.JumpState({"mode": "r", "last": 50, "seed": 1234, "last_rows": rows, "last_bias": bias, "record_recv": True}, F, GH, GW)
+    assert js.native and js.record_recv
+    assert js.last.tolist() == [3, 7, 12, 40] and js.last_bias().tolist() == pytest.approx([0.1, 0.2, 0.5, 0.7])
+    r, b = js.select(15, 16)
+    assert torch.equal(r, js.last) and torch.allclose(b, js.last_bias())
+    for bad in ({"last_rows": [1, 1], "last_bias": [0, 0]}, {"last_rows": [50], "last_bias": [0]}, {"last_rows": [1, 2], "last_bias": [0]},
+                {"last_rows": [], "last_bias": []}):
+        with pytest.raises(ValueError):
+            cg.JumpState({"mode": "r", **bad}, F, GH, GW)

@@ -1275,6 +1275,12 @@ class CausalWanSelfAttention(nn.Module):
         out = torch.nn.functional.scaled_dot_product_attention(
             q.transpose(1, 2), keys.transpose(1, 2), vals.transpose(1, 2), attn_mask=mask.to(q.dtype)[None, None, None, :])
         rec = cs.get("record")
+        if rec is not None and n and cs.get("recv"):
+            # chain2-curves (sink finding): every selected key's attention received from the selected video rows and the action / state
+            # rows (the unselected video rows are computed but read by nobody), head mean, beside the SDPA pass; one list per layer.
+            qa = torch.cat([q_vid[:, idx], q_act], dim=1).transpose(1, 2).float()  # [B, H, Q, D]
+            lg = qa @ keys.transpose(1, 2).float().transpose(-1, -2) * (qa.shape[-1] ** -0.5) + mask
+            rec.setdefault("recv", []).append(torch.softmax(lg, dim=-1).mean(dim=1)[0][:, hist:hist + n].sum(dim=0).cpu().tolist())
         if rec is not None and n and self.cs_layer in cs.get("layers", ()):
             fs, gw, vw = cs["grid"]
             qs = q_vid[:, idx].transpose(1, 2).float()  # [B, H, n, D]
